@@ -17,7 +17,6 @@ mod tests;
 pub(crate) use ai_hub::run_cli_ai_hub;
 pub(crate) use chat::run_cli_chat;
 pub(crate) use context::run_cli_context;
-pub(crate) use gateway::run_cli_gateway_hub;
 pub(crate) use help::print_cli_help;
 pub(crate) use launcher::run_cli_launcher;
 pub(crate) use mcp::run_cli_mcp_hub;

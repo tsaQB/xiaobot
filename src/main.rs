@@ -232,10 +232,8 @@ async fn main() {
             return;
         }
         Some("gateway") => {
-            let action_arg = args.get(2).map(|s| s.as_str());
-            let target_arg = args.get(3).map(|s| s.as_str());
-            let extra_arg = args.get(4).map(|s| s.as_str());
-            run_cli_gateway_hub(action_arg, target_arg, extra_arg).await;
+            let action = cli::gateway::parse_gateway_cli_args(&args[2..]);
+            cli::gateway::run_cli_gateway_hub(action).await;
             return;
         }
         Some("search") => {

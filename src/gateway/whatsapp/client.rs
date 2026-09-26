@@ -100,6 +100,24 @@ impl WhatsAppClientRunner {
 
                 info!("💬 [WA INTAKE] dari [{sender_id}] di [{chat_id}]: {trimmed}");
 
+                let mut image_bytes = None;
+                let mut audio_bytes = None;
+                let mut doc_bytes = None;
+                let mut doc_name = None;
+                let mut mime_type = None;
+
+                if let Some(img) = base.image_message.as_option() {
+                    image_bytes = ctx.client.download(img).await.ok();
+                    mime_type = img.mimetype.clone();
+                } else if let Some(doc) = base.document_message.as_option() {
+                    doc_bytes = ctx.client.download(doc).await.ok();
+                    mime_type = doc.mimetype.clone();
+                    doc_name = doc.file_name.clone();
+                } else if let Some(aud) = base.audio_message.as_option() {
+                    audio_bytes = ctx.client.download(aud).await.ok();
+                    mime_type = aud.mimetype.clone();
+                }
+
                 // Salurkan ke InboundEnvelope jika caller mendengarkan via channel
                 if let Some(ref tx_chan) = tx {
                     let env = build_inbound_envelope(
@@ -109,11 +127,11 @@ impl WhatsAppClientRunner {
                         None,
                         is_group,
                         None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
+                        image_bytes,
+                        audio_bytes,
+                        doc_bytes,
+                        doc_name,
+                        mime_type,
                     );
                     let _ = tx_chan.send(env).await;
                 }

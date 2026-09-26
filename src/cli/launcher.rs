@@ -5,7 +5,6 @@ use crate::ai::AIChatService;
 use crate::bot::client::TelegramBotClient;
 use crate::cli::ai_hub::run_cli_ai_hub;
 use crate::cli::chat::run_cli_chat;
-use crate::cli::gateway::run_cli_gateway_hub;
 use crate::cli::mcp::run_cli_mcp_hub;
 use crate::cli::memory::run_cli_memory;
 use crate::cli::status::run_cli_status;
@@ -113,7 +112,7 @@ pub(crate) async fn run_cli_launcher(ai_service: &Arc<AIChatService>) {
                 run_cli_ai_hub(ai_service, None, None).await;
             }
             Some(3) => {
-                run_cli_gateway_hub(None, None, None).await;
+                crate::cli::gateway::run_cli_gateway_hub(crate::cli::gateway::GatewayCliAction::Menu).await;
             }
             Some(4) => {
                 crate::cli::search::run_cli_search_hub(ai_service, None, None).await;

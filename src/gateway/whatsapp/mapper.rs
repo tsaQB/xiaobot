@@ -1,5 +1,4 @@
 use crate::gateway::{ChannelKind, InboundEnvelope};
-use std::hash::{Hash, Hasher};
 
 /// Mengonversi format JID pengguna WhatsApp (misal "6281234567890@s.whatsapp.net")
 /// menjadi integer bertanda 64-bit (`i64`) untuk kompatibilitas skema database XiaoBot.
@@ -20,9 +19,17 @@ pub fn parse_group_jid_to_i64(jid_str: &str) -> i64 {
     if let Ok(num) = digits.parse::<i64>() {
         -num.abs()
     } else {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        group_part.hash(&mut hasher);
-        -(hasher.finish() as i64).abs()
+        // Gunakan deterministic hash (FNV-1a) agar ID grup tidak berubah saat bot direstart
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for byte in group_part.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        let mut num = (hash as i64).saturating_abs();
+        if num == 0 {
+            num = 1; // Cegah ID 0
+        }
+        -num
     }
 }
 

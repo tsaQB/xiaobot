@@ -19,13 +19,13 @@ pub enum GatewayCliAction<'a> {
     Unknown(&'a str),
 }
 
-pub fn parse_gateway_cli_action<'a>(
-    action: Option<&'a str>,
-    target: Option<&'a str>,
-    extra: Option<&'a str>,
-) -> GatewayCliAction<'a> {
+pub fn parse_gateway_cli_args<'a>(args: &'a [String]) -> GatewayCliAction<'a> {
+    let action = args.first().map(|s| s.as_str());
+    let target = args.get(1).map(|s| s.as_str());
+    let extra = args.get(2).map(|s| s.as_str());
+
     match action {
-        None => GatewayCliAction::Menu,
+        None | Some("menu") => GatewayCliAction::Menu,
         Some("check") | Some("test") | Some("status") => GatewayCliAction::Check,
         Some("token") | Some("bind") => GatewayCliAction::BindToken(target),
         Some("owner") | Some("id") => GatewayCliAction::SetOwner(target),
@@ -372,13 +372,9 @@ async fn run_cli_whatsapp_set_owner() {
     }
 }
 
-pub(crate) async fn run_cli_gateway_hub(
-    action: Option<&str>,
-    target: Option<&str>,
-    extra: Option<&str>,
-) {
+pub(crate) async fn run_cli_gateway_hub(action: GatewayCliAction<'_>) {
     load_environment();
-    match parse_gateway_cli_action(action, target, extra) {
+    match action {
         GatewayCliAction::Menu => {
             run_cli_gateway_menu().await;
         }
@@ -609,35 +605,35 @@ mod tests {
     #[test]
     fn test_gateway_id_alias_parsing() {
         assert_eq!(
-            parse_gateway_cli_action(Some("id"), Some("987654"), None),
+            parse_gateway_cli_args(&["id".to_string(), "987654".to_string()]),
             GatewayCliAction::SetOwner(Some("987654"))
         );
         assert_eq!(
-            parse_gateway_cli_action(Some("owner"), Some("987654"), None),
+            parse_gateway_cli_args(&["owner".to_string(), "987654".to_string()]),
             GatewayCliAction::SetOwner(Some("987654"))
         );
         assert_eq!(
-            parse_gateway_cli_action(Some("token"), Some("test_token"), None),
+            parse_gateway_cli_args(&["token".to_string(), "test_token".to_string()]),
             GatewayCliAction::BindToken(Some("test_token"))
         );
         assert_eq!(
-            parse_gateway_cli_action(Some("check"), None, None),
+            parse_gateway_cli_args(&["check".to_string()]),
             GatewayCliAction::Check
         );
         assert_eq!(
-            parse_gateway_cli_action(Some("test"), None, None),
+            parse_gateway_cli_args(&["test".to_string()]),
             GatewayCliAction::Check
         );
         assert_eq!(
-            parse_gateway_cli_action(Some("status"), None, None),
+            parse_gateway_cli_args(&["status".to_string()]),
             GatewayCliAction::Check
         );
         assert_eq!(
-            parse_gateway_cli_action(Some("wa"), Some("pair"), None),
+            parse_gateway_cli_args(&["wa".to_string(), "pair".to_string()]),
             GatewayCliAction::WhatsApp(Some("pair"), None)
         );
         assert_eq!(
-            parse_gateway_cli_action(Some("wa"), Some("code"), Some("6281234567890")),
+            parse_gateway_cli_args(&["wa".to_string(), "code".to_string(), "6281234567890".to_string()]),
             GatewayCliAction::WhatsApp(Some("code"), Some("6281234567890"))
         );
     }

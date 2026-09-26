@@ -51,53 +51,24 @@ pub fn format_for_whatsapp(input: &str) -> String {
         if is_code {
             output.push_str(text);
         } else {
-            let mut formatted = text.to_string();
+            // Gunakan Cow dari hasil replace_all untuk menghindari alokasi String yang tidak perlu (Shallow Modules fix)
+            let c1 = RE_HEADER.replace_all(text, "\x01$1\x01");
+            let c2 = RE_BULLET.replace_all(&c1, "• $1");
+            let c3 = RE_STRIKE.replace_all(&c2, "~$1~");
+            let c4 = RE_BOLD_ITALIC.replace_all(&c3, |caps: &regex::Captures| {
+                let m = caps.get(1).or_else(|| caps.get(2)).map(|v| v.as_str()).unwrap_or("");
+                format!("\x01\x02{}\x02\x01", m)
+            });
+            let c5 = RE_BOLD.replace_all(&c4, |caps: &regex::Captures| {
+                let m = caps.get(1).or_else(|| caps.get(2)).map(|v| v.as_str()).unwrap_or("");
+                format!("\x01{}\x01", m)
+            });
+            let c6 = RE_ITALIC_ASTERISK.replace_all(&c5, "\x02$1\x02");
+            let c7 = RE_ITALIC_UNDERSCORE.replace_all(&c6, "$1\x02$2\x02$3");
 
-            // 1. Header Markdown (# Header) diubah menjadi placeholder tebal
-            formatted = RE_HEADER.replace_all(&formatted, "\x01$1\x01").to_string();
-
-            // 2. Bullet list (* atau -) diubah menjadi bullet symbol (•)
-            formatted = RE_BULLET.replace_all(&formatted, "• $1").to_string();
-
-            // 3. Strikethrough (~~teks~~) diubah menjadi ~teks~
-            formatted = RE_STRIKE.replace_all(&formatted, "~$1~").to_string();
-
-            // 4. Bold + Italic (***teks***) diubah menjadi placeholder tebal+miring
-            formatted = RE_BOLD_ITALIC
-                .replace_all(&formatted, |caps: &regex::Captures| {
-                    let m = caps
-                        .get(1)
-                        .or_else(|| caps.get(2))
-                        .map(|v| v.as_str())
-                        .unwrap_or("");
-                    format!("\x01\x02{}\x02\x01", m)
-                })
-                .to_string();
-
-            // 5. Bold (**teks** atau __teks__) diubah menjadi placeholder tebal
-            formatted = RE_BOLD
-                .replace_all(&formatted, |caps: &regex::Captures| {
-                    let m = caps
-                        .get(1)
-                        .or_else(|| caps.get(2))
-                        .map(|v| v.as_str())
-                        .unwrap_or("");
-                    format!("\x01{}\x01", m)
-                })
-                .to_string();
-
-            // 6. Italic (*teks* atau _teks_) diubah menjadi placeholder miring
-            formatted = RE_ITALIC_ASTERISK
-                .replace_all(&formatted, "\x02$1\x02")
-                .to_string();
-            formatted = RE_ITALIC_UNDERSCORE
-                .replace_all(&formatted, "$1\x02$2\x02$3")
-                .to_string();
-
-            // 7. Resolusi placeholder ke sintaks WhatsApp (* untuk tebal, _ untuk miring)
-            formatted = formatted.replace('\x01', "*").replace('\x02', "_");
-
-            output.push_str(&formatted);
+            // Resolusi placeholder
+            let final_str = c7.replace('\x01', "*").replace('\x02', "_");
+            output.push_str(&final_str);
         }
     }
 
