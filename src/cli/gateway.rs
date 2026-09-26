@@ -633,7 +633,11 @@ mod tests {
             GatewayCliAction::WhatsApp(Some("pair"), None)
         );
         assert_eq!(
-            parse_gateway_cli_args(&["wa".to_string(), "code".to_string(), "6281234567890".to_string()]),
+            parse_gateway_cli_args(&[
+                "wa".to_string(),
+                "code".to_string(),
+                "6281234567890".to_string()
+            ]),
             GatewayCliAction::WhatsApp(Some("code"), Some("6281234567890"))
         );
     }

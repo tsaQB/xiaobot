@@ -56,11 +56,19 @@ pub fn format_for_whatsapp(input: &str) -> String {
             let c2 = RE_BULLET.replace_all(&c1, "• $1");
             let c3 = RE_STRIKE.replace_all(&c2, "~$1~");
             let c4 = RE_BOLD_ITALIC.replace_all(&c3, |caps: &regex::Captures| {
-                let m = caps.get(1).or_else(|| caps.get(2)).map(|v| v.as_str()).unwrap_or("");
+                let m = caps
+                    .get(1)
+                    .or_else(|| caps.get(2))
+                    .map(|v| v.as_str())
+                    .unwrap_or("");
                 format!("\x01\x02{}\x02\x01", m)
             });
             let c5 = RE_BOLD.replace_all(&c4, |caps: &regex::Captures| {
-                let m = caps.get(1).or_else(|| caps.get(2)).map(|v| v.as_str()).unwrap_or("");
+                let m = caps
+                    .get(1)
+                    .or_else(|| caps.get(2))
+                    .map(|v| v.as_str())
+                    .unwrap_or("");
                 format!("\x01{}\x01", m)
             });
             let c6 = RE_ITALIC_ASTERISK.replace_all(&c5, "\x02$1\x02");
