@@ -1385,10 +1385,20 @@ pub fn isolate_embedded_media_blocks(text: &str) -> String {
         return String::new();
     }
 
-    let mut output = String::with_capacity(text.len() + 64);
+    // Pre-sanitize multiline HTML media tags (replace internal newlines with space)
+    static RE_MULTILINE_MEDIA_TAG: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?is)<(?:tg-(?:photo|video|audio|document|map)|img|audio)\b[^>]*?>"#)
+            .expect("valid static regex")
+    });
+
+    let normalized_text = RE_MULTILINE_MEDIA_TAG.replace_all(text, |caps: &regex::Captures| {
+        caps[0].replace(['\r', '\n'], " ")
+    });
+
+    let mut output = String::with_capacity(normalized_text.len() + 64);
     let mut in_code_block = false;
 
-    for line in text.split('\n') {
+    for line in normalized_text.split('\n') {
         let trimmed = line.trim();
         if trimmed.starts_with("```") {
             in_code_block = !in_code_block;
@@ -3303,6 +3313,13 @@ mod tests {
 
     #[test]
     fn unicode_box_table_parses_without_byte_boundary_slicing() {
+        let text = "<img src=\"https://example.com/test.jpg\"\ncaption=\"Multi-line\ncaption\"/>";
+        let isolated = isolate_embedded_media_blocks(text);
+        assert!(!isolated.contains('\n'));
+        assert!(isolated.starts_with(
+            "<img src=\"https://example.com/test.jpg\" caption=\"Multi-line caption\"/>"
+        ));
+
         let input =
             "┌──────┬──────┐\n│ Nama │ Ikon │\n├──────┼──────┤\n│ 世界 │ 😊   │\n└──────┴──────┘";
         let blocks = parse_markdown_to_rich_blocks(input);
