@@ -1393,30 +1393,41 @@ pub fn isolate_embedded_media_blocks(text: &str) -> String {
         .expect("valid static regex")
     });
 
-    let normalized_text = if text.contains("```") {
-        let segments: Vec<&str> = text.split("```").collect();
-        let mut normalized_segments = Vec::with_capacity(segments.len());
-        for (idx, seg) in segments.iter().enumerate() {
-            if idx % 2 == 1 {
-                // Inside fenced code block: keep raw content untouched
-                normalized_segments.push(seg.to_string());
-            } else {
-                // Outside code block: sanitize multiline HTML media tags
+    let normalized_text = {
+        let lines: Vec<&str> = text.split('\n').collect();
+        let mut output_lines = Vec::with_capacity(lines.len());
+        let mut non_code_buffer = Vec::new();
+        let mut in_code_block = false;
+
+        let flush_non_code = |buf: &mut Vec<&str>, out: &mut Vec<String>| {
+            if !buf.is_empty() {
+                let chunk = buf.join("\n");
                 let norm = RE_MULTILINE_MEDIA_TAG
-                    .replace_all(seg, |caps: &regex::Captures| {
+                    .replace_all(&chunk, |caps: &regex::Captures| {
                         caps[0].replace(['\r', '\n'], " ")
                     })
                     .into_owned();
-                normalized_segments.push(norm);
+                for l in norm.split('\n') {
+                    out.push(l.to_string());
+                }
+                buf.clear();
+            }
+        };
+
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with("```") {
+                flush_non_code(&mut non_code_buffer, &mut output_lines);
+                in_code_block = !in_code_block;
+                output_lines.push(line.to_string());
+            } else if in_code_block {
+                output_lines.push(line.to_string());
+            } else {
+                non_code_buffer.push(line);
             }
         }
-        normalized_segments.join("```")
-    } else {
-        RE_MULTILINE_MEDIA_TAG
-            .replace_all(text, |caps: &regex::Captures| {
-                caps[0].replace(['\r', '\n'], " ")
-            })
-            .into_owned()
+        flush_non_code(&mut non_code_buffer, &mut output_lines);
+        output_lines.join("\n")
     };
 
     let mut output = String::with_capacity(normalized_text.len() + 64);
@@ -3347,7 +3358,7 @@ mod tests {
 
     #[test]
     fn isolate_embedded_media_blocks_normalizes_multiline_tags_outside_code_blocks() {
-        let text = "<img src=\"https://example.com/test.jpg\"\ncaption=\"Multi-line\ncaption\"/>\n\n```html\n<img src=\"https://example.com/code.jpg\"\ncaption=\"Code\nblock\"/>\n```\n\n<tg-collage>\n<img src=\"https://example.com/c1.jpg\"\ncaption=\"Col 1\"/>\n</tg-collage>";
+        let text = "<img src=\"https://example.com/test.jpg\"\ncaption=\"Multi-line\ncaption\"/>\n\n```html\n<img src=\"https://example.com/code.jpg\"\ncaption=\"Code\nblock\"/>\n```\n\n<tg-collage\ncaption=\"Kolase\nfoto\">\n<img src=\"https://example.com/c1.jpg\"/>\n</tg-collage>\n\n<tg-slideshow\ncaption=\"Slideshow\nfoto\">\n<img src=\"https://example.com/s1.jpg\"/>\n</tg-slideshow>";
         let isolated = isolate_embedded_media_blocks(text);
 
         // Outside tag should have internal newlines removed
@@ -3359,8 +3370,9 @@ mod tests {
         assert!(isolated
             .contains("<img src=\"https://example.com/code.jpg\"\ncaption=\"Code\nblock\"/>"));
 
-        // Multiline tg-collage tag should be normalized
-        assert!(isolated.contains("<tg-collage>"));
+        // Multiline tg-collage and tg-slideshow tags should have internal newlines removed
+        assert!(isolated.contains("<tg-collage caption=\"Kolase foto\">"));
+        assert!(isolated.contains("<tg-slideshow caption=\"Slideshow foto\">"));
     }
 
     #[test]

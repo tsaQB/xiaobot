@@ -1484,10 +1484,6 @@ impl InputRichMessage {
             || self.media.as_ref().is_some_and(|m| !m.is_empty())
     }
 
-    pub fn requires_multipart_dispatch(&self, has_attached_files: bool) -> bool {
-        has_attached_files || self.has_media()
-    }
-
     pub fn collect_media_urls(&self) -> Vec<String> {
         let mut urls = Vec::new();
         for block in &self.blocks {
