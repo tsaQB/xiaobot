@@ -2221,6 +2221,31 @@ fn provisional_markdown_start(text: &str) -> Option<usize> {
         }
     }
 
+    // Incomplete HTML media tags: keep unclosed `<img`, `<tg-...`, `<audio` provisional
+    // until the matching `>` completes the tag.
+    let lower = text.to_ascii_lowercase();
+    for tag_prefix in &[
+        "<img",
+        "<tg-photo",
+        "<tg-video",
+        "<tg-audio",
+        "<tg-document",
+        "<tg-map",
+        "<tg-collage",
+        "<tg-slideshow",
+        "<audio",
+    ] {
+        let mut cursor = 0usize;
+        while let Some(rel) = lower[cursor..].find(tag_prefix) {
+            let start = cursor + rel;
+            if !text[start..].contains('>') {
+                openings.push(start);
+                break;
+            }
+            cursor = start + tag_prefix.len();
+        }
+    }
+
     openings.into_iter().min()
 }
 
@@ -2975,6 +3000,16 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
             blocks.push(RichBlock::Paragraph {
                 text: parse_inline(&lrm_text),
             });
+        } else if i < n {
+            // Defensive loop termination guard: if a line matched a paragraph break
+            // delimiter but was rejected by every specific block parser, consume it
+            // as a standalone fallback paragraph line so `i` always advances.
+            let fallback_line = &lines[i];
+            let lrm_text = rtl::ensure_lrm_if_needed(fallback_line, is_message_rtl);
+            blocks.push(RichBlock::Paragraph {
+                text: parse_inline(&lrm_text),
+            });
+            i += 1;
         }
     }
 
@@ -3354,6 +3389,21 @@ mod tests {
         assert!(blocks
             .iter()
             .any(|block| matches!(block, RichBlock::Table { .. })));
+    }
+
+    #[test]
+    fn parse_markdown_to_rich_blocks_malformed_media_tag_does_not_infinite_loop() {
+        let text = "Berikut gambarnya:\n<img src=\"https://i.imgur nya:";
+        let blocks = parse_markdown_to_rich_blocks(text);
+        assert!(!blocks.is_empty());
+    }
+
+    #[test]
+    fn parse_streaming_markdown_to_rich_blocks_holds_unclosed_html_media_tag() {
+        let text = "Berikut gambarnya:\n<img src=\"https://i.imgur";
+        let blocks = parse_streaming_markdown_to_rich_blocks(text);
+        // Should parse the first stable line, while keeping unclosed <img provisional
+        assert!(!blocks.is_empty());
     }
 
     #[test]
