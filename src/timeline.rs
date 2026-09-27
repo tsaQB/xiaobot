@@ -557,7 +557,8 @@ impl ExecutionTimeline {
         let reply_to_msg_id = self.inner.reply_to_message_id;
         let reply_markup: Option<serde_json::Value> = None;
 
-        if !attached_files.is_empty() {
+        let has_media_blocks = full_rich_msg.has_media();
+        if !attached_files.is_empty() || has_media_blocks {
             // If there's an existing placeholder message (in groups or streaming drafts), delete it first because editMessageMedia/editMessageText does not support full sendRichMessage multipart upload
             if let Some(msg_id) = placeholder_msg_id {
                 if let Err(e) = self
