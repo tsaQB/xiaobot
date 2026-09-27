@@ -1385,15 +1385,39 @@ pub fn isolate_embedded_media_blocks(text: &str) -> String {
         return String::new();
     }
 
-    // Pre-sanitize multiline HTML media tags (replace internal newlines with space)
+    // Pre-sanitize multiline HTML media tags outside code blocks (replace internal newlines with space)
     static RE_MULTILINE_MEDIA_TAG: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"(?is)<(?:tg-(?:photo|video|audio|document|map)|img|audio)\b[^>]*?>"#)
-            .expect("valid static regex")
+        Regex::new(
+            r#"(?is)<(?:tg-(?:photo|video|audio|document|map|collage|slideshow)|img|audio)\b[^>]*?>"#,
+        )
+        .expect("valid static regex")
     });
 
-    let normalized_text = RE_MULTILINE_MEDIA_TAG.replace_all(text, |caps: &regex::Captures| {
-        caps[0].replace(['\r', '\n'], " ")
-    });
+    let normalized_text = if text.contains("```") {
+        let segments: Vec<&str> = text.split("```").collect();
+        let mut normalized_segments = Vec::with_capacity(segments.len());
+        for (idx, seg) in segments.iter().enumerate() {
+            if idx % 2 == 1 {
+                // Inside fenced code block: keep raw content untouched
+                normalized_segments.push(seg.to_string());
+            } else {
+                // Outside code block: sanitize multiline HTML media tags
+                let norm = RE_MULTILINE_MEDIA_TAG
+                    .replace_all(seg, |caps: &regex::Captures| {
+                        caps[0].replace(['\r', '\n'], " ")
+                    })
+                    .into_owned();
+                normalized_segments.push(norm);
+            }
+        }
+        normalized_segments.join("```")
+    } else {
+        RE_MULTILINE_MEDIA_TAG
+            .replace_all(text, |caps: &regex::Captures| {
+                caps[0].replace(['\r', '\n'], " ")
+            })
+            .into_owned()
+    };
 
     let mut output = String::with_capacity(normalized_text.len() + 64);
     let mut in_code_block = false;
@@ -3313,19 +3337,30 @@ mod tests {
 
     #[test]
     fn unicode_box_table_parses_without_byte_boundary_slicing() {
-        let text = "<img src=\"https://example.com/test.jpg\"\ncaption=\"Multi-line\ncaption\"/>";
-        let isolated = isolate_embedded_media_blocks(text);
-        assert!(!isolated.contains('\n'));
-        assert!(isolated.starts_with(
-            "<img src=\"https://example.com/test.jpg\" caption=\"Multi-line caption\"/>"
-        ));
-
         let input =
             "┌──────┬──────┐\n│ Nama │ Ikon │\n├──────┼──────┤\n│ 世界 │ 😊   │\n└──────┴──────┘";
         let blocks = parse_markdown_to_rich_blocks(input);
         assert!(blocks
             .iter()
             .any(|block| matches!(block, RichBlock::Table { .. })));
+    }
+
+    #[test]
+    fn isolate_embedded_media_blocks_normalizes_multiline_tags_outside_code_blocks() {
+        let text = "<img src=\"https://example.com/test.jpg\"\ncaption=\"Multi-line\ncaption\"/>\n\n```html\n<img src=\"https://example.com/code.jpg\"\ncaption=\"Code\nblock\"/>\n```\n\n<tg-collage>\n<img src=\"https://example.com/c1.jpg\"\ncaption=\"Col 1\"/>\n</tg-collage>";
+        let isolated = isolate_embedded_media_blocks(text);
+
+        // Outside tag should have internal newlines removed
+        assert!(isolated.contains(
+            "<img src=\"https://example.com/test.jpg\" caption=\"Multi-line caption\"/>"
+        ));
+
+        // Inside code block tag should retain internal newlines
+        assert!(isolated
+            .contains("<img src=\"https://example.com/code.jpg\"\ncaption=\"Code\nblock\"/>"));
+
+        // Multiline tg-collage tag should be normalized
+        assert!(isolated.contains("<tg-collage>"));
     }
 
     #[test]
