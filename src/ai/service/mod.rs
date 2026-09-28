@@ -1,4 +1,5 @@
 pub mod context;
+pub mod curator;
 pub mod generation;
 pub mod image;
 pub mod multimodal;
