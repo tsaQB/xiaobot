@@ -145,6 +145,8 @@ pub fn format_for_whatsapp(input: &str) -> String {
     }
 
     let mut output = String::new();
+    // Footnote definitions may sit in another segment than their markers.
+    let footnotes = super::markdown::defined_footnotes(input);
 
     for (is_code, text) in segments {
         if is_code {
@@ -153,7 +155,7 @@ pub fn format_for_whatsapp(input: &str) -> String {
             // Tag media gaya Telegram (hasil tool) tidak dapat dirender WhatsApp;
             // ubah menjadi tautan/label yang terbaca sebelum format Markdown.
             // WhatsApp has no highlight, super/subscript or date-time entities.
-            let flattened = super::markdown::flatten_extended_inline(text);
+            let flattened = super::markdown::flatten_extended_inline_with(text, &footnotes);
             let c0 = render_media_markup_for_whatsapp(&flattened);
             // Gunakan Cow dari hasil replace_all untuk menghindari alokasi String yang tidak perlu (Shallow Modules fix)
             let c1 = RE_HEADER.replace_all(&c0, "\x01$1\x01");

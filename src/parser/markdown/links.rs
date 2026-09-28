@@ -3,132 +3,56 @@
 //! before the heading) and footnotes (`fact[^1]` with a `[^1]: note` line,
 //! rendered as `reference_link` and `reference`).
 //!
-//! Targets are collected from the whole text before it is parsed, so a link
-//! is emitted only when its target exists in the same message; otherwise only
-//! its text is kept. Anchors are placed only on headings that are linked to.
+//! The parser only emits placeholders for these. [`resolve`] runs once on the
+//! finished blocks, so it sees exactly the headings and notes that became
+//! blocks: a link whose section is not there keeps only its text, and a
+//! `[^…]` without a matching note (a regex such as `[^0-9]`, say) stays
+//! literal text.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
-use crate::bot::models::RichBlock;
+use crate::bot::models::{RichBlock, RichBlockCaption};
 
-static RE_MARKDOWN_HEADING: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^#{1,6}\s*([^\s#].*)$").expect("valid static regex"));
-static RE_HTML_HEADING_LINE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)^<h[1-6](?:\s+[^>]*)?>(.*?)</h[1-6]>$").expect("valid static regex")
-});
-static RE_SECTION_LINK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\]\(\s*#([^)\s]*)\s*\)|href=["']#([^"']*)["']"#).expect("valid static regex")
-});
-static RE_FOOTNOTE_DEFINITION: LazyLock<Regex> =
+/// Placeholder rich-text types; [`resolve`] replaces every one of them.
+const SECTION_LINK: &str = "xiao_section_link";
+const FOOTNOTE_MARKER: &str = "xiao_footnote_marker";
+const FOOTNOTE_NOTE: &str = "xiao_footnote_note";
+
+/// A footnote definition line: `[^id]: note`.
+pub(super) static RE_FOOTNOTE_DEFINITION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\[\^([^\]\s]+)\]:\s*(.*)$").expect("valid static regex"));
-static RE_FOOTNOTE_MARKER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[\^([^\]\s]+)\](:?)").expect("valid static regex"));
 /// Leading enumeration of a heading ("2.", "2.1", "IV.") so `#dns` also
-/// finds "2. DNS".
+/// finds "2. DNS". Roman numerals need punctuation, so "MVC Pattern" keeps
+/// its first word.
 static RE_HEADING_NUMBER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\s*(?:[0-9]+(?:\.[0-9]+)*|[IVXLCDM]+)[.):]?\s+").expect("valid static regex")
+    Regex::new(r"^\s*(?:[0-9]+(?:\.[0-9]+)*[.):]?|[IVXLCDM]+[.):])\s+").expect("valid static regex")
 });
 
-/// Link targets that exist in the message being parsed.
-#[derive(Debug, Default)]
-struct LinkTargets {
-    /// Heading key → anchor name, only for headings that are linked to.
-    headings: HashMap<String, String>,
-    /// Footnote id → (number, reference name), numbered by first mention.
-    footnotes: HashMap<String, (usize, String)>,
-    /// Footnote ids that have a definition.
-    defined: HashSet<String>,
-    /// Anchor and reference names already placed; each is placed once.
-    placed: HashSet<String>,
-    /// Anchor and reference names that links were emitted for.
-    linked_names: HashSet<String>,
+/// Placeholder for `[label](#target)`.
+pub(super) fn section_link(label: Value, target: &str) -> Value {
+    json!({"type": SECTION_LINK, "text": label, "target": target})
 }
 
-thread_local! {
-    // The initializer is already `const`; clippy 0.1.98 still reports the
-    // expanded macro, whichever form is written.
-    #[allow(clippy::missing_const_for_thread_local)]
-    static TARGETS: RefCell<Option<LinkTargets>> = const { RefCell::new(None) };
+/// Placeholder for a footnote marker `[^id]`.
+pub(super) fn footnote_marker(id: &str) -> Value {
+    json!({"type": FOOTNOTE_MARKER, "id": id})
 }
 
-/// Clears the targets when parsing ends, even if it panics.
-struct ClearTargets;
-
-impl Drop for ClearTargets {
-    fn drop(&mut self) {
-        TARGETS.with(|targets| *targets.borrow_mut() = None);
-    }
+/// A footnote definition line: its id and (possibly empty) note text.
+pub(super) fn footnote_definition(line: &str) -> Option<(&str, &str)> {
+    let caps = RE_FOOTNOTE_DEFINITION.captures(line)?;
+    Some((caps.get(1)?.as_str(), caps.get(2)?.as_str().trim()))
 }
 
-/// Runs `parse` with the link targets of `text` in scope. A nested parse
-/// reuses the targets of the outer message.
-pub(super) fn with_link_targets(
-    text: &str,
-    parse: impl FnOnce() -> Vec<RichBlock>,
-) -> Vec<RichBlock> {
-    if TARGETS.with(|targets| targets.borrow().is_some()) {
-        return parse();
+/// Placeholder block for a footnote note.
+pub(super) fn footnote_note_block(id: &str, note: Value) -> RichBlock {
+    RichBlock::Paragraph {
+        text: json!({"type": FOOTNOTE_NOTE, "id": id, "text": note}),
     }
-    TARGETS.with(|targets| *targets.borrow_mut() = Some(collect(text)));
-    let _clear = ClearTargets;
-    let blocks = parse();
-    let dangling: HashSet<String> = TARGETS.with(|targets| {
-        targets
-            .borrow()
-            .as_ref()
-            .map(|targets| {
-                targets
-                    .linked_names
-                    .difference(&targets.placed)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default()
-    });
-    if dangling.is_empty() {
-        blocks
-    } else {
-        unlink_anchors(blocks, &dangling)
-    }
-}
-
-/// A heading or footnote that did not end up as its own block (for example
-/// inside a collapsible block) has no target; links to it keep their text.
-fn unlink_anchors(blocks: Vec<RichBlock>, dangling: &HashSet<String>) -> Vec<RichBlock> {
-    fn walk(value: &mut Value, dangling: &HashSet<String>) {
-        match value {
-            Value::Array(items) => items.iter_mut().for_each(|item| walk(item, dangling)),
-            Value::Object(object) => {
-                let name_field = match object.get("type").and_then(Value::as_str) {
-                    Some("anchor_link") => "anchor_name",
-                    Some("reference_link") => "reference_name",
-                    _ => "",
-                };
-                let is_dangling = !name_field.is_empty()
-                    && object
-                        .get(name_field)
-                        .and_then(Value::as_str)
-                        .is_some_and(|name| dangling.contains(name));
-                if is_dangling {
-                    *value = object.get("text").cloned().unwrap_or_default();
-                    walk(value, dangling);
-                } else {
-                    object.values_mut().for_each(|item| walk(item, dangling));
-                }
-            }
-            _ => {}
-        }
-    }
-    let Ok(mut value) = serde_json::to_value(&blocks) else {
-        return blocks;
-    };
-    walk(&mut value, dangling);
-    serde_json::from_value(value).unwrap_or(blocks)
 }
 
 /// Loose key used to match a link target to a heading: lowercase letters
@@ -140,204 +64,403 @@ fn key(text: &str) -> String {
         .collect()
 }
 
-fn heading_text(line: &str) -> Option<&str> {
-    RE_MARKDOWN_HEADING
-        .captures(line)
-        .or_else(|| RE_HTML_HEADING_LINE.captures(line))
-        .and_then(|caps| caps.get(1))
-        .map(|text| text.as_str().trim())
-}
-
-/// Both keys of a heading: the full text and the text without numbering.
-fn heading_keys(text: &str) -> [String; 2] {
-    [key(text), key(&RE_HEADING_NUMBER.replace(text, ""))]
-}
-
-fn collect(text: &str) -> LinkTargets {
-    let mut in_code = false;
-    let mut headings = Vec::new();
-    let mut linked = HashSet::new();
-    let mut targets = LinkTargets::default();
-    let mut next_footnote = 1;
-    let mut number_footnote = |id: &str, targets: &mut LinkTargets| {
-        if !targets.footnotes.contains_key(id) {
-            let name = format!("catatan-{next_footnote}");
-            targets
-                .footnotes
-                .insert(id.to_string(), (next_footnote, name));
-            next_footnote += 1;
-        }
-    };
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_code = !in_code;
-            continue;
-        }
-        if in_code {
-            continue;
-        }
-        if let Some(heading) = heading_text(trimmed) {
-            headings.push(heading_keys(heading));
-        }
-        for caps in RE_SECTION_LINK.captures_iter(trimmed) {
-            if let Some(target) = caps.get(1).or_else(|| caps.get(2)) {
-                linked.insert(key(target.as_str()));
+/// Visible text of rich text, for matching headings.
+fn plain_text(value: &Value, out: &mut String) {
+    match value {
+        Value::String(text) => out.push_str(text),
+        Value::Array(parts) => parts.iter().for_each(|part| plain_text(part, out)),
+        Value::Object(object) => {
+            if let Some(text) = object.get("text") {
+                plain_text(text, out);
             }
         }
-        let definition = RE_FOOTNOTE_DEFINITION.captures(trimmed);
-        for caps in RE_FOOTNOTE_MARKER.captures_iter(trimmed) {
-            let is_definition_head = caps.get(0).is_some_and(|m| m.start() == 0)
-                && definition.is_some()
-                && caps.get(2).is_some_and(|colon| !colon.as_str().is_empty());
-            if !is_definition_head {
-                number_footnote(&caps[1], &mut targets);
+        _ => {}
+    }
+}
+
+/// Calls `visit` on every rich-text value of a block, in reading order.
+fn for_each_text(block: &mut RichBlock, visit: &mut impl FnMut(&mut Value)) {
+    fn caption(caption: &mut Option<RichBlockCaption>, visit: &mut impl FnMut(&mut Value)) {
+        if let Some(caption) = caption {
+            visit(&mut caption.text);
+            if let Some(credit) = caption.credit.as_mut() {
+                visit(credit);
             }
-        }
-        if let Some(caps) = definition {
-            targets.defined.insert(caps[1].to_string());
         }
     }
-    // Footnotes defined but never mentioned still get a number.
-    let mut unmentioned: Vec<String> = targets
-        .defined
+    match block {
+        RichBlock::Paragraph { text }
+        | RichBlock::SectionHeading { text, .. }
+        | RichBlock::Footer { text }
+        | RichBlock::Thinking { text } => visit(text),
+        RichBlock::List { items } => items
+            .iter_mut()
+            .flat_map(|item| item.blocks.iter_mut())
+            .for_each(&mut *visit),
+        RichBlock::BlockQuotation { blocks } => blocks.iter_mut().for_each(&mut *visit),
+        RichBlock::ExpandableBlockQuotation { text, credit }
+        | RichBlock::PullQuotation { text, credit } => {
+            visit(text);
+            if let Some(credit) = credit.as_mut() {
+                visit(credit);
+            }
+        }
+        RichBlock::Table { cells, .. } => cells
+            .iter_mut()
+            .flatten()
+            .for_each(|cell| visit(&mut cell.text)),
+        RichBlock::Details {
+            summary, blocks, ..
+        } => {
+            visit(summary);
+            blocks.iter_mut().for_each(&mut *visit);
+        }
+        RichBlock::Document { caption: c, .. }
+        | RichBlock::Photo { caption: c, .. }
+        | RichBlock::Video { caption: c, .. }
+        | RichBlock::Audio { caption: c, .. }
+        | RichBlock::VoiceNote { caption: c, .. }
+        | RichBlock::Animation { caption: c, .. }
+        | RichBlock::Collage { caption: c, .. }
+        | RichBlock::Slideshow { caption: c, .. } => caption(c, visit),
+        RichBlock::Preformatted { .. }
+        | RichBlock::Divider {}
+        | RichBlock::MathematicalExpression { .. }
+        | RichBlock::Buttons { .. }
+        | RichBlock::Map { .. }
+        | RichBlock::Anchor { .. } => {}
+    }
+}
+
+fn placeholder_kind(object: &Map<String, Value>) -> Option<&str> {
+    object
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| [SECTION_LINK, FOOTNOTE_MARKER, FOOTNOTE_NOTE].contains(kind))
+}
+
+fn field<'a>(object: &'a Map<String, Value>, name: &str) -> &'a str {
+    object.get(name).and_then(Value::as_str).unwrap_or("")
+}
+
+/// What the placeholders of a message refer to, in reading order.
+#[derive(Default)]
+struct Scan {
+    targets: Vec<String>,
+    markers: Vec<String>,
+    notes: Vec<String>,
+}
+
+impl Scan {
+    fn collect(&mut self, value: &Value) {
+        match value {
+            Value::Array(parts) => parts.iter().for_each(|part| self.collect(part)),
+            Value::Object(object) => {
+                match placeholder_kind(object) {
+                    Some(SECTION_LINK) => self.targets.push(key(field(object, "target"))),
+                    Some(FOOTNOTE_MARKER) => self.markers.push(field(object, "id").to_string()),
+                    Some(FOOTNOTE_NOTE) => self.notes.push(field(object, "id").to_string()),
+                    _ => {}
+                }
+                object.values().for_each(|inner| self.collect(inner));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// How each placeholder is replaced.
+struct Resolution {
+    /// Link target key → anchor name (`""` is the top of the message).
+    anchors: HashMap<String, String>,
+    /// Footnote id → number, only for footnotes that have a note.
+    footnotes: HashMap<String, usize>,
+    /// Notes already placed; a repeated definition stays plain text.
+    placed_notes: HashSet<String>,
+}
+
+/// Replacement for one value: a placeholder may become several parts.
+enum Resolved {
+    One(Value),
+    Many(Vec<Value>),
+}
+
+impl Resolved {
+    fn into_value(self) -> Value {
+        match self {
+            Resolved::One(value) => value,
+            Resolved::Many(parts) => Value::Array(parts),
+        }
+    }
+}
+
+fn spread(value: Value) -> Resolved {
+    match value {
+        Value::Array(parts) => Resolved::Many(parts),
+        other => Resolved::One(other),
+    }
+}
+
+impl Resolution {
+    fn resolve(&mut self, value: Value) -> Resolved {
+        match value {
+            Value::Array(parts) => {
+                let mut out: Vec<Value> = Vec::with_capacity(parts.len());
+                for part in parts {
+                    let resolved = match self.resolve(part) {
+                        Resolved::One(value) => vec![value],
+                        Resolved::Many(values) => values,
+                    };
+                    for value in resolved {
+                        // Adjacent strings are merged, as the parser does.
+                        match (out.last_mut(), value) {
+                            (Some(Value::String(previous)), Value::String(text)) => {
+                                previous.push_str(&text)
+                            }
+                            (_, value) => out.push(value),
+                        }
+                    }
+                }
+                // A single part is not wrapped, as the parser does.
+                Resolved::One(match out.len() {
+                    0 => Value::String(String::new()),
+                    1 => out.pop().unwrap_or_default(),
+                    _ => Value::Array(out),
+                })
+            }
+            Value::Object(mut object) => {
+                let kind = placeholder_kind(&object).map(str::to_string);
+                let text = object.remove("text").unwrap_or_default();
+                let text = self.resolve(text).into_value();
+                match kind.as_deref() {
+                    Some(SECTION_LINK) => match self.anchors.get(&key(field(&object, "target"))) {
+                        Some(name) => Resolved::One(
+                            json!({"type": "anchor_link", "text": text, "anchor_name": name}),
+                        ),
+                        None => spread(text),
+                    },
+                    Some(FOOTNOTE_MARKER) => {
+                        let id = field(&object, "id");
+                        Resolved::One(match self.footnotes.get(id) {
+                            Some(number) => json!({
+                                "type": "reference_link",
+                                "text": format!("[{number}]"),
+                                "reference_name": format!("catatan-{number}"),
+                            }),
+                            None => Value::String(format!("[^{id}]")),
+                        })
+                    }
+                    Some(FOOTNOTE_NOTE) => {
+                        let id = field(&object, "id").to_string();
+                        match self.footnotes.get(&id) {
+                            Some(number) if self.placed_notes.insert(id.clone()) => {
+                                Resolved::Many(vec![
+                                    Value::String(format!("[{number}] ")),
+                                    json!({
+                                        "type": "reference",
+                                        "name": format!("catatan-{number}"),
+                                        "text": text,
+                                    }),
+                                ])
+                            }
+                            _ => {
+                                let mut parts = vec![Value::String(format!("[^{id}]: "))];
+                                match text {
+                                    Value::Array(items) => parts.extend(items),
+                                    other => parts.push(other),
+                                }
+                                Resolved::Many(parts)
+                            }
+                        }
+                    }
+                    _ => {
+                        let mut resolved = Map::with_capacity(object.len() + 1);
+                        for (name, inner) in object {
+                            resolved.insert(name, self.resolve(inner).into_value());
+                        }
+                        if !text.is_null() {
+                            resolved.insert("text".to_string(), text);
+                        }
+                        Resolved::One(Value::Object(resolved))
+                    }
+                }
+            }
+            other => Resolved::One(other),
+        }
+    }
+}
+
+/// Turns the navigation placeholders of a parsed message into Telegram rich
+/// text and places an anchor before every linked heading.
+pub(super) fn resolve(blocks: &mut Vec<RichBlock>) {
+    let mut scan = Scan::default();
+    for block in blocks.iter_mut() {
+        for_each_text(block, &mut |value| scan.collect(value));
+    }
+    if scan.targets.is_empty() && scan.markers.is_empty() && scan.notes.is_empty() {
+        return;
+    }
+
+    // Headings: an exact match wins over a match without the numbering.
+    let headings: Vec<(usize, [String; 2])> = blocks
         .iter()
-        .filter(|id| !targets.footnotes.contains_key(*id))
-        .cloned()
+        .enumerate()
+        .filter_map(|(index, block)| match block {
+            RichBlock::SectionHeading { text, .. } => {
+                let mut visible = String::new();
+                plain_text(text, &mut visible);
+                let short = key(&RE_HEADING_NUMBER.replace(&visible, ""));
+                Some((index, [key(&visible), short]))
+            }
+            _ => None,
+        })
         .collect();
-    unmentioned.sort();
-    for id in unmentioned {
-        number_footnote(&id, &mut targets);
-    }
-
-    // Each key belongs to the first heading that has it; a heading gets an
-    // anchor only when a link points to one of its keys.
-    let mut anchors = 0;
-    for keys in headings {
-        let free: Vec<&String> = keys
+    let mut target_heading: HashMap<String, usize> = HashMap::new();
+    for target in &scan.targets {
+        let exact = headings
             .iter()
-            .filter(|k| !k.is_empty() && !targets.headings.contains_key(*k))
-            .collect();
-        if !free.iter().any(|k| linked.contains(*k)) {
-            continue;
-        }
-        anchors += 1;
-        let name = format!("bagian-{anchors}");
-        for key in free {
-            targets.headings.insert(key.clone(), name.clone());
+            .find(|(_, keys)| !target.is_empty() && keys[0] == *target);
+        let loose = || {
+            headings
+                .iter()
+                .find(|(_, keys)| !target.is_empty() && keys[1] == *target)
+        };
+        if let Some((index, _)) = exact.or_else(loose) {
+            target_heading.insert(target.clone(), *index);
         }
     }
-    targets
-}
+    let mut linked: Vec<usize> = target_heading.values().copied().collect();
+    linked.sort_unstable();
+    linked.dedup();
+    let anchor_names: HashMap<usize, String> = linked
+        .iter()
+        .enumerate()
+        .map(|(n, index)| (*index, format!("bagian-{}", n + 1)))
+        .collect();
+    let mut anchors: HashMap<String, String> = target_heading
+        .iter()
+        .filter_map(|(target, index)| Some((target.clone(), anchor_names.get(index)?.clone())))
+        .collect();
+    for top in ["", "top", "atas", "awal"] {
+        anchors.entry(top.to_string()).or_default();
+    }
 
-/// Anchor name to place before a heading, when some link points to it.
-/// Each name is returned once, so a repeated heading gets no second anchor.
-pub(super) fn heading_anchor(heading: &str) -> Option<String> {
-    let [full, short] = heading_keys(heading);
-    TARGETS.with(|targets| {
-        let mut targets = targets.borrow_mut();
-        let targets = targets.as_mut()?;
-        let name = targets
-            .headings
-            .get(&full)
-            .or_else(|| targets.headings.get(&short))
-            .cloned()?;
-        targets.placed.insert(name.clone()).then_some(name)
-    })
-}
-
-/// Anchor name for a `#target` link: a linked heading, or `""` (the top of
-/// the message) for `#`, `#top` and `#atas`. `None` when the target is not in
-/// this message.
-pub(super) fn section_link_target(target: &str) -> Option<String> {
-    let target = key(target);
-    TARGETS.with(|targets| {
-        let mut targets = targets.borrow_mut();
-        let targets = targets.as_mut()?;
-        if let Some(name) = targets.headings.get(&target).cloned() {
-            targets.linked_names.insert(name.clone());
-            return Some(name);
+    // Footnotes with a note are numbered by first mention, then any note
+    // that is never mentioned, in the order written.
+    let defined: HashSet<&String> = scan.notes.iter().collect();
+    let mut footnotes: HashMap<String, usize> = HashMap::new();
+    for id in scan.markers.iter().chain(scan.notes.iter()) {
+        if defined.contains(id) && !footnotes.contains_key(id) {
+            let number = footnotes.len() + 1;
+            footnotes.insert(id.clone(), number);
         }
-        matches!(target.as_str(), "" | "top" | "atas" | "awal").then(String::new)
-    })
-}
+    }
 
-/// The rich text for a footnote marker `[^id]`: a `reference_link` showing
-/// `[n]` when the footnote is defined, plain `[n]` otherwise. `None` outside
-/// a message parse.
-pub(super) fn footnote_marker(id: &str) -> Option<Value> {
-    TARGETS.with(|targets| {
-        let mut targets = targets.borrow_mut();
-        let targets = targets.as_mut()?;
-        let (number, name) = targets.footnotes.get(id)?.clone();
-        let label = format!("[{number}]");
-        if !targets.defined.contains(id) {
-            return Some(Value::String(label));
+    let mut resolution = Resolution {
+        anchors,
+        footnotes,
+        placed_notes: HashSet::new(),
+    };
+    for block in blocks.iter_mut() {
+        for_each_text(block, &mut |value| {
+            *value = resolution.resolve(std::mem::take(value)).into_value();
+        });
+    }
+    for index in linked.into_iter().rev() {
+        if let Some(name) = anchor_names.get(&index) {
+            blocks.insert(index, RichBlock::Anchor { name: name.clone() });
         }
-        targets.linked_names.insert(name.clone());
-        Some(json!({"type": "reference_link", "text": label, "reference_name": name}))
-    })
-}
-
-/// Whether a line defines a footnote (`[^id]: text`).
-pub(super) fn is_footnote_definition(line: &str) -> bool {
-    RE_FOOTNOTE_DEFINITION.is_match(line)
-}
-
-/// The block for a footnote definition line: `[n]` followed by the note as
-/// the `reference` its markers link to. `None` for other lines, outside a
-/// message parse, or for a repeated definition.
-pub(super) fn footnote_definition_block(line: &str) -> Option<RichBlock> {
-    let caps = RE_FOOTNOTE_DEFINITION.captures(line)?;
-    let id = caps.get(1)?.as_str();
-    let note = caps.get(2)?.as_str().trim();
-    let (number, name) = TARGETS.with(|targets| {
-        let mut targets = targets.borrow_mut();
-        let targets = targets.as_mut()?;
-        let (number, name) = targets.footnotes.get(id)?.clone();
-        targets
-            .placed
-            .insert(name.clone())
-            .then_some((number, name))
-    })?;
-    Some(RichBlock::Paragraph {
-        text: json!([
-            format!("[{number}] "),
-            {"type": "reference", "name": name, "text": super::parse_inline(note)},
-        ]),
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn links_to_targets_that_never_became_blocks_keep_their_text() {
-        let blocks = vec![RichBlock::Paragraph {
-            text: json!([
-                "Lihat ",
-                {"type": "anchor_link", "text": "rincian", "anchor_name": "bagian-9"},
-                " dan ",
-                {"type": "anchor_link", "text": "atas", "anchor_name": ""},
-                {"type": "reference_link", "text": "[1]", "reference_name": "catatan-1"},
-            ]),
-        }];
-        let dangling: HashSet<String> = ["bagian-9".to_string(), "catatan-1".to_string()].into();
-        let cleaned = unlink_anchors(blocks, &dangling);
-        let RichBlock::Paragraph { text } = &cleaned[0] else {
-            panic!("paragraph kept");
-        };
-        assert_eq!(text[1], "rincian");
-        assert_eq!(text[3]["type"], "anchor_link", "top-of-message links stay");
-        assert_eq!(text[4], "[1]");
+    fn paragraph(text: Value) -> RichBlock {
+        RichBlock::Paragraph { text }
     }
 
     #[test]
     fn keys_ignore_case_punctuation_and_numbering() {
         assert_eq!(key("2. Apa itu DNS?"), "2apaitudns");
-        assert_eq!(heading_keys("2. Apa itu DNS?")[1], "apaitudns");
-        assert_eq!(heading_keys("IV. Penutup")[1], "penutup");
+        assert_eq!(
+            key(&RE_HEADING_NUMBER.replace("2. Apa itu DNS?", "")),
+            "apaitudns"
+        );
+        assert_eq!(
+            key(&RE_HEADING_NUMBER.replace("IV. Penutup", "")),
+            "penutup"
+        );
+        assert_eq!(
+            key(&RE_HEADING_NUMBER.replace("MVC Pattern", "")),
+            "mvcpattern",
+            "an all-caps word is not numbering"
+        );
+    }
+
+    #[test]
+    fn exact_heading_wins_over_a_numbered_one() {
+        let mut blocks = vec![
+            paragraph(section_link(json!("Pola"), "pattern")),
+            RichBlock::SectionHeading {
+                text: json!("1. Pattern"),
+                level: 2,
+            },
+            RichBlock::SectionHeading {
+                text: json!("Pattern"),
+                level: 2,
+            },
+        ];
+        resolve(&mut blocks);
+        assert_eq!(
+            blocks[2],
+            RichBlock::Anchor {
+                name: "bagian-1".into()
+            }
+        );
+        assert!(matches!(&blocks[3], RichBlock::SectionHeading { text, .. } if *text == "Pattern"));
+    }
+
+    #[test]
+    fn unresolved_links_flatten_into_their_parent_text() {
+        let mut blocks = vec![paragraph(json!([
+            "Lihat ",
+            section_link(
+                json!([{"type": "bold", "text": "DNS"}, " server"]),
+                "hilang"
+            ),
+            " sekarang",
+        ]))];
+        resolve(&mut blocks);
+        assert_eq!(
+            blocks[0],
+            paragraph(json!(["Lihat ", {"type": "bold", "text": "DNS"}, " server sekarang"]))
+        );
+    }
+
+    #[test]
+    fn tables_keep_their_header_flag() {
+        let cell = |text: Value| crate::bot::models::RichBlockTableCell::new(text, false, None);
+        let mut blocks = vec![RichBlock::Table {
+            cells: vec![
+                vec![cell(json!("A"))],
+                vec![cell(section_link(json!("x"), "hilang"))],
+            ],
+            has_header: true,
+            is_bordered: false,
+            is_striped: false,
+            is_compact: false,
+            caption: None,
+        }];
+        resolve(&mut blocks);
+        let RichBlock::Table {
+            has_header, cells, ..
+        } = &blocks[0]
+        else {
+            panic!("table kept");
+        };
+        assert!(*has_header);
+        assert_eq!(cells[1][0].text, "x");
     }
 }

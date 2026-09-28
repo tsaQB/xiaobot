@@ -580,7 +580,7 @@ pub fn get_tools_definition() -> Value {
                         },
                         "open_period": {
                             "type": "integer",
-                            "description": "Lama kuis dibuka dalam detik (5 sampai 2628000); setelah itu kuis ditutup otomatis"
+                            "description": "Lama kuis dibuka dalam detik (5 sampai 2628000); setelah itu kuis ditutup otomatis. Jangan diisi bila kuis tidak perlu batas waktu"
                         },
                         "hide_results_until_closes": {
                             "type": "boolean",
@@ -1273,8 +1273,10 @@ impl CreateQuizArgs {
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .map(|text| crate::util::truncate_chars(text, POLL_MAX_DESCRIPTION_CHARS).to_string());
+        // Zero or a negative value means "no time limit", not the shortest one.
         self.open_period = self
             .open_period
+            .filter(|secs| *secs > 0)
             .map(|secs| secs.clamp(POLL_MIN_OPEN_PERIOD_SECS, POLL_MAX_OPEN_PERIOD_SECS));
         // Hidden results are revealed when the quiz closes; without a closing
         // time they would stay hidden forever.

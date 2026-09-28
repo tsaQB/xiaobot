@@ -10,6 +10,8 @@ const MAX_CLIP_BYTES: usize = 10 * 1024 * 1024;
 const MAX_CLIP_SECS: f64 = 10.0;
 /// Bound on the still photo download.
 const MAX_PHOTO_BYTES: usize = 10 * 1024 * 1024;
+/// Start of the tool result for a live photo that reached the chat.
+pub(super) const LIVE_PHOTO_SENT: &str = "Live photo berhasil dikirim ke obrolan.";
 
 /// Reads the duration of an MP4/MOV file from its `moov/mvhd` box. `None`
 /// when the file is not a readable MP4.
@@ -51,9 +53,22 @@ fn mp4_duration_secs(bytes: &[u8]) -> Option<f64> {
     (timescale > 0).then(|| duration as f64 / f64::from(timescale))
 }
 
-/// Checks the downloaded clip and uploads the live photo. Returns the tool
-/// result for the model.
-async fn send_downloaded(
+/// Checks the downloaded clip before anything else is fetched: it must be
+/// a readable MP4 of at most ten seconds.
+fn check_clip(video: &[u8]) -> Result<(), String> {
+    match mp4_duration_secs(video) {
+        None => Err(
+            "Gagal mengirim live photo: video_url bukan video MP4 yang dapat dibaca.".to_string(),
+        ),
+        Some(secs) if secs > MAX_CLIP_SECS + 0.05 => Err(format!(
+            "Gagal mengirim live photo: video berdurasi {secs:.1} detik, padahal maksimal {MAX_CLIP_SECS:.0} detik."
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+/// Uploads a checked clip and its photo. Returns the tool result.
+async fn upload(
     bot: &TelegramBotClient,
     chat_id: i64,
     reply_to_message_id: Option<i64>,
@@ -61,24 +76,11 @@ async fn send_downloaded(
     photo: Vec<u8>,
     caption: Option<&str>,
 ) -> String {
-    match mp4_duration_secs(&video) {
-        None => {
-            return "Gagal mengirim live photo: video_url bukan video MP4 yang dapat dibaca."
-                .to_string()
-        }
-        Some(secs) if secs > MAX_CLIP_SECS + 0.05 => {
-            return format!(
-                "Gagal mengirim live photo: video berdurasi {secs:.1} detik, padahal maksimal {MAX_CLIP_SECS:.0} detik."
-            )
-        }
-        Some(_) => {}
-    }
     match bot
         .send_live_photo(chat_id, video, photo, caption, reply_to_message_id)
         .await
     {
-        Ok(_) => "Live photo berhasil dikirim ke obrolan. Jangan sematkan tag media untuknya."
-            .to_string(),
+        Ok(_) => format!("{LIVE_PHOTO_SENT} Jangan sematkan tag media untuknya."),
         Err(err) => format!("Gagal mengirim live photo ke Telegram: {err}"),
     }
 }
@@ -108,13 +110,17 @@ pub(super) async fn run_send_live_photo(
     else {
         return "Gagal mengunduh video live photo (tidak dapat diakses, bukan alamat publik, atau lebih dari 10 MB).".to_string();
     };
+    // A clip Telegram would refuse is rejected before the photo is fetched.
+    if let Err(err) = check_clip(&video) {
+        return err;
+    }
     let Some((photo, _, _)) = bot
         .download_media_bytes(&args.photo_url, MAX_PHOTO_BYTES)
         .await
     else {
         return "Gagal mengunduh foto live photo (tidak dapat diakses, bukan alamat publik, atau terlalu besar).".to_string();
     };
-    send_downloaded(
+    upload(
         bot,
         chat_id,
         reply_to_message_id,
@@ -160,16 +166,18 @@ mod tests {
     #[tokio::test]
     async fn uploads_the_clip_and_photo_as_one_live_photo() {
         let fake = FakeTelegram::always_ok().await;
-        let result = send_downloaded(
+        let clip = mp4(600, 1_800);
+        assert_eq!(check_clip(&clip), Ok(()));
+        let result = upload(
             &fake.client,
             5,
             Some(9),
-            mp4(600, 1_800),
+            clip,
             JPEG.to_vec(),
             Some("Ombak pagi"),
         )
         .await;
-        assert!(result.starts_with("Live photo berhasil"), "{result}");
+        assert!(result.starts_with(LIVE_PHOTO_SENT), "{result}");
         let request = &fake.requests()[0];
         assert_eq!(request.method, "sendLivePhoto");
         for field in [
@@ -182,20 +190,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn clips_longer_than_ten_seconds_are_refused_before_upload() {
-        let fake = FakeTelegram::always_ok().await;
-        let result = send_downloaded(
-            &fake.client,
-            5,
-            None,
-            mp4(1000, 12_000),
-            JPEG.to_vec(),
-            None,
-        )
-        .await;
-        assert!(result.contains("12.0 detik"), "{result}");
-        assert!(fake.requests().is_empty());
+    #[test]
+    fn clips_longer_than_ten_seconds_or_unreadable_are_refused() {
+        let too_long = check_clip(&mp4(1000, 12_000)).expect_err("12 s clip refused");
+        assert!(too_long.contains("12.0 detik"), "{too_long}");
+        assert!(check_clip(b"bukan video").is_err());
     }
 
     #[tokio::test]

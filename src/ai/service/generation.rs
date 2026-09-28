@@ -1505,13 +1505,25 @@ impl AIChatService {
                         if let Some(s) = sink {
                             s.on_action("Live photo", Some(ProgressActivity::Drawing));
                         }
-                        super::live_photo::run_send_live_photo(
-                            bot.as_ref(),
-                            chat_id,
-                            reply_to_message_id,
-                            &tc.arguments,
+                        // Downloads and the upload can take a while, so Stop
+                        // and shutdown must be able to interrupt them.
+                        match race_with_cancel(
+                            cancel_rx,
+                            super::live_photo::run_send_live_photo(
+                                bot.as_ref(),
+                                chat_id,
+                                reply_to_message_id,
+                                &tc.arguments,
+                            ),
                         )
                         .await
+                        {
+                            Raced::Completed(res) => res,
+                            Raced::Cancelled => {
+                                cancelled = true;
+                                "Pengiriman live photo dibatalkan.".to_string()
+                            }
+                        }
                     } else if name == "send_photo" {
                         if let Some(s) = sink {
                             s.on_action("Photo", Some(ProgressActivity::Drawing));
@@ -1953,9 +1965,12 @@ impl AIChatService {
                     }));
                 }
 
-                let has_quiz_or_media = tool_results.iter().any(|(_, name, _, _)| {
+                let has_quiz_or_media = tool_results.iter().any(|(_, name, _, res)| {
                     name == "create_quiz"
-                        || name == "send_live_photo"
+                        // A failed live photo must leave the model free to
+                        // retry with other URLs.
+                        || (name == "send_live_photo"
+                            && res.starts_with(super::live_photo::LIVE_PHOTO_SENT))
                         || name == "send_photo"
                         || name == "send_collage"
                         || name == "send_slideshow"

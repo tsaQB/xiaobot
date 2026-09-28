@@ -8,6 +8,7 @@
 //! `![👍](tg://emoji?id=…)`). Telegram gets real entities; plain-text
 //! channels (WhatsApp, the terminal) get a readable flattening instead.
 
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use regex::{Captures, Regex};
@@ -317,10 +318,26 @@ fn scripted(text: &str, map: fn(char) -> Option<char>, sign: char) -> String {
         })
 }
 
+/// Footnote ids that have a definition line (`[^id]:`) anywhere in `text`.
+pub(crate) fn defined_footnotes(text: &str) -> HashSet<String> {
+    text.lines()
+        .filter_map(|line| super::links::footnote_definition(line.trim()))
+        .map(|(id, _)| id.to_string())
+        .collect()
+}
+
+/// [`flatten_extended_inline_with`] for a whole message.
+#[cfg(test)]
+pub fn flatten_extended_inline(text: &str) -> String {
+    flatten_extended_inline_with(text, &defined_footnotes(text))
+}
+
 /// Readable form of the extended entities for channels without them:
 /// highlight becomes bold, super/subscript become Unicode where possible,
-/// date-times and custom emoji keep their visible text.
-pub fn flatten_extended_inline(text: &str) -> String {
+/// date-times and custom emoji keep their visible text, section links keep
+/// their text, and footnotes in `footnotes` (defined anywhere in the whole
+/// message) read as `[id]`.
+pub(crate) fn flatten_extended_inline_with(text: &str, footnotes: &HashSet<String>) -> String {
     let text = RE_MARK_TAG.replace_all(text, "**$1**");
     let text = RE_EQ_MARK.replace_all(&text, "**$1**");
     let text = RE_SUP_TAG.replace_all(&text, |caps: &Captures| {
@@ -333,21 +350,36 @@ pub fn flatten_extended_inline(text: &str) -> String {
     let text = RE_EMOJI_TAG.replace_all(&text, "$2");
     let text = RE_TG_LINK.replace_all(&text, "$1");
     // In-message navigation cannot jump anywhere in plain text: section
-    // links keep their text and footnotes read as `[1]`.
+    // links keep their text and footnotes read as `[1]`. A `[^…]` without a
+    // definition (such as the regex class `[^0-9]`) is left alone.
     let text = RE_SECTION_LINK.replace_all(&text, "$1");
-    let text = RE_FOOTNOTE_DEFINITION.replace_all(&text, "$1[$2] ");
-    RE_FOOTNOTE_MARKER.replace_all(&text, "[$1]").into_owned()
+    let text = RE_FOOTNOTE_DEFINITION.replace_all(&text, |caps: &Captures| {
+        format!("{}[{}] ", &caps[1], &caps[2])
+    });
+    RE_FOOTNOTE_MARKER
+        .replace_all(&text, |caps: &Captures| {
+            if footnotes.contains(&caps[1]) {
+                format!("[{}]", &caps[1])
+            } else {
+                caps[0].to_string()
+            }
+        })
+        .into_owned()
 }
 
-/// [`flatten_extended_inline`] outside fenced and inline code.
+/// [`flatten_extended_inline_with`] outside fenced and inline code.
 pub fn flatten_extended_inline_outside_code(text: &str) -> String {
+    let footnotes = defined_footnotes(text);
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
     for code in RE_CODE_SEGMENT.find_iter(text) {
-        out.push_str(&flatten_extended_inline(&text[last..code.start()]));
+        out.push_str(&flatten_extended_inline_with(
+            &text[last..code.start()],
+            &footnotes,
+        ));
         out.push_str(code.as_str());
         last = code.end();
     }
-    out.push_str(&flatten_extended_inline(&text[last..]));
+    out.push_str(&flatten_extended_inline_with(&text[last..], &footnotes));
     out
 }

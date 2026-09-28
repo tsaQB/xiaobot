@@ -1657,7 +1657,11 @@ fn footnotes_link_markers_to_their_notes() {
     assert_eq!(links.len(), 1, "an undefined footnote gets no link");
     assert_eq!(links[0]["text"], "[1]");
     assert_eq!(links[0]["reference_name"], "catatan-1");
-    assert!(json[0].to_string().contains("[2]"), "{}", json[0]);
+    assert!(
+        json[0].to_string().contains("lambat[^s]."),
+        "an undefined marker stays as written: {}",
+        json[0]
+    );
 
     let references = all_of(&json, "reference");
     assert_eq!(references.len(), 1);
@@ -1672,4 +1676,34 @@ fn navigation_is_plain_text_on_other_channels() {
         flatten_extended_inline("Lihat [DNS](#dns) dan fakta[^1].\n[^1]: Sumber resmi."),
         "Lihat DNS dan fakta[1].\n[1] Sumber resmi."
     );
+}
+
+#[test]
+fn regex_classes_are_not_mistaken_for_footnotes() {
+    let text = "Karakter selain angka: [^0-9]+ dan [^a-z].";
+    let json = blocks_json(text);
+    assert!(all_of(&json, "reference_link").is_empty());
+    assert_eq!(json[0]["text"], text, "the text is kept exactly");
+    assert!(!json.to_string().contains("xiao_"), "no placeholder leaks");
+    assert_eq!(
+        flatten_extended_inline(text),
+        text,
+        "WhatsApp and the terminal keep negated classes as written"
+    );
+    let code = "Pakai `[^a-z]` lalu fakta[^1].\n\n[^1]: sumber";
+    let json = blocks_json(code);
+    assert_eq!(
+        all_of(&json, "reference_link")[0]["text"],
+        "[1]",
+        "code is not counted"
+    );
+}
+
+#[test]
+fn a_footnote_note_may_start_on_the_next_line() {
+    let json = blocks_json("Fakta[^a].\n\n[^a]:\nCatatan di baris berikutnya.");
+    let references = all_of(&json, "reference");
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0]["text"], "Catatan di baris berikutnya.");
+    assert_eq!(json.as_array().map(Vec::len), Some(2));
 }

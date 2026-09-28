@@ -1287,6 +1287,8 @@ fn is_non_text_key(key: &str) -> bool {
             | "valign"
             | "language"
             | "name"
+            | "anchor_name"
+            | "reference_name"
             | "document"
     )
 }

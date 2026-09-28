@@ -45,7 +45,11 @@ mod inline;
 #[path = "markdown/links.rs"]
 mod links;
 
-pub(crate) use extended::{flatten_extended_inline, flatten_extended_inline_outside_code};
+#[cfg(test)]
+pub(crate) use extended::flatten_extended_inline;
+pub(crate) use extended::{
+    defined_footnotes, flatten_extended_inline_outside_code, flatten_extended_inline_with,
+};
 pub use inline::parse_inline;
 
 #[path = "markdown/media.rs"]
@@ -933,15 +937,13 @@ fn emit_math_or_quote_blocks(blocks: &mut Vec<RichBlock>, math_lines: &[String])
 }
 
 pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
-    links::with_link_targets(text, || parse_markdown_blocks(text))
+    let mut blocks = parse_markdown_blocks(text);
+    // Section links and footnotes are resolved against the finished blocks.
+    links::resolve(&mut blocks);
+    blocks
 }
 
-/// Pushes a section heading, preceded by an anchor when a link in the
-/// message points to it.
 fn push_heading(blocks: &mut Vec<RichBlock>, raw_text: &str, level: usize) {
-    if let Some(name) = links::heading_anchor(raw_text) {
-        blocks.push(RichBlock::Anchor { name });
-    }
     blocks.push(RichBlock::SectionHeading {
         text: parse_inline(raw_text),
         level: level.min(6),
@@ -1240,11 +1242,20 @@ fn parse_markdown_blocks(text: &str) -> Vec<RichBlock> {
             continue;
         }
 
-        // 5c. Footnote definition ([^1]: note)
-        if let Some(footnote) = links::footnote_definition_block(stripped) {
-            blocks.push(footnote);
-            i += 1;
-            continue;
+        // 5c. Footnote definition ([^1]: note). A note may also start on
+        // the next line; a definition without any note stays plain text.
+        if let Some((id, note)) = links::footnote_definition(stripped) {
+            let next_line = lines.get(i + 1).map(|line| line.trim()).unwrap_or("");
+            if !note.is_empty() {
+                blocks.push(links::footnote_note_block(id, parse_inline(note)));
+                i += 1;
+                continue;
+            }
+            if !next_line.is_empty() && links::footnote_definition(next_line).is_none() {
+                blocks.push(links::footnote_note_block(id, parse_inline(next_line)));
+                i += 2;
+                continue;
+            }
         }
 
         // 6a. Pullquote (>>> quote)
@@ -1567,7 +1578,7 @@ fn parse_markdown_blocks(text: &str) -> Vec<RichBlock> {
                 || s_curr.starts_with(r"\[")
                 || RE_BLOCK_HEADING.is_match(s_curr)
                 || RE_HTML_HEADING.is_match(s_curr)
-                || links::is_footnote_definition(s_curr)
+                || links::footnote_definition(s_curr).is_some()
                 || s_curr.starts_with("<p>")
                 || s_curr.starts_with("<p ")
                 || s_curr.eq_ignore_ascii_case("<hr>")

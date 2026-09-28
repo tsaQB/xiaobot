@@ -40,6 +40,21 @@ pub enum FileDownloadError {
     Network,
 }
 
+/// Upload file name and MIME type of an image, from its signature.
+fn image_kind(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(("image.png", "image/png"))
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some(("image.jpg", "image/jpeg"))
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(("image.gif", "image/gif"))
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some(("image.webp", "image/webp"))
+    } else {
+        None
+    }
+}
+
 /// A native poll or quiz for `sendPoll`.
 #[derive(Debug, Clone, Default)]
 pub struct PollRequest<'a> {
@@ -686,18 +701,7 @@ impl TelegramBotClient {
         reply_markup: Option<Value>,
         reply_to_message_id: Option<i64>,
     ) -> Result<Value, String> {
-        let (file_name, mime_type) = if photo_bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            ("image.png", "image/png")
-        } else if photo_bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-            ("image.jpg", "image/jpeg")
-        } else if photo_bytes.starts_with(b"GIF87a") || photo_bytes.starts_with(b"GIF89a") {
-            ("image.gif", "image/gif")
-        } else if photo_bytes.len() >= 12
-            && &photo_bytes[..4] == b"RIFF"
-            && &photo_bytes[8..12] == b"WEBP"
-        {
-            ("image.webp", "image/webp")
-        } else {
+        let Some((file_name, mime_type)) = image_kind(&photo_bytes) else {
             return Err("sendPhoto rejected bytes with an unsupported image signature".to_string());
         };
         let caption = caption.map(str::to_string);
@@ -735,16 +739,9 @@ impl TelegramBotClient {
         caption: Option<&str>,
         reply_to_message_id: Option<i64>,
     ) -> Result<Value, String> {
-        let (photo_name, photo_mime) = if photo_bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            ("photo.png", "image/png")
-        } else if photo_bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-            ("photo.jpg", "image/jpeg")
-        } else if photo_bytes.len() >= 12
-            && &photo_bytes[..4] == b"RIFF"
-            && &photo_bytes[8..12] == b"WEBP"
-        {
-            ("photo.webp", "image/webp")
-        } else {
+        let Some((photo_name, photo_mime)) =
+            image_kind(&photo_bytes).filter(|(_, mime)| *mime != "image/gif")
+        else {
             return Err("sendLivePhoto needs a JPEG, PNG or WEBP photo".to_string());
         };
         let caption = caption.map(str::to_string);

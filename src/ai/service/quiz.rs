@@ -320,6 +320,20 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_open_period_means_no_time_limit() {
+        for period in ["0", "-30"] {
+            let mut args: CreateQuizArgs = serde_json::from_str(&format!(
+                r#"{{"question": "1+1?", "options": ["1", "2"], "correct_option_ids": [1],
+                    "open_period": {period}, "hide_results_until_closes": true}}"#
+            ))
+            .expect("quiz arguments");
+            args.sanitize();
+            assert_eq!(args.open_period, None, "{period} must not become 5 seconds");
+            assert_eq!(args.hide_results_until_closes, None);
+        }
+    }
+
+    #[test]
     fn hidden_results_need_a_closing_time() {
         let mut args: CreateQuizArgs = serde_json::from_str(
             r#"{"question": "1+1?", "options": ["1", "2"], "correct_option_ids": [1],
