@@ -562,9 +562,29 @@ pub fn get_tools_definition() -> Value {
                             },
                             "description": "URL gambar https per pilihan, urutannya sama dengan options; isi string kosong untuk pilihan tanpa gambar"
                         },
+                        "description": {
+                            "type": "string",
+                            "description": "Keterangan singkat yang tampil di bawah soal (opsional, maksimal 1024 karakter), misalnya petunjuk atau konteks soal"
+                        },
                         "explanation": {
                             "type": "string",
                             "description": "Penjelasan saat jawaban dibuka (opsional, maksimal 200 karakter, maksimal 2 line breaks)"
+                        },
+                        "explanation_image_url": {
+                            "type": "string",
+                            "description": "URL gambar https yang menyertai penjelasan jawaban (opsional); cari dulu dengan web_search, jangan mengarang URL"
+                        },
+                        "allows_revoting": {
+                            "type": "boolean",
+                            "description": "true agar pemain boleh mengubah jawabannya (bawaan kuis: tidak boleh)"
+                        },
+                        "open_period": {
+                            "type": "integer",
+                            "description": "Lama kuis dibuka dalam detik (5 sampai 2628000); setelah itu kuis ditutup otomatis"
+                        },
+                        "hide_results_until_closes": {
+                            "type": "boolean",
+                            "description": "true agar hasil pilihan semua pemain baru terlihat setelah kuis ditutup; wajib disertai open_period"
                         },
                         "preamble": {
                             "type": "string",
@@ -572,6 +592,31 @@ pub fn get_tools_definition() -> Value {
                         }
                     },
                     "required": ["question", "options", "correct_option_ids"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "send_live_photo",
+                "description": "Kirim live photo (foto diam beserta klip gerak pendek, seperti Live Photo di iPhone) langsung ke obrolan Telegram. Butuh URL video MP4 berdurasi maksimal 10 detik dan maksimal 10 MB, serta URL foto diam JPG/PNG/WEBP. Gunakan hanya URL yang diberikan pengguna atau ditemukan lewat web_search; jangan mengarang URL. Tool ini mengirim langsung, jadi jangan sematkan tag media untuknya.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "video_url": {
+                            "type": "string",
+                            "description": "URL https video MP4 (maksimal 10 detik, maksimal 10 MB)"
+                        },
+                        "photo_url": {
+                            "type": "string",
+                            "description": "URL https foto diam (JPG, PNG, atau WEBP) yang menjadi sampul live photo"
+                        },
+                        "caption": {
+                            "type": "string",
+                            "description": "Keterangan singkat (opsional, maksimal 1024 karakter, teks biasa)"
+                        }
+                    },
+                    "required": ["video_url", "photo_url"]
                 }
             }
         },
@@ -1047,7 +1092,55 @@ pub struct CreateQuizArgs {
     /// Pictures for the options, in option order; empty for none.
     #[serde(default, deserialize_with = "deserialize_url_list")]
     pub option_image_urls: Vec<String>,
+    /// Text shown under the question (Bot API 9.6 `description`).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Picture shown with the explanation (Bot API 10.0 `explanation_media`).
+    #[serde(default)]
+    pub explanation_image_url: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_flexible_opt_bool")]
+    pub allows_revoting: Option<bool>,
+    /// Seconds the quiz stays open before it closes by itself.
+    #[serde(
+        default,
+        deserialize_with = "crate::bot::models::deserialize_flexible_opt_i32"
+    )]
+    pub open_period: Option<i32>,
+    #[serde(default, deserialize_with = "deserialize_flexible_opt_bool")]
+    pub hide_results_until_closes: Option<bool>,
 }
+
+/// Arguments of the `send_live_photo` tool.
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq, Eq)]
+pub struct SendLivePhotoArgs {
+    pub video_url: String,
+    pub photo_url: String,
+    #[serde(default)]
+    pub caption: Option<String>,
+}
+
+impl SendLivePhotoArgs {
+    pub fn sanitize(&mut self) {
+        self.video_url = self.video_url.trim().to_string();
+        self.photo_url = self.photo_url.trim().to_string();
+        sanitize_multimedia_caption(&mut self.caption);
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if web_url(&self.video_url).is_none() {
+            return Err("video_url harus berupa URL http(s)".to_string());
+        }
+        if web_url(&self.photo_url).is_none() {
+            return Err("photo_url harus berupa URL http(s)".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Bot API limits for `sendPoll`.
+const POLL_MAX_DESCRIPTION_CHARS: usize = 1024;
+const POLL_MIN_OPEN_PERIOD_SECS: i32 = 5;
+const POLL_MAX_OPEN_PERIOD_SECS: i32 = 2_628_000;
 
 /// Accepts `[1, "2"]`, a single number, or `null`; unreadable items are
 /// dropped and caught by validation.
@@ -1168,9 +1261,25 @@ impl CreateQuizArgs {
         self.correct_option_ids = correct_ids;
 
         self.image_url = self.image_url.as_deref().and_then(web_url);
+        self.explanation_image_url = self.explanation_image_url.as_deref().and_then(web_url);
         self.option_image_urls.truncate(option_count);
         for url in &mut self.option_image_urls {
             *url = web_url(url).unwrap_or_default();
+        }
+
+        self.description = self
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| crate::util::truncate_chars(text, POLL_MAX_DESCRIPTION_CHARS).to_string());
+        self.open_period = self
+            .open_period
+            .map(|secs| secs.clamp(POLL_MIN_OPEN_PERIOD_SECS, POLL_MAX_OPEN_PERIOD_SECS));
+        // Hidden results are revealed when the quiz closes; without a closing
+        // time they would stay hidden forever.
+        if self.open_period.is_none() {
+            self.hide_results_until_closes = None;
         }
 
         if let Some(exp) = &mut self.explanation {

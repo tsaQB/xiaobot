@@ -199,7 +199,8 @@ cargo run -- setup
     - `context.rs`: Token budget estimation, sliding-window message context assembly, and conversation trimming.
     - `prompt.rs`: System prompt assembly; long-term memory and summaries are sanitized, capped and fenced as untrusted data.
     - `generation.rs`: Streaming SSE lifecycle, provider HTTP dispatch, retry backoff, tool execution loops, and the shared `race_with_cancel` cancellation helper.
-    - `quiz.rs`: The `create_quiz` tool: preamble, native quiz with one or several correct answers, question/option pictures, shuffled options, and a retry without pictures when Telegram cannot load them.
+    - `quiz.rs`: The `create_quiz` tool: preamble, native quiz with one or several correct answers, question/option/explanation pictures, description, shuffled options, revoting, open period with results hidden until close (only with an open period), and a retry without pictures when Telegram cannot load them.
+    - `live_photo.rs`: The `send_live_photo` tool. Live photos cannot be sent by URL, so both files are downloaded with `download_media_bytes` (SSRF-safe, bounded), the MP4 duration is checked (at most 10 seconds), and the files are uploaded with `sendLivePhoto`.
     - `curator.rs`: Background memory curation: profile fact extraction and older-history summarization.
     - `image.rs`: Image generation providers, prompt translation, and base64/download resolution.
     - `multimodal.rs`: Specialist inputs (Vision, Video, Audio STT) and observation turn formatting.
@@ -225,7 +226,7 @@ cargo run -- setup
   - `whatsapp/delivery.rs`: Outbound delivery, JID cache, and typing indicators.
   - `whatsapp/mapper.rs`: JID normalization, id mapping, and owner authorization.
 - `src/parser/`:
-  - `markdown.rs`: Converts extended markdown to Telegram Bot API 10.3 `RichBlock` AST representations. Inline text is parsed in `markdown/inline.rs`; `markdown/extended.rs` handles highlight (`==x==`, `<mark>`), `<sup>`/`<sub>`, date-times (`<time datetime>`, `<tg-time>`, `tg://time` links) and custom emoji (`<tg-emoji>`, `tg://emoji` links), and flattens them for WhatsApp and the terminal. Tags inside inline code stay literal.
+  - `markdown.rs`: Converts extended markdown to Telegram Bot API 10.3 `RichBlock` AST representations. Inline text is parsed in `markdown/inline.rs`; `markdown/extended.rs` handles highlight (`==x==`, `<mark>`), `<sup>`/`<sub>`, date-times (`<time datetime>`, `<tg-time>`, `tg://time` links) and custom emoji (`<tg-emoji>`, `tg://emoji` links), and flattens them for WhatsApp and the terminal. Tags inside inline code stay literal. `markdown/links.rs` handles in-message navigation: `[text](#section)` becomes an `anchor_link` to an `anchor` block placed before the linked heading, and footnotes (`[^id]` / `[^id]: note`) become `reference_link` / `reference`. Targets are collected before parsing, and links whose target did not end up in the message keep only their text.
   - `whatsapp.rs`: Converts markdown to WhatsApp formatting and splits replies on character boundaries.
   - `latex.rs`: Sanitizes mathematical expressions for cross-platform Android and iOS rendering.
   - `rtl.rs`: Detects Right-to-Left (RTL) scripts (Arabic, Hebrew, Persian, Urdu, etc.) and Eastern Arabic numerals, automatically setting layout direction and right-aligned table cells.

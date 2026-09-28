@@ -57,6 +57,16 @@ pub struct PollRequest<'a> {
     pub shuffle_options: bool,
     /// Media shown with the question (`InputPollMedia`), e.g. a photo.
     pub media: Option<Value>,
+    /// Text shown under the question.
+    pub description: Option<&'a str>,
+    /// Media shown with the quiz explanation (`InputPollMedia`).
+    pub explanation_media: Option<Value>,
+    /// Let players change their answer.
+    pub allows_revoting: bool,
+    /// Seconds before the poll closes by itself.
+    pub open_period: Option<i32>,
+    /// Show the aggregate results only once the poll is closed.
+    pub hide_results_until_closes: bool,
 }
 
 /// Converts one rendered Telegram-HTML chunk back to readable plain text.
@@ -638,6 +648,21 @@ impl TelegramBotClient {
         if let Some(media) = poll.media.as_ref() {
             payload["media"] = media.clone();
         }
+        if let Some(description) = poll.description.map(str::trim).filter(|s| !s.is_empty()) {
+            payload["description"] = json!(description);
+        }
+        if let Some(media) = poll.explanation_media.as_ref() {
+            payload["explanation_media"] = media.clone();
+        }
+        if poll.allows_revoting {
+            payload["allows_revoting"] = json!(true);
+        }
+        if let Some(open_period) = poll.open_period {
+            payload["open_period"] = json!(open_period);
+        }
+        if poll.hide_results_until_closes {
+            payload["hide_results_until_closes"] = json!(true);
+        }
         if let Some(exp) = poll.explanation.map(str::trim).filter(|s| !s.is_empty()) {
             payload["explanation"] = json!(exp);
             if let Some(pm) = poll.explanation_parse_mode {
@@ -693,6 +718,51 @@ impl TelegramBotClient {
             }
             if let Some(ref reply_markup) = reply_markup {
                 form = form.text("reply_markup", reply_markup.to_string());
+            }
+            self.apply_form_delivery_context(form, true, None, reply_to_message_id)
+        })
+        .await
+    }
+
+    /// Uploads a live photo (Bot API 10.0 `sendLivePhoto`): a short video and
+    /// its still photo. Telegram does not accept live photos by URL, so both
+    /// files are always uploaded.
+    pub async fn send_live_photo(
+        &self,
+        chat_id: i64,
+        video_bytes: Vec<u8>,
+        photo_bytes: Vec<u8>,
+        caption: Option<&str>,
+        reply_to_message_id: Option<i64>,
+    ) -> Result<Value, String> {
+        let (photo_name, photo_mime) = if photo_bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            ("photo.png", "image/png")
+        } else if photo_bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+            ("photo.jpg", "image/jpeg")
+        } else if photo_bytes.len() >= 12
+            && &photo_bytes[..4] == b"RIFF"
+            && &photo_bytes[8..12] == b"WEBP"
+        {
+            ("photo.webp", "image/webp")
+        } else {
+            return Err("sendLivePhoto needs a JPEG, PNG or WEBP photo".to_string());
+        };
+        let caption = caption.map(str::to_string);
+        self.post_multipart("sendLivePhoto", || {
+            let video = Part::bytes(video_bytes.clone())
+                .file_name("live.mp4")
+                .mime_str("video/mp4")
+                .map_err(|error| error.to_string())?;
+            let photo = Part::bytes(photo_bytes.clone())
+                .file_name(photo_name)
+                .mime_str(photo_mime)
+                .map_err(|error| error.to_string())?;
+            let mut form = Form::new()
+                .text("chat_id", chat_id.to_string())
+                .part("live_photo", video)
+                .part("photo", photo);
+            if let Some(ref caption) = caption {
+                form = form.text("caption", caption.clone());
             }
             self.apply_form_delivery_context(form, true, None, reply_to_message_id)
         })

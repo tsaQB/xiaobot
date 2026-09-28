@@ -27,7 +27,7 @@ fn test_sanitize_multimedia_caption_behavior() {
 fn test_tools_definition_contains_expected_tools() {
     let tools = get_tools_definition();
     let array = tools.as_array().expect("tools should be an array");
-    assert_eq!(array.len(), 12);
+    assert_eq!(array.len(), 13);
 
     let names: Vec<_> = array
         .iter()
@@ -37,6 +37,7 @@ fn test_tools_definition_contains_expected_tools() {
     assert!(names.contains(&"fetch_url"));
     assert!(names.contains(&"create_quiz"));
     assert!(names.contains(&"send_photo"));
+    assert!(names.contains(&"send_live_photo"));
     assert!(names.contains(&"send_collage"));
     assert!(names.contains(&"send_slideshow"));
     assert!(names.contains(&"send_audio"));

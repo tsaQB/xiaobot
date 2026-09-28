@@ -1501,6 +1501,17 @@ impl AIChatService {
                             }
                         }
                         outcome.result
+                    } else if name == "send_live_photo" {
+                        if let Some(s) = sink {
+                            s.on_action("Live photo", Some(ProgressActivity::Drawing));
+                        }
+                        super::live_photo::run_send_live_photo(
+                            bot.as_ref(),
+                            chat_id,
+                            reply_to_message_id,
+                            &tc.arguments,
+                        )
+                        .await
                     } else if name == "send_photo" {
                         if let Some(s) = sink {
                             s.on_action("Photo", Some(ProgressActivity::Drawing));
@@ -1944,6 +1955,7 @@ impl AIChatService {
 
                 let has_quiz_or_media = tool_results.iter().any(|(_, name, _, _)| {
                     name == "create_quiz"
+                        || name == "send_live_photo"
                         || name == "send_photo"
                         || name == "send_collage"
                         || name == "send_slideshow"

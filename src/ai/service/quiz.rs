@@ -48,6 +48,9 @@ fn history_summary(args: &CreateQuizArgs, correct_ids: &[i32]) -> String {
         summary.push_str("\n\n");
     }
     summary.push_str(&format!("📊 **Kuis**: {}\n", args.question));
+    if let Some(description) = &args.description {
+        summary.push_str(&format!("{description}\n"));
+    }
     for (index, option) in args.options.iter().enumerate() {
         let mark = if is_correct(correct_ids, index) {
             " (Benar)"
@@ -70,6 +73,9 @@ fn text_quiz(args: &CreateQuizArgs, correct_ids: &[i32]) -> String {
         output.push_str("\n\n");
     }
     output.push_str(&format!("📊 **Kuis**: {}\n\n", args.question));
+    if let Some(description) = &args.description {
+        output.push_str(&format!("{description}\n\n"));
+    }
     for (index, option) in args.options.iter().enumerate() {
         let marker = if is_correct(correct_ids, index) {
             "✅"
@@ -149,7 +155,9 @@ pub(super) async fn run_create_quiz(
             option.media = Some(photo(url));
         }
     }
-    let has_pictures = args.image_url.is_some() || options.iter().any(|o| o.media.is_some());
+    let has_pictures = args.image_url.is_some()
+        || args.explanation_image_url.is_some()
+        || options.iter().any(|o| o.media.is_some());
     let mut poll = PollRequest {
         question: &args.question,
         options: &options,
@@ -160,6 +168,11 @@ pub(super) async fn run_create_quiz(
         explanation_parse_mode: None,
         shuffle_options: args.shuffle_options.unwrap_or(false),
         media: args.image_url.as_deref().map(photo),
+        description: args.description.as_deref(),
+        explanation_media: args.explanation_image_url.as_deref().map(photo),
+        allows_revoting: args.allows_revoting.unwrap_or(false),
+        open_period: args.open_period,
+        hide_results_until_closes: args.hide_results_until_closes.unwrap_or(false),
     };
     let poll_reply_to = preamble_id.or(reply_to_message_id);
 
@@ -177,6 +190,7 @@ pub(super) async fn run_create_quiz(
                 .collect();
             poll.options = &plain_options;
             poll.media = None;
+            poll.explanation_media = None;
             first = bot.send_poll(chat_id, &poll, poll_reply_to).await;
             pictures_dropped = true;
         }
@@ -269,6 +283,54 @@ mod tests {
         assert!(request["options"][1].get("media").is_none());
         let summary = outcome.history_summary.expect("history summary");
         assert!(summary.contains("1. Paus (Benar)") && summary.contains("3. Kelelawar (Benar)"));
+    }
+
+    #[tokio::test]
+    async fn description_explanation_picture_revoting_and_hidden_results_are_sent() {
+        let fake = FakeTelegram::always_ok().await;
+        let quiz = r#"{
+            "question": "Planet terbesar?",
+            "options": ["Mars", "Jupiter"],
+            "correct_option_ids": [1],
+            "description": "  Petunjuk: raksasa gas.  ",
+            "explanation": "Jupiter paling besar.",
+            "explanation_image_url": "https://example.com/jupiter.jpg",
+            "allows_revoting": true,
+            "open_period": "99999999",
+            "hide_results_until_closes": true
+        }"#;
+        let outcome = run_create_quiz(Some(&fake.client), 5, None, quiz).await;
+        assert!(outcome.sent, "{}", outcome.result);
+
+        let request = &fake.requests()[0].json;
+        assert_eq!(request["description"], "Petunjuk: raksasa gas.");
+        assert_eq!(
+            request["explanation_media"],
+            json!({"type": "photo", "media": "https://example.com/jupiter.jpg"})
+        );
+        assert_eq!(request["allows_revoting"], true);
+        assert_eq!(
+            request["open_period"], 2_628_000,
+            "clamped to the Bot API maximum"
+        );
+        assert_eq!(request["hide_results_until_closes"], true);
+        assert!(outcome
+            .history_summary
+            .is_some_and(|summary| summary.contains("Petunjuk: raksasa gas.")));
+    }
+
+    #[test]
+    fn hidden_results_need_a_closing_time() {
+        let mut args: CreateQuizArgs = serde_json::from_str(
+            r#"{"question": "1+1?", "options": ["1", "2"], "correct_option_ids": [1],
+                "hide_results_until_closes": true}"#,
+        )
+        .expect("quiz arguments");
+        args.sanitize();
+        assert_eq!(
+            args.hide_results_until_closes, None,
+            "results hidden without a closing time would never be shown"
+        );
     }
 
     #[tokio::test]

@@ -718,3 +718,25 @@ fn poll_options_carry_optional_media() {
     let with_media = serde_json::to_value(&option).expect("option serializes");
     assert_eq!(with_media["media"]["type"], "photo");
 }
+
+#[test]
+fn in_message_navigation_matches_bot_api_shapes() {
+    let blocks = parser::parse_markdown_to_rich_blocks(
+        "[Ke bagian DNS](#dns)\n\n## DNS\nPenjelasan[^1].\n\n[^1]: Sumber: RFC 1035.",
+    );
+    let json = serde_json::to_value(&blocks).expect("blocks serialize");
+    assert_eq!(json[0]["text"]["type"], "anchor_link");
+    assert_eq!(json[0]["text"]["anchor_name"], "bagian-1");
+    assert_eq!(
+        json[1],
+        serde_json::json!({"type": "anchor", "name": "bagian-1"})
+    );
+    assert_eq!(json[2]["type"], "heading");
+    let marker = &json[3]["text"][1];
+    assert_eq!(marker["type"], "reference_link");
+    assert_eq!(marker["reference_name"], "catatan-1");
+    let note = &json[4]["text"][1];
+    assert_eq!(note["type"], "reference");
+    assert_eq!(note["name"], "catatan-1");
+    assert_eq!(note["text"], "Sumber: RFC 1035.");
+}

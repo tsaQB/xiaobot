@@ -8,6 +8,7 @@ use regex::Regex;
 use serde_json::{json, Value};
 
 use super::extended;
+use super::links;
 use super::{find_bold_marker, is_exponent_marker, normalize_inline_media_label};
 use crate::parser::latex::sanitize_latex_for_telegram;
 use crate::parser::rtl;
@@ -338,7 +339,21 @@ fn parse_inline_tokens(input: &str, depth: usize) -> Value {
             }
         }
 
-        // 6b. Links [text](url)
+        // 6b. Footnote marker [^id]
+        if let Some(after) = rest.strip_prefix("[^") {
+            if let Some(end) = after.find(']') {
+                let id = &after[..end];
+                if !id.is_empty() && !id.contains(char::is_whitespace) {
+                    if let Some(marker) = links::footnote_marker(id) {
+                        out.push(marker);
+                        rest = &after[end + 1..];
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // 6c. Links [text](url)
         if rest.starts_with('[') {
             if let Some(close) = rest.find("](") {
                 if let Some(end) = rest[close + 2..].find(')') {
@@ -352,6 +367,23 @@ fn parse_inline_tokens(input: &str, depth: usize) -> Value {
                     if let Some(entity) = extended::tg_link_entity(url, inner, parse_inline(inner))
                     {
                         out.push(entity);
+                        rest = &rest[close + 3 + end..];
+                        continue;
+                    }
+                    // A link to a section of this message; without that
+                    // section in the message only the text is kept.
+                    if let Some(target) = url.strip_prefix('#') {
+                        match links::section_link_target(target) {
+                            Some(anchor_name) => out.push(json!({
+                                "type": "anchor_link",
+                                "text": parse_inline(inner),
+                                "anchor_name": anchor_name
+                            })),
+                            None => match parse_inline(inner) {
+                                Value::Array(parts) => out.extend(parts),
+                                other => out.push(other),
+                            },
+                        }
                         rest = &rest[close + 3 + end..];
                         continue;
                     }

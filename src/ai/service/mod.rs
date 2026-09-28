@@ -2,6 +2,7 @@ pub mod context;
 pub mod curator;
 pub mod generation;
 pub mod image;
+mod live_photo;
 pub mod multimodal;
 pub(crate) mod prompt;
 mod quiz;

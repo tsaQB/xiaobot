@@ -1567,3 +1567,109 @@ fn full_messages_keep_extended_entities_inline() {
     assert!(json.contains(r#""type":"marked""#), "{json}");
     assert!(!json.contains("tg://time"), "{json}");
 }
+
+fn blocks_json(text: &str) -> serde_json::Value {
+    serde_json::to_value(parse_markdown_to_rich_blocks(text)).expect("blocks serialize")
+}
+
+fn find_all<'a>(value: &'a serde_json::Value, kind: &str, out: &mut Vec<&'a serde_json::Value>) {
+    match value {
+        serde_json::Value::Array(items) => items.iter().for_each(|item| find_all(item, kind, out)),
+        serde_json::Value::Object(object) => {
+            if object.get("type").and_then(|t| t.as_str()) == Some(kind) {
+                out.push(value);
+            }
+            object.values().for_each(|item| find_all(item, kind, out));
+        }
+        _ => {}
+    }
+}
+
+fn all_of<'a>(value: &'a serde_json::Value, kind: &str) -> Vec<&'a serde_json::Value> {
+    let mut out = Vec::new();
+    find_all(value, kind, &mut out);
+    out
+}
+
+#[test]
+fn section_links_jump_to_anchored_headings_of_the_same_message() {
+    let json = blocks_json(
+        "Daftar isi: [DNS](#dns) · [HTTP](#2-http) · [Hilang](#tidak-ada)\n\n\
+         ## 1. DNS\nisi dns\n\n## 2. HTTP\nisi http\n\n## Penutup\nselesai\n\n[↑ Kembali ke atas](#)",
+    );
+    let blocks = json.as_array().expect("block list");
+    let anchors: Vec<&str> = blocks
+        .iter()
+        .filter(|block| block["type"] == "anchor")
+        .filter_map(|block| block["name"].as_str())
+        .collect();
+    assert_eq!(
+        anchors,
+        ["bagian-1", "bagian-2"],
+        "only linked headings get anchors"
+    );
+    let dns_heading = blocks
+        .iter()
+        .position(|block| block["type"] == "heading" && block["text"] == "1. DNS")
+        .expect("DNS heading");
+    assert_eq!(
+        blocks[dns_heading - 1]["name"],
+        "bagian-1",
+        "anchor sits before its heading"
+    );
+
+    let links = all_of(&json, "anchor_link");
+    let targets: Vec<&str> = links
+        .iter()
+        .filter_map(|link| link["anchor_name"].as_str())
+        .collect();
+    assert_eq!(
+        targets,
+        ["bagian-1", "bagian-2", ""],
+        "numbered heading found by #dns, top by #"
+    );
+    assert!(
+        json.to_string().contains("Hilang") && !json.to_string().contains("tidak-ada"),
+        "a link to a missing section keeps only its text"
+    );
+}
+
+#[test]
+fn headings_without_links_get_no_anchor() {
+    let json = blocks_json("## Satu\nisi\n## Dua\nisi");
+    assert!(all_of(&json, "anchor").is_empty());
+}
+
+#[test]
+fn footnotes_link_markers_to_their_notes() {
+    let json = blocks_json(
+        "Cahaya sangat cepat[^c] dan suara lebih lambat[^s].\n\
+         [^c]: Sekitar 299.792 km per detik.",
+    );
+    let blocks = json.as_array().expect("block list");
+    assert_eq!(
+        blocks.len(),
+        2,
+        "the definition is not absorbed into the paragraph"
+    );
+
+    let links = all_of(&json, "reference_link");
+    assert_eq!(links.len(), 1, "an undefined footnote gets no link");
+    assert_eq!(links[0]["text"], "[1]");
+    assert_eq!(links[0]["reference_name"], "catatan-1");
+    assert!(json[0].to_string().contains("[2]"), "{}", json[0]);
+
+    let references = all_of(&json, "reference");
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0]["name"], "catatan-1");
+    assert_eq!(references[0]["text"], "Sekitar 299.792 km per detik.");
+    assert_eq!(blocks[1]["text"][0], "[1] ");
+}
+
+#[test]
+fn navigation_is_plain_text_on_other_channels() {
+    assert_eq!(
+        flatten_extended_inline("Lihat [DNS](#dns) dan fakta[^1].\n[^1]: Sumber resmi."),
+        "Lihat DNS dan fakta[1].\n[1] Sumber resmi."
+    );
+}

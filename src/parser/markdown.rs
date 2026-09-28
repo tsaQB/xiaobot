@@ -42,6 +42,8 @@ impl From<String> for ParserError {
 mod extended;
 #[path = "markdown/inline.rs"]
 mod inline;
+#[path = "markdown/links.rs"]
+mod links;
 
 pub(crate) use extended::{flatten_extended_inline, flatten_extended_inline_outside_code};
 pub use inline::parse_inline;
@@ -931,6 +933,22 @@ fn emit_math_or_quote_blocks(blocks: &mut Vec<RichBlock>, math_lines: &[String])
 }
 
 pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
+    links::with_link_targets(text, || parse_markdown_blocks(text))
+}
+
+/// Pushes a section heading, preceded by an anchor when a link in the
+/// message points to it.
+fn push_heading(blocks: &mut Vec<RichBlock>, raw_text: &str, level: usize) {
+    if let Some(name) = links::heading_anchor(raw_text) {
+        blocks.push(RichBlock::Anchor { name });
+    }
+    blocks.push(RichBlock::SectionHeading {
+        text: parse_inline(raw_text),
+        level: level.min(6),
+    });
+}
+
+fn parse_markdown_blocks(text: &str) -> Vec<RichBlock> {
     if text.trim().is_empty() {
         return Vec::new();
     }
@@ -1119,21 +1137,13 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
             let close_tag = format!("</h{level}>");
 
             if let Some(end) = after_open.to_ascii_lowercase().rfind(&close_tag) {
-                let inner = after_open[..end].trim();
-                blocks.push(RichBlock::SectionHeading {
-                    text: parse_inline(inner),
-                    level: level.min(6),
-                });
+                push_heading(&mut blocks, after_open[..end].trim(), level);
                 i += 1;
                 continue;
             }
             if let Some(end) = after_open.to_ascii_lowercase().rfind("</h") {
                 if let Some(_gt) = after_open[end..].find('>') {
-                    let inner = after_open[..end].trim();
-                    blocks.push(RichBlock::SectionHeading {
-                        text: parse_inline(inner),
-                        level: level.min(6),
-                    });
+                    push_heading(&mut blocks, after_open[..end].trim(), level);
                     i += 1;
                     continue;
                 }
@@ -1170,11 +1180,7 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
                 }
                 i += 1;
             }
-            let joined = h_lines.join(" ");
-            blocks.push(RichBlock::SectionHeading {
-                text: parse_inline(&joined),
-                level: level.min(6),
-            });
+            push_heading(&mut blocks, &h_lines.join(" "), level);
             continue;
         }
 
@@ -1229,10 +1235,14 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
         if let Some(caps) = RE_BLOCK_HEADING.captures(stripped) {
             let level = caps.get(1).map(|m| m.as_str().len()).unwrap_or(1);
             let heading_text = caps.get(2).map(|m| m.as_str().trim()).unwrap_or("");
-            blocks.push(RichBlock::SectionHeading {
-                text: parse_inline(heading_text),
-                level: level.min(6),
-            });
+            push_heading(&mut blocks, heading_text, level);
+            i += 1;
+            continue;
+        }
+
+        // 5c. Footnote definition ([^1]: note)
+        if let Some(footnote) = links::footnote_definition_block(stripped) {
+            blocks.push(footnote);
             i += 1;
             continue;
         }
@@ -1557,6 +1567,7 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
                 || s_curr.starts_with(r"\[")
                 || RE_BLOCK_HEADING.is_match(s_curr)
                 || RE_HTML_HEADING.is_match(s_curr)
+                || links::is_footnote_definition(s_curr)
                 || s_curr.starts_with("<p>")
                 || s_curr.starts_with("<p ")
                 || s_curr.eq_ignore_ascii_case("<hr>")

@@ -69,6 +69,14 @@ static RE_EQ_MARK: LazyLock<Regex> =
 static RE_TG_LINK: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"!?\[([^\]]*)\]\(tg://(?:time|emoji)\?[^)\s]*\)").expect("valid static regex")
 });
+/// A link to a section of the same message: `[text](#section)`.
+static RE_SECTION_LINK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\(\s*#[^)\s]*\s*\)").expect("valid static regex"));
+static RE_FOOTNOTE_DEFINITION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^([ \t]*)\[\^([^\]\s]+)\]:[ \t]*").expect("valid static regex")
+});
+static RE_FOOTNOTE_MARKER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[\^([^\]\s]+)\]").expect("valid static regex"));
 /// A `](tg://time?…` or `](tg://emoji?…` link target inside image syntax.
 static RE_ENTITY_LINK_TARGET: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\]\s*\(\s*<?tg://(?:time|emoji)\?").expect("valid static regex"));
@@ -323,7 +331,12 @@ pub fn flatten_extended_inline(text: &str) -> String {
     });
     let text = RE_TIME_TAG.replace_all(&text, "$3");
     let text = RE_EMOJI_TAG.replace_all(&text, "$2");
-    RE_TG_LINK.replace_all(&text, "$1").into_owned()
+    let text = RE_TG_LINK.replace_all(&text, "$1");
+    // In-message navigation cannot jump anywhere in plain text: section
+    // links keep their text and footnotes read as `[1]`.
+    let text = RE_SECTION_LINK.replace_all(&text, "$1");
+    let text = RE_FOOTNOTE_DEFINITION.replace_all(&text, "$1[$2] ");
+    RE_FOOTNOTE_MARKER.replace_all(&text, "[$1]").into_owned()
 }
 
 /// [`flatten_extended_inline`] outside fenced and inline code.
