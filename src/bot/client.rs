@@ -1403,20 +1403,14 @@ impl TelegramBotClient {
                 .await;
         }
 
+        // `media` travels inside `rich_message` (InputRichMessage.media);
+        // sendRichMessage has no top-level `media` parameter.
         let rich_json = serde_json::to_string(&resolved_msg).map_err(|error| error.to_string())?;
-        let media_json = resolved_msg
-            .media
-            .as_ref()
-            .map(|m| serde_json::to_string(m).map_err(|error| error.to_string()))
-            .transpose()?;
 
         self.post_multipart("sendRichMessage", || {
             let mut form = Form::new()
                 .text("chat_id", chat_id.to_string())
                 .text("rich_message", rich_json.clone());
-            if let Some(ref m_str) = media_json {
-                form = form.text("media", m_str.clone());
-            }
             if let Some(ref reply_markup) = reply_markup {
                 form = form.text("reply_markup", reply_markup.to_string());
             }
@@ -1686,13 +1680,11 @@ impl TelegramBotClient {
         let validation = rich_message.validate();
         if validation.is_ok() {
             let rich_json = serde_json::to_value(rich_message).map_err(|e| e.to_string())?;
+            // Any `media` list is already part of `rich_message`.
             let mut payload = json!({
                 "chat_id": chat_id,
                 "rich_message": rich_json,
             });
-            if let Some(ref media) = rich_message.media {
-                payload["media"] = serde_json::to_value(media).map_err(|e| e.to_string())?;
-            }
             if let Some(ref rm) = reply_markup {
                 payload["reply_markup"] = rm.clone();
             }
@@ -1782,20 +1774,12 @@ impl TelegramBotClient {
             if !attachments.is_empty() {
                 let rich_json_str =
                     serde_json::to_string(&multipart_msg).map_err(|e| e.to_string())?;
-                let media_json_str = multipart_msg
-                    .media
-                    .as_ref()
-                    .map(|m| serde_json::to_string(m).map_err(|e| e.to_string()))
-                    .transpose()?;
 
                 match self
                     .post_multipart("sendRichMessage", || {
                         let mut form = Form::new()
                             .text("chat_id", chat_id.to_string())
                             .text("rich_message", rich_json_str.clone());
-                        if let Some(ref m_str) = media_json_str {
-                            form = form.text("media", m_str.clone());
-                        }
                         if let Some(ref rm) = reply_markup {
                             form = form.text("reply_markup", rm.to_string());
                         }
@@ -1850,11 +1834,6 @@ impl TelegramBotClient {
                         "chat_id": chat_id,
                         "rich_message": rich_json,
                     });
-                    if let Some(ref m) = converted_msg.media {
-                        if let Ok(m_val) = serde_json::to_value(m) {
-                            retry_payload["media"] = m_val;
-                        }
-                    }
                     if let Some(ref rm) = reply_markup {
                         retry_payload["reply_markup"] = rm.clone();
                     }

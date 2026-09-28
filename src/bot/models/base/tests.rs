@@ -705,7 +705,10 @@ fn test_rich_block_list_item_checkbox_serialization() {
 
     let v_unchecked = serde_json::to_value(&unchecked_item).expect("serialize unchecked");
     assert_eq!(v_unchecked["has_checkbox"], true);
-    assert_eq!(v_unchecked["is_checked"], false);
+    assert!(
+        v_unchecked.get("is_checked").is_none(),
+        "Bot API `True` flag: unchecked is expressed by omitting it"
+    );
 }
 
 #[test]
@@ -723,4 +726,47 @@ fn test_input_checklist_models_serialization() {
     assert_eq!(value["tasks"][0]["text"], "Task satu");
     assert_eq!(value["tasks"][1]["id"], 2);
     assert_eq!(value["tasks"][1]["text"], "Task dua");
+}
+
+#[test]
+fn true_only_flags_are_omitted_instead_of_sent_as_false() {
+    let table = |is_bordered, is_striped, is_compact| {
+        serde_json::to_value(RichBlock::Table {
+            cells: vec![vec![RichBlockTableCell::text_only("x", false, None)]],
+            has_header: false,
+            is_bordered,
+            is_striped,
+            is_compact,
+            caption: None,
+        })
+        .expect("serialize table")
+    };
+    let compact_only = table(false, false, true);
+    assert_eq!(compact_only["is_compact"], true);
+    assert!(compact_only.get("is_bordered").is_none());
+    assert!(compact_only.get("is_striped").is_none());
+    assert!(compact_only["cells"][0][0].get("is_header").is_none());
+
+    let plain = table(false, false, false);
+    for flag in ["is_bordered", "is_striped", "is_compact"] {
+        assert!(plain.get(flag).is_none(), "{flag} must be omitted");
+    }
+    let parsed: RichBlock = serde_json::from_value(plain).expect("omitted flags parse as false");
+    assert!(matches!(
+        parsed,
+        RichBlock::Table {
+            is_bordered: false,
+            is_striped: false,
+            is_compact: false,
+            ..
+        }
+    ));
+
+    let closed = serde_json::to_value(RichBlock::Details {
+        summary: Value::String("Rincian".to_string()),
+        blocks: Vec::new(),
+        is_open: Some(false),
+    })
+    .expect("serialize details");
+    assert!(closed.get("is_open").is_none());
 }

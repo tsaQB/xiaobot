@@ -333,3 +333,58 @@ fn upload_filename_sanitizer_handles_edge_cases() {
         MAX_UPLOAD_FILENAME_CHARS
     );
 }
+
+fn html_with_media_list() -> InputRichMessage {
+    let photo = crate::bot::models::InputMedia::Photo {
+        media: "AgACAgPHOTOID".to_string(),
+        caption: None,
+        parse_mode: None,
+        show_caption_above_media: None,
+        has_spoiler: None,
+    };
+    let media =
+        crate::bot::models::InputRichMessageMedia::new("p1", photo).expect("valid media id");
+    InputRichMessage::from_html("<p>Foto</p><img src=\"p1\"/>", Some(vec![media]))
+}
+
+/// Bot API 10.3: the media list belongs inside `rich_message`
+/// (InputRichMessage.media); sendRichMessage has no top-level `media`.
+#[tokio::test]
+async fn rich_message_media_list_is_sent_only_inside_rich_message() {
+    let fake = FakeTelegram::always_ok().await;
+    fake.client
+        .send_rich_message(5, &html_with_media_list(), None, None, None)
+        .await
+        .expect("rich message is accepted");
+
+    let request = &fake.requests()[0];
+    assert_eq!(request.method, "sendRichMessage");
+    assert!(request.json.get("media").is_none(), "{}", request.json);
+    assert_eq!(request.json["rich_message"]["media"][0]["id"], "p1");
+}
+
+#[tokio::test]
+async fn multipart_rich_message_has_no_duplicate_media_field() {
+    let fake = FakeTelegram::always_ok().await;
+    let attachment = crate::bot::models::StagedDocument::new(
+        "file_0",
+        b"isi laporan".to_vec(),
+        "text/plain",
+        "laporan.txt",
+    );
+    fake.client
+        .send_rich_message_with_media(5, &html_with_media_list(), vec![attachment], None, None)
+        .await
+        .expect("multipart rich message is accepted");
+
+    let request = &fake.requests()[0];
+    assert_eq!(request.method, "sendRichMessage");
+    let body = &request.raw_body;
+    assert!(body.contains("name=\"rich_message\""), "{body}");
+    assert!(body.contains("name=\"file_0\""), "{body}");
+    assert!(!body.contains("name=\"media\""), "{body}");
+    assert!(
+        body.contains("\"media\":[{\"id\":\"p1\""),
+        "media list stays inside rich_message"
+    );
+}

@@ -791,7 +791,7 @@ impl RichBlockCaption {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RichBlockTableCell {
     pub text: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "is_not_true")]
     pub is_header: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub align: Option<String>,
@@ -834,9 +834,9 @@ pub struct RichBlockListItem {
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "is_not_true")]
     pub has_checkbox: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "is_not_true")]
     pub is_checked: Option<bool>,
 }
 
@@ -928,8 +928,11 @@ pub enum RichBlock {
         cells: Vec<Vec<RichBlockTableCell>>,
         #[serde(skip)]
         has_header: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
         is_bordered: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
         is_striped: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
         is_compact: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         caption: Option<String>,
@@ -1013,7 +1016,7 @@ pub enum RichBlock {
     Details {
         summary: Value,
         blocks: Vec<Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "is_not_true")]
         is_open: Option<bool>,
     },
 
@@ -1258,6 +1261,16 @@ struct RichMessageStats {
     text_chars: usize,
     blocks: usize,
     max_depth: usize,
+}
+
+/// Bot API flags typed `True` (e.g. `is_bordered`, `is_checked`) accept only
+/// `true`; an unset flag is omitted instead of being sent as `false`.
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
+
+fn is_not_true(flag: &Option<bool>) -> bool {
+    *flag != Some(true)
 }
 
 /// JSON keys that carry metadata rather than user-visible rich text. Shared by
