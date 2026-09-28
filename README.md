@@ -96,6 +96,9 @@ Xiao is an autonomous, single-owner AI gateway designed to run continuously on l
   - **Visual Media Groups**: Native photo collages and horizontal media slideshows.
   - **Interactive Action Buttons**: Copy-text buttons, URLs, and ephemeral interactive buttons.
 - **Cross-Platform LaTeX Sanitizer**: Mathematical expressions (`$...$`, `$$...$$`, `\(...\)`) are sanitized downstream to render flawlessly on both Android (`JLaTeXMath`) and iOS (`SwiftMath`), normalizing units (`44\ \mathrm{cm}`), decimal commas, and LaTeX operator symbols.
+- **Guest Mode (Bot API 10.0)**: When guest mode is enabled for the bot in @BotFather, the owner can mention Xiao in a chat Xiao is not a member of. Xiao answers with a "thinking" placeholder (`answerGuestQuery`) and edits it into the final answer. Because other people read these replies, guest conversations are stateless: no personal memories or summaries reach the prompt, nothing is written to history, and only `web_search` and `fetch_url` are available. The daemon status box shows whether guest mode is enabled.
+- **Edited Messages**: Editing your latest message to Xiao within 10 minutes gets a fresh answer that quotes the edited message; the earlier answer is left as it was. Edits of older messages, and edit events that do not change the text (such as live location updates), are ignored.
+- **More Message Kinds**: Stickers (regular stickers as images, animated and video stickers via their thumbnail plus emoji), shared locations and venues (as coordinates with a map link), live photos (the still photo, plus the motion clip when a Video model is available), and forwarded rich messages (Bot API 10.1, read as text).
 
 ### 2. 🛡️ Hardened Security & Zero-Slash UX
 - **Strict Single-Owner Boundary**: Xiao ignores all non-owner interactions at the network gate. Messages from unauthorized users or rogue groups are discarded with `RouteDecision::Ignore`, leaking zero information about the bot's presence.
@@ -402,6 +405,10 @@ Xiao inspects documents and rich media locally inside bounded memory buffers:
 | :--- | :--- |
 | **Plain Text / Code** | UTF-8 sanitized ingestion (with UTF-8 BOM stripping and Latin-1 lossy fallback). |
 | **Photos & Images** | Analyzed via `Vision` specialist role (JPEG, PNG, WEBP). |
+| **Stickers** | Regular stickers are analyzed as images; animated and video stickers via their thumbnail, together with the emoji and set name. |
+| **Live Photos** | The motion clip goes to the `Video` role when a dedicated Video model, or a main model with verified video input, is available; otherwise the still photo goes to `Vision`. |
+| **Locations & Venues** | Passed to the model as text: coordinates, place name and address, and a map link. |
+| **Forwarded Rich Messages** | Converted to readable text that keeps headings, list items, table rows, quotes and link targets; media blocks are named (for example `[Foto: caption]`) instead of exposing file ids. Telegram caps a rich message at 32,768 characters, so a forwarded message is passed on in full. |
 | **Voice Notes & Audio** | Transcribed via `Audio STT` (Whisper-compatible `/v1/audio/transcriptions` endpoints). |
 | **Video & Video Notes** | Bounded frame extraction processed via `Video` specialist role. |
 | **PDF Documents** | Text extracted via `lopdf`. Scanned pages (up to 6) are rendered to images and routed to `Vision`. |
@@ -464,7 +471,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 
 ## 🔒 Security Invariants
 
-1. **Hard Single-Owner Invariant**: Non-owner updates are dropped silently at the gateway (`src/bot/router.rs`). Never acknowledge unauthorized Telegram IDs.
+1. **Hard Single-Owner Invariant**: Non-owner updates are dropped silently at the gateway (`src/bot/router.rs`). Never acknowledge unauthorized Telegram IDs. Guest-mode queries from anyone but the owner are never answered.
 2. **Pure Zero-Slash Gateway**: Menus are cleared on boot. Xiao interacts conversationally or via CLI.
 3. **Outbound SSRF Firewall**: Every fetch of a user-, model- or web-supplied URL (media downloads, `fetch_url`, search result scraping) validates each redirect hop against RFC 1918, RFC 4193, loopback, and SIIT/NAT64 ranges and pins the connection to the vetted address.
 4. **Secret Isolation**: Secrets are stored in `~/.local/share/xiaoai/secrets/` with mode `0o600`/`0o700`. The database only stores opaque `secret://` references; the values themselves are protected by file permissions, not encryption.

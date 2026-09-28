@@ -183,7 +183,9 @@ cargo run -- setup
 - `src/bot/`:
   - `daemon.rs`: Bot initialization, Telegram connection handshake, command clearing (`pure zero-slash`), concurrent WhatsApp gateway spawn, and long-polling loop with graceful shutdown.
   - `worker.rs`: Keyed per-scope mailboxes (`ScopeKey`), worker concurrency limits, durable inbox queue replay, and bounded retry with panic isolation.
-  - `router.rs`: Incoming update routing, media and document classification, context overflow policies, and AI chat dispatch.
+  - `router.rs`: Incoming update routing (new and edited messages), media and document classification, context overflow policies, and AI chat dispatch. End-to-end routing tests live in `router/flow_tests.rs`.
+  - `inbound.rs`: Message kinds beyond text and classic media: stickers, locations/venues, live photos, forwarded rich messages, and the edited-message window and text fingerprint.
+  - `guest.rs`: Bot API 10.0 guest mode (`guest_message` → `answerGuestQuery` placeholder → inline edit with the final answer).
   - `image_flow.rs`: Multi-step conversational image generation pipeline, prompt extraction, and structured fallback cards.
   - `client.rs`: The single Telegram Bot API client (every network call, retries, Rich → HTML → plain fallback chain, draft preparation, file downloads). Behavioural tests live in `client/tests.rs` and run against the fake server in `test_support.rs`.
   - `client/raw.rs` / `client/raw/render.rs`: Transport-independent helpers the client delegates to: per-task delivery context, bounded SSRF-safe media downloads, remote-media-to-link conversion, text chunking, and the HTML/plain-text fallback renderers. (It no longer duplicates the Bot API calls.)
@@ -275,6 +277,17 @@ When modifying or adding features, you **must** preserve these invariants:
   - `AudioStt`: Returns transcripts to Main; never receives previous conversation history.
   - Specialist outputs are returned to Main as bounded observation turns.
 
+### 6a. Guest Mode Is Stateless
+- Only the owner's `guest_message` is answered; anyone else is dropped with no reply.
+- Guest generations run with `GenerationInput.guest_mode = true`: the guest system prompt instead of memories and summaries, no history loaded or saved, no curator, and only `GUEST_MODE_TOOLS` (`web_search`, `fetch_url`). Other tool calls get a refusal result.
+- Nothing is ever sent to the guest `chat.id` (it may coincide with an unrelated chat): `bot` is `None` for the generation and the reply is edited through `inline_message_id` only. Guest updates use their own mailbox (`thread_id = GUEST_SCOPE_THREAD_ID`).
+- The guest query is answered once with a placeholder. An interrupted generation edits it into a "call again" notice rather than returning `Interrupted`, because the query cannot be answered twice.
+
+### 6b. Edited Messages
+- An `edited_message` is answered again only if its text/caption changed, the edit is within `inbound::EDIT_WINDOW_SECS` (10 minutes), and the message is still the latest answered prompt in its chat/topic (`telegram_latest_prompts`). Live location updates are never answered.
+- `claim_edited_prompt_async` is the dedup point: it stores only a hash of the text, and accepts a crash-recovery replay of the same `update_id`.
+- The new answer replies to the edited message; the earlier answer is not touched.
+
 ### 7. WhatsApp Single-Owner Boundary
 - Authorization is decided on the **phone number**, never on raw JID text.
 - Both `sender` and `sender_alt` are inspected so LID addressing mode is still recognized.
@@ -315,6 +328,7 @@ SQLite database location and files default to:
 - `scoped_summaries`: Tier-2 condensed summaries of older topics per chat/thread.
 - `telegram_inbox`: Durable update queue for Telegram intake.
 - `telegram_state`: Offset and webhook state persistence.
+- `telegram_latest_prompts`: Latest answered owner message per chat/topic (message id, text hash, claiming update id) for edited-message handling.
 - `whatsapp_inbox`: Durable message queue for WhatsApp intake, keyed by `chat:sender:message_id`; completed rows are kept as dedup tombstones (newest 5000 and anything from the last 14 days).
 
 ### Other files:

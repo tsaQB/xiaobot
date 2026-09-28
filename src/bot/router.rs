@@ -13,6 +13,7 @@ use crate::bot::image_flow::{
     handle_image_generation, plan_image_generation_intent, ImageGenerationIntent,
     UserLastImagePrompt,
 };
+use crate::bot::inbound;
 use crate::bot::models::{CallbackQuery, MessageGenerationStopped, Update};
 use crate::document;
 use crate::parser::build_full_rich_message;
@@ -487,6 +488,7 @@ pub async fn handle_ai_chat(
         video_duration,
         bot: Some(bot.clone()),
         reply_to_message_id,
+        guest_mode: false,
     };
     let generation_start = std::time::Instant::now();
     let owned_snapshot;
@@ -634,7 +636,11 @@ async fn deliver_final_answer(
 }
 
 pub fn delivery_context_for_update(update: &Update) -> TelegramDeliveryContext {
-    if let Some(message) = update.message.as_ref() {
+    // Guest-mode replies are inline messages: no thread or ephemeral context.
+    if update.guest_message.is_some() {
+        return TelegramDeliveryContext::default();
+    }
+    if let Some(message) = update.message.as_ref().or(update.edited_message.as_ref()) {
         return TelegramDeliveryContext {
             message_thread_id: message.message_thread_id,
             receiver_user_id: message
@@ -898,24 +904,35 @@ pub async fn handle_update(
         handle_stopped_generation(ai_service, route_scope, stopped).await;
         return;
     }
-    if let Some(msg) = update.message {
+    if let Some(msg) = update.guest_message {
+        crate::bot::guest::handle_guest_message(bot, ai_service, route_scope, msg).await;
+        return;
+    }
+    let update_id = update.update_id;
+    let incoming = update
+        .message
+        .map(|msg| (msg, false))
+        .or_else(|| update.edited_message.map(|msg| (msg, true)));
+    if let Some((msg, is_edit)) = incoming {
+        // Only a text change is worth a new answer. Live locations also arrive
+        // as edits every few seconds and must never trigger a reply.
+        if is_edit && (inbound::message_text(&msg).is_empty() || !inbound::edit_within_window(&msg))
+        {
+            return;
+        }
         let chat_id = msg.chat.id;
         let thread_id = msg.message_thread_id.unwrap_or(0);
         let user_id = msg.from.as_ref().map(|u| u.id).unwrap_or(chat_id);
-        let _user_name = msg
-            .from
-            .as_ref()
-            .map(|u| u.first_name.as_str())
-            .unwrap_or("Pengguna");
-        let raw_text = msg
-            .text
-            .as_deref()
-            .or(msg.caption.as_deref())
-            .unwrap_or("")
-            .trim();
+        let raw_text = inbound::message_text(&msg);
 
         let is_group = chat_id != user_id;
-        let reply_to_msg_id = if is_group { Some(msg.message_id) } else { None };
+        // The answer to an edit quotes the edited message, so it is clear which
+        // version it answers; the earlier answer stays as it was.
+        let reply_to_msg_id = if is_group || is_edit {
+            Some(msg.message_id)
+        } else {
+            None
+        };
         let is_reply_to_bot = msg
             .reply_to_message
             .as_ref()
@@ -938,10 +955,13 @@ pub async fn handle_update(
             .unwrap_or(false);
 
         let has_video = msg.video.is_some() || msg.video_note.is_some();
-        let has_photo = msg.photo.is_some();
+        // A live photo also carries `photo` for backward compatibility.
+        let has_photo = msg.photo.is_some() || msg.live_photo.is_some();
         let has_audio = msg.voice.is_some() || msg.audio.is_some();
         let has_document = msg.document.is_some();
-        let has_media = has_video || has_photo || has_audio || has_document;
+        let extra_content = inbound::describe_extra_content(&msg);
+        let has_media =
+            has_video || has_photo || has_audio || has_document || extra_content.is_some();
         let is_forum = msg.chat.is_forum.unwrap_or(false) || thread_id > 0;
 
         let route_ctx = MessageRouteContext {
@@ -956,6 +976,39 @@ pub async fn handle_update(
         let text = match route_scope.evaluate(&route_ctx).await {
             RouteDecision::ProcessChat(t) => t,
             RouteDecision::Ignore => return,
+        };
+
+        // An edit is answered only while it is the latest answered prompt in
+        // this chat/topic, and only once per real text change.
+        let content_hash = inbound::prompt_content_hash(&msg);
+        if is_edit {
+            if !ai::storage::claim_edited_prompt_async(
+                chat_id,
+                thread_id,
+                msg.message_id,
+                content_hash,
+                update_id,
+            )
+            .await
+            {
+                return;
+            }
+        } else {
+            ai::storage::record_latest_prompt_async(
+                chat_id,
+                thread_id,
+                msg.message_id,
+                content_hash,
+            )
+            .await;
+        }
+
+        // Stickers, locations and forwarded rich messages carry no text of
+        // their own; describe them so the model knows what was shared.
+        let text = match extra_content {
+            Some(extra) if text.is_empty() => extra,
+            Some(extra) => format!("{text}\n\n{extra}"),
+            None => text,
         };
 
         let mut image_bytes: Option<Vec<u8>> = None;
@@ -1007,8 +1060,31 @@ pub async fn handle_update(
                 video_bytes = Some(data);
                 video_mime = Some("video/mp4".to_string());
             }
-        } else if let Some(ref photos) = msg.photo {
-            if let Some(largest) = photos.last() {
+        } else if has_photo {
+            // A live photo's motion clip goes to the Video route when one can
+            // take it; otherwise (or if that download fails) the still photo
+            // is used like any other photo.
+            let live_clip = match msg.live_photo.as_ref() {
+                Some(live) if inbound::live_photo_video_supported(ai_service).await => bot
+                    .get_file_bytes(&live.file_id)
+                    .await
+                    .ok()
+                    .map(|(data, _)| (data, live)),
+                _ => None,
+            };
+            let still = msg
+                .photo
+                .as_ref()
+                .or_else(|| msg.live_photo.as_ref().and_then(|live| live.photo.as_ref()));
+            if let Some((data, live)) = live_clip {
+                video_bytes = Some(data);
+                video_mime = Some(
+                    live.mime_type
+                        .clone()
+                        .unwrap_or_else(|| "video/mp4".to_string()),
+                );
+                video_duration = live.duration;
+            } else if let Some(largest) = still.and_then(|photos| photos.last()) {
                 if let Some((data, path)) = fetch_file(bot.get_file_bytes(&largest.file_id).await) {
                     image_bytes = Some(data);
                     let ext = path.split('.').next_back().unwrap_or("jpeg");
@@ -1018,6 +1094,17 @@ pub async fn handle_update(
                         format!("image/{ext}")
                     });
                 }
+            }
+        } else if let Some(file_id) = msg
+            .sticker
+            .as_ref()
+            .and_then(inbound::sticker_image_file_id)
+        {
+            // Best effort: without the picture the emoji description remains,
+            // so a failed download is not reported to the owner.
+            if let Ok((data, path)) = bot.get_file_bytes(file_id).await {
+                image_bytes = Some(data);
+                mime_type = Some(inbound::image_mime_from_path(&path));
             }
         } else if let Some(doc) = msg.document {
             let d_mime = doc.mime_type.clone().unwrap_or_default();
@@ -1092,7 +1179,7 @@ pub async fn handle_update(
             }
         }
 
-        if has_photo && image_bytes.is_none() {
+        if has_photo && image_bytes.is_none() && video_bytes.is_none() {
             notify_download_failure(bot, chat_id, "gambar", download_error).await;
             return;
         }
@@ -1172,6 +1259,8 @@ pub async fn handle_update(
         if let Some(v_bytes) = video_bytes {
             let prompt_video = if !text.is_empty() {
                 text.clone()
+            } else if msg.live_photo.is_some() {
+                "Lihat live photo ini (foto dengan klip gerak singkat) dan jelaskan isinya, termasuk gerakan atau suara yang terekam.".to_string()
             } else {
                 "Tonton dan analisis rekaman video ini secara mendalam. Jelaskan isi visual, alur peristiwa, teks di layar, dan suara di dalamnya.".to_string()
             };
@@ -1993,3 +2082,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "router/flow_tests.rs"]
+mod flow_tests;

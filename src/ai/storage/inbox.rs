@@ -171,6 +171,85 @@ fn mark_telegram_processing_failed_on_conn(
     )? == 1)
 }
 
+/// Remembers the owner's latest answered message per chat/topic. Only a hash
+/// of its text is kept, never the text itself. Replays of older updates do not
+/// move the marker backwards.
+fn record_latest_prompt_on_conn(
+    conn: &Connection,
+    chat_id: i64,
+    thread_id: i64,
+    message_id: i64,
+    content_hash: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO telegram_latest_prompts(chat_id,thread_id,message_id,content_hash)
+         VALUES(?1,?2,?3,?4)
+         ON CONFLICT(chat_id,thread_id) DO UPDATE SET
+           message_id=excluded.message_id, content_hash=excluded.content_hash
+         WHERE excluded.message_id >= telegram_latest_prompts.message_id",
+        params![chat_id, thread_id, message_id, content_hash],
+    )?;
+    Ok(())
+}
+
+pub async fn record_latest_prompt_async(
+    chat_id: i64,
+    thread_id: i64,
+    message_id: i64,
+    content_hash: String,
+) -> bool {
+    run_db("record_latest_prompt", move || {
+        let conn = open_session_db()?;
+        record_latest_prompt_on_conn(&conn, chat_id, thread_id, message_id, &content_hash)
+    })
+    .await
+    .is_some()
+}
+
+/// Atomically accepts an edit for answering: true only when `message_id` is
+/// still the latest answered message in the scope and its text actually
+/// changed. Telegram also sends `edited_message` for changes Xiao does not
+/// use (e.g. reactions or link previews), which must not trigger a reply.
+/// The claiming update is remembered so a crash-recovery replay of that same
+/// update is accepted again instead of being lost.
+fn claim_edited_prompt_on_conn(
+    conn: &Connection,
+    chat_id: i64,
+    thread_id: i64,
+    message_id: i64,
+    content_hash: &str,
+    update_id: i64,
+) -> rusqlite::Result<bool> {
+    Ok(conn.execute(
+        "UPDATE telegram_latest_prompts SET content_hash=?4, claimed_update_id=?5
+         WHERE chat_id=?1 AND thread_id=?2 AND message_id=?3
+           AND (content_hash<>?4 OR claimed_update_id=?5)",
+        params![chat_id, thread_id, message_id, content_hash, update_id],
+    )? == 1)
+}
+
+pub async fn claim_edited_prompt_async(
+    chat_id: i64,
+    thread_id: i64,
+    message_id: i64,
+    content_hash: String,
+    update_id: i64,
+) -> bool {
+    run_db("claim_edited_prompt", move || {
+        let conn = open_session_db()?;
+        claim_edited_prompt_on_conn(
+            &conn,
+            chat_id,
+            thread_id,
+            message_id,
+            &content_hash,
+            update_id,
+        )
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Quarantines an update that is still `pending` (not yet claimed). Startup
 /// quarantine previously went through the `processing`-only transition and
 /// therefore never changed anything, leaving poison updates pending forever.
@@ -357,10 +436,52 @@ mod tests {
             CREATE TABLE telegram_inbox (
                 update_id INTEGER PRIMARY KEY, payload_json TEXT NOT NULL, status TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0, received_at TEXT NOT NULL, last_error TEXT
+            );
+            CREATE TABLE telegram_latest_prompts (
+                chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL DEFAULT 0,
+                message_id INTEGER NOT NULL, content_hash TEXT NOT NULL,
+                claimed_update_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(chat_id, thread_id)
             );",
         )
         .expect("execute_batch succeeds");
         conn
+    }
+
+    #[test]
+    fn only_a_changed_edit_of_the_latest_prompt_is_claimed() {
+        let conn = inbox_test_conn();
+        record_latest_prompt_on_conn(&conn, 1, 0, 10, "hash-a").expect("record succeeds");
+        record_latest_prompt_on_conn(&conn, 1, 0, 11, "hash-b").expect("record succeeds");
+        // A replayed older message never moves the marker back.
+        record_latest_prompt_on_conn(&conn, 1, 0, 9, "hash-old").expect("record succeeds");
+
+        let claim = |chat_id, message_id, hash, update_id| {
+            claim_edited_prompt_on_conn(&conn, chat_id, 0, message_id, hash, update_id)
+                .expect("claim succeeds")
+        };
+        assert!(
+            !claim(1, 10, "hash-a2", 100),
+            "an edit of an older message is ignored"
+        );
+        assert!(
+            !claim(1, 11, "hash-b", 101),
+            "an edit that did not change the text is ignored"
+        );
+        assert!(claim(1, 11, "hash-b2", 102));
+        assert!(
+            claim(1, 11, "hash-b2", 102),
+            "a crash-recovery replay of the claiming update is accepted again"
+        );
+        assert!(
+            !claim(1, 11, "hash-b2", 103),
+            "a later edit event with the same text (e.g. a reaction) is ignored"
+        );
+        assert!(
+            claim(1, 11, "hash-b", 104),
+            "reverting the text is a change"
+        );
+        assert!(!claim(2, 11, "hash-x", 105), "other chats are independent");
     }
 
     #[test]

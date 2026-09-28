@@ -451,6 +451,36 @@ pub fn sanitize_archive_entry_path(path: &str) -> String {
     }
 }
 
+/// Tools usable when answering in guest mode (Bot API 10.0): the reply is a
+/// single inline message in someone else's chat, which cannot carry newly
+/// uploaded files, quizzes or media albums, so only read-only research tools
+/// are offered.
+pub const GUEST_MODE_TOOLS: &[&str] = &["web_search", "fetch_url"];
+
+/// Tool definitions for a generation: all tools normally, only
+/// [`GUEST_MODE_TOOLS`] in guest mode.
+pub fn tools_definition_for(guest_mode: bool) -> Value {
+    let all = get_tools_definition();
+    if !guest_mode {
+        return all;
+    }
+    let filtered: Vec<Value> = all
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter(|tool| {
+                    tool.pointer("/function/name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| GUEST_MODE_TOOLS.contains(&name))
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    Value::Array(filtered)
+}
+
 pub fn get_tools_definition() -> Value {
     json!([
         {

@@ -2,7 +2,9 @@ pub mod client;
 #[path = "client/raw.rs"]
 pub(crate) mod client_raw;
 pub mod daemon;
+pub mod guest;
 pub mod image_flow;
+pub mod inbound;
 pub mod models;
 pub mod router;
 pub(crate) mod transport_policy;

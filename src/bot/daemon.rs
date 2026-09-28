@@ -77,12 +77,20 @@ pub async fn try_bootstrap_telegram(
             let proto_val = "\x1b[38;2;6;182;212m●\x1b[0m \x1b[1;37mTelegram Bot API 10.3\x1b[0m \x1b[38;5;244m(Rich Messages + Drafts)\x1b[0m";
             let timeline_val = "\x1b[38;2;139;92;246m●\x1b[0m \x1b[1;37mStreaming Timeline\x1b[0m \x1b[38;5;244m· Native Stop Button Active\x1b[0m";
             let engine_val = "\x1b[38;2;16;185;129m●\x1b[0m \x1b[1;37mOpenAI-Compatible Core\x1b[0m \x1b[38;5;244m· Long-Polling Active\x1b[0m";
+            let guest_val = if bot_info.supports_guest_queries == Some(true) {
+                format!(
+                    "\x1b[38;2;16;185;129m●\x1b[0m \x1b[1;37mAktif\x1b[0m \x1b[38;5;244m· sebut @{uname} di chat mana pun\x1b[0m"
+                )
+            } else {
+                "\x1b[38;5;244m○ Nonaktif · atur di @BotFather\x1b[0m".to_string()
+            };
 
             let daemon_rows = [
                 ("BOT NAME", bot_val.as_str()),
                 ("PROTOCOL", proto_val),
                 ("RUNTIME", timeline_val),
                 ("ENGINE", engine_val),
+                ("GUEST MODE", guest_val.as_str()),
             ];
             crate::cli::tui::print_mini_header("Daemon Service");
             let hud =
@@ -245,6 +253,8 @@ pub async fn poll_loop(
                 20,
                 Some(vec![
                     "message".to_string(),
+                    "edited_message".to_string(),
+                    "guest_message".to_string(),
                     "callback_query".to_string(),
                     "stopped_message_generation".to_string(),
                 ]),

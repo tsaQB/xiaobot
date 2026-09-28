@@ -7,7 +7,6 @@ use super::*;
 use crate::ai::routing::*;
 use crate::ai::storage::*;
 use crate::bot::url_policy::is_unsafe_remote_ip;
-use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -718,26 +717,7 @@ fn persistence_path_has_no_false_media_default() {
 }
 
 fn isolated_service(provider: ProviderConfig) -> AIChatService {
-    AIChatService {
-        client: Client::builder()
-            .no_proxy()
-            .build()
-            .expect("build client succeeds"),
-        user_sessions: Default::default(),
-        active_session_id: Default::default(),
-        generation_locks: Default::default(),
-        session_locks: Default::default(),
-        active_generations: Default::default(),
-        provider_store: Arc::new(RwLock::new(ProviderStore {
-            active_id: Some(provider.id.clone()),
-            providers: vec![provider],
-        })),
-        capability_registry: Default::default(),
-        model_routing: Default::default(),
-        model_metadata: Default::default(),
-        curator_gate: Default::default(),
-        shutting_down: Default::default(),
-    }
+    AIChatService::isolated_for_tests(provider)
 }
 
 #[tokio::test]

@@ -35,41 +35,11 @@ impl FakeTelegram {
     /// Starts a server that answers every request with `responder`, which also
     /// receives the zero-based index of the request.
     pub async fn start(responder: Responder) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind fake telegram listener");
-        let address = listener.local_addr().expect("fake telegram local addr");
-        let requests: Arc<Mutex<Vec<RecordedRequest>>> = Arc::default();
-        let recorded = Arc::clone(&requests);
-        let server = tokio::spawn(async move {
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    return;
-                };
-                let Some((method, raw_body)) = read_request(&mut socket).await else {
-                    continue;
-                };
-                let json = serde_json::from_str(&raw_body).unwrap_or(Value::Null);
-                let request = RecordedRequest {
-                    method,
-                    json,
-                    raw_body,
-                };
-                let index = {
-                    let mut guard = recorded.lock().expect("fake telegram request log");
-                    guard.push(request.clone());
-                    guard.len() - 1
-                };
-                let (status, body) = responder(&request, index);
-                let body = body.to_string();
-                let reason = if status == 200 { "OK" } else { "Error" };
-                let response = format!(
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
-            }
-        });
+        let (address, requests, server) = serve(Arc::new(move |request, index| {
+            let (status, body) = responder(request, index);
+            (status, "application/json", body.to_string())
+        }))
+        .await;
         let client =
             TelegramBotClient::with_base_url("123:TEST", format!("http://{address}/bot123:TEST"));
         Self {
@@ -100,6 +70,110 @@ impl FakeTelegram {
 }
 
 impl Drop for FakeTelegram {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+/// Raw reply for a request: `(http_status, content_type, body)`.
+type RawResponder =
+    Arc<dyn Fn(&RecordedRequest, usize) -> (u16, &'static str, String) + Send + Sync>;
+
+/// Accepts connections on a loopback port, records every request and answers
+/// it with `responder`. One request per connection (`Connection: close`).
+async fn serve(
+    responder: RawResponder,
+) -> (
+    std::net::SocketAddr,
+    Arc<Mutex<Vec<RecordedRequest>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake server listener");
+    let address = listener.local_addr().expect("fake server local addr");
+    let requests: Arc<Mutex<Vec<RecordedRequest>>> = Arc::default();
+    let recorded = Arc::clone(&requests);
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let Some((method, raw_body)) = read_request(&mut socket).await else {
+                continue;
+            };
+            let json = serde_json::from_str(&raw_body).unwrap_or(Value::Null);
+            let request = RecordedRequest {
+                method,
+                json,
+                raw_body,
+            };
+            let index = {
+                let mut guard = recorded.lock().expect("fake server request log");
+                guard.push(request.clone());
+                guard.len() - 1
+            };
+            let (status, content_type, body) = responder(&request, index);
+            let reason = if status == 200 { "OK" } else { "Error" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (address, requests, server)
+}
+
+/// In-process OpenAI-compatible provider that streams one fixed answer for
+/// every chat completion request.
+pub struct FakeProvider {
+    pub endpoint: String,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl FakeProvider {
+    pub async fn streaming(answer: &str) -> Self {
+        let chunk = serde_json::json!({"choices": [{"delta": {"content": answer}}]});
+        let body = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+        let (address, requests, server) = serve(Arc::new(move |_, _| {
+            (200, "text/event-stream", body.clone())
+        }))
+        .await;
+        Self {
+            endpoint: format!("http://{address}/v1"),
+            requests,
+            server,
+        }
+    }
+
+    /// A provider configuration pointing at this server.
+    pub fn config(&self) -> crate::ai::storage::ProviderConfig {
+        crate::ai::storage::ProviderConfig {
+            id: "fake-provider".into(),
+            name: "Fake Provider".into(),
+            endpoint: self.endpoint.clone(),
+            api_key: String::new(),
+            api_key_ref: None,
+            models: vec!["fake-model".into()],
+            active_model: "fake-model".into(),
+        }
+    }
+
+    /// Chat completion requests received so far (other probes filtered out).
+    pub fn chat_requests(&self) -> Vec<Value> {
+        self.requests
+            .lock()
+            .expect("fake provider request log")
+            .iter()
+            .filter(|request| request.json.get("messages").is_some())
+            .map(|request| request.json.clone())
+            .collect()
+    }
+}
+
+impl Drop for FakeProvider {
     fn drop(&mut self) {
         self.server.abort();
     }

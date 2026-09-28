@@ -833,3 +833,23 @@ fn test_create_document_args_sanitization() {
     assert_eq!(emp.filename, "document.txt");
     assert!(emp.validate().is_err());
 }
+
+#[test]
+fn guest_mode_offers_only_read_only_research_tools() {
+    let names = |definition: Value| -> Vec<String> {
+        definition
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect()
+    };
+    let mut guest = names(tools_definition_for(true));
+    guest.sort();
+    assert_eq!(guest, ["fetch_url", "web_search"]);
+    assert_eq!(
+        names(tools_definition_for(false)),
+        names(get_tools_definition())
+    );
+}

@@ -189,3 +189,31 @@ impl Default for AIChatService {
         Self::new()
     }
 }
+
+#[cfg(test)]
+impl AIChatService {
+    /// A service with exactly one in-memory provider and no configuration
+    /// loaded from disk, for tests that talk to a local fake provider.
+    pub(crate) fn isolated_for_tests(provider: ProviderConfig) -> Self {
+        Self {
+            client: Client::builder()
+                .no_proxy()
+                .build()
+                .expect("build client succeeds"),
+            user_sessions: Default::default(),
+            active_session_id: Default::default(),
+            generation_locks: Default::default(),
+            session_locks: Default::default(),
+            active_generations: Default::default(),
+            provider_store: Arc::new(RwLock::new(ProviderStore {
+                active_id: Some(provider.id.clone()),
+                providers: vec![provider],
+            })),
+            capability_registry: Default::default(),
+            model_routing: Default::default(),
+            model_metadata: Default::default(),
+            curator_gate: Default::default(),
+            shutting_down: Default::default(),
+        }
+    }
+}

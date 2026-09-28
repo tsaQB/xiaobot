@@ -542,6 +542,54 @@ fn update_wire_format_deserializes_poll_update() {
 }
 
 #[test]
+fn update_wire_format_deserializes_guest_edited_and_new_message_kinds() {
+    let guest: Update = serde_json::from_str(
+        r#"{"update_id": 1, "guest_message": {
+            "message_id": 5, "date": 1700000000,
+            "chat": {"id": -1009, "type": "supergroup"},
+            "from": {"id": 42, "is_bot": false, "first_name": "Owner"},
+            "guest_query_id": "AAQ-guest", "text": "@XiaoBot ringkas"}}"#,
+    )
+    .expect("Bot API 10.0 guest_message must deserialize");
+    let guest_message = guest.guest_message.expect("guest message present");
+    assert_eq!(guest_message.guest_query_id.as_deref(), Some("AAQ-guest"));
+    assert!(guest.message.is_none());
+
+    let edited: Update = serde_json::from_str(
+        r#"{"update_id": 2, "edited_message": {
+            "message_id": 6, "date": 1700000000, "edit_date": 1700000060,
+            "chat": {"id": 42, "type": "private"},
+            "from": {"id": 42, "is_bot": false, "first_name": "Owner"},
+            "text": "versi baru"}}"#,
+    )
+    .expect("edited_message must deserialize");
+    assert_eq!(
+        edited.edited_message.expect("edited present").edit_date,
+        Some(1700000060)
+    );
+
+    let kinds: Update = serde_json::from_str(
+        r#"{"update_id": 3, "message": {
+            "message_id": 7, "date": 1700000000,
+            "chat": {"id": 42, "type": "private"},
+            "photo": [{"file_id": "P", "file_unique_id": "p", "width": 1, "height": 1}],
+            "live_photo": {"file_id": "LV", "file_unique_id": "lv", "width": 1,
+                           "height": 1, "duration": 2},
+            "rich_message": {"blocks": [{"type": "paragraph", "text": "diteruskan"}]}}}"#,
+    )
+    .expect("Bot API 10.0 live_photo and 10.1 rich_message must deserialize");
+    let message = kinds.message.expect("message present");
+    assert_eq!(
+        message
+            .live_photo
+            .as_ref()
+            .map(|live| live.file_id.as_str()),
+        Some("LV")
+    );
+    assert_eq!(message.rich_message_text().as_deref(), Some("diteruskan"));
+}
+
+#[test]
 fn test_inline_interleaved_rich_media_placement_order() {
     // Tests Telegram Bot API in-line interleaved rich media placement (matching @richtextdemobot demo)
     // where media elements are interwoven between headings and paragraphs.

@@ -229,6 +229,7 @@ async fn test_create_quiz_without_preamble_sends_single_bubble_and_emits_sink() 
         video_duration: None,
         bot: Some(bot_client),
         reply_to_message_id: Some(100),
+        guest_mode: false,
     };
 
     let (_thinking, answer, _staged_docs, cancelled) = service
@@ -426,6 +427,7 @@ async fn test_create_quiz_with_preamble_sends_two_connected_messages() {
         video_duration: None,
         bot: Some(bot_client),
         reply_to_message_id: Some(100),
+        guest_mode: false,
     };
 
     let (_thinking, answer, _staged_docs, cancelled) = service
@@ -621,6 +623,7 @@ async fn test_create_quiz_in_forum_topic_preserves_thread_id() {
         video_duration: None,
         bot: Some(bot_client),
         reply_to_message_id: Some(100),
+        guest_mode: false,
     };
 
     // thread_id = 9988 represents a Telegram forum topic
@@ -858,6 +861,7 @@ async fn test_create_quiz_deletes_orphan_preamble_if_poll_fails() {
         video_duration: None,
         bot: Some(bot_client),
         reply_to_message_id: None,
+        guest_mode: false,
     };
 
     let (_thinking, answer, _staged_docs, cancelled) = service
@@ -1068,6 +1072,7 @@ async fn test_create_quiz_aborts_if_preamble_fails_and_does_not_send_poll() {
         video_duration: None,
         bot: Some(bot_client),
         reply_to_message_id: None,
+        guest_mode: false,
     };
 
     let (_thinking, answer, _staged_docs, cancelled) = service
@@ -1177,6 +1182,7 @@ async fn test_create_document_staging_and_auto_append() {
         video_duration: None,
         bot: None,
         reply_to_message_id: None,
+        guest_mode: false,
     };
 
     let (_thinking, answer, staged_docs, cancelled) = service
@@ -1292,6 +1298,7 @@ async fn test_create_archive_staging_and_auto_append() {
         video_duration: None,
         bot: None,
         reply_to_message_id: None,
+        guest_mode: false,
     };
 
     let (_thinking, answer, staged_docs, cancelled) = service

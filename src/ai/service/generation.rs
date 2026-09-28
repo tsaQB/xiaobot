@@ -344,6 +344,10 @@ pub struct GenerationInput<'a> {
     pub video_duration: Option<i32>,
     pub bot: Option<crate::bot::client::TelegramBotClient>,
     pub reply_to_message_id: Option<i64>,
+    /// Guest mode (Bot API 10.0): answering in someone else's chat. No
+    /// memory, summary or history is used or stored, and only read-only tools
+    /// are offered, because the reply is visible to everyone in that chat.
+    pub guest_mode: bool,
 }
 
 impl AIChatService {
@@ -419,6 +423,7 @@ impl AIChatService {
             video_duration,
             bot,
             reply_to_message_id,
+            guest_mode,
         } = input;
 
         if *cancel_rx.borrow() {
@@ -476,6 +481,7 @@ impl AIChatService {
                         video_duration,
                         bot,
                         reply_to_message_id,
+                        guest_mode,
                     },
                     cancel_rx,
                 )
@@ -534,6 +540,7 @@ impl AIChatService {
                             video_duration,
                             bot,
                             reply_to_message_id,
+                            guest_mode,
                         },
                         cancel_rx,
                     )
@@ -597,6 +604,7 @@ impl AIChatService {
                         video_duration,
                         bot,
                         reply_to_message_id,
+                        guest_mode,
                     },
                     cancel_rx,
                 )
@@ -628,6 +636,7 @@ impl AIChatService {
                         video_duration,
                         bot,
                         reply_to_message_id,
+                        guest_mode,
                     },
                     cancel_rx,
                 )
@@ -688,6 +697,7 @@ impl AIChatService {
                 video_duration,
                 bot,
                 reply_to_message_id,
+                guest_mode,
             },
             cancel_rx,
         )
@@ -797,6 +807,7 @@ impl AIChatService {
             video_duration,
             bot,
             reply_to_message_id,
+            guest_mode,
         } = input;
 
         let provider = &main_route.provider;
@@ -877,10 +888,15 @@ impl AIChatService {
         // framing. Previously only the output reserve and user prompt were
         // counted, so long memories or summaries could still overflow the
         // window after history had been trimmed.
-        let user_memories = get_user_memories_async(user_id).await;
-        let scoped_summary = get_scoped_summary_async(chat_id, thread_id).await;
-        let system_text =
-            super::prompt::build_system_prompt(&user_memories, scoped_summary.as_deref());
+        // Guest mode answers inside someone else's chat: the owner's private
+        // memory and topic summaries must never leak into that reply.
+        let system_text = if guest_mode {
+            super::prompt::build_guest_system_prompt()
+        } else {
+            let user_memories = get_user_memories_async(user_id).await;
+            let scoped_summary = get_scoped_summary_async(chat_id, thread_id).await;
+            super::prompt::build_system_prompt(&user_memories, scoped_summary.as_deref())
+        };
 
         let cap_record = self.capability_record(&provider.endpoint, model).await;
         let supports_tools = cap_record
@@ -888,7 +904,7 @@ impl AIChatService {
             .map(|r| r.effective_state_for(CapabilityKind::Tools) != CapabilityState::Unsupported)
             .unwrap_or(true);
         let tools_tokens = if supports_tools {
-            estimate_text_tokens(&crate::ai::tools::get_tools_definition().to_string())
+            estimate_text_tokens(&crate::ai::tools::tools_definition_for(guest_mode).to_string())
         } else {
             0
         };
@@ -927,7 +943,12 @@ impl AIChatService {
             .context_limit
             .saturating_sub(reserved_tokens);
 
-        let scoped_messages = load_scoped_messages_async(chat_id, thread_id, 20).await;
+        // Guest replies are stateless: no stored history is read.
+        let scoped_messages = if guest_mode {
+            Vec::new()
+        } else {
+            load_scoped_messages_async(chat_id, thread_id, 20).await
+        };
         let mut selected_history = Vec::new();
         let mut used_history_tokens = 0usize;
         for message in scoped_messages.iter().rev() {
@@ -1073,7 +1094,7 @@ impl AIChatService {
 
             let is_final_turn = turn >= 2;
             if supports_tools && !has_executed_multimedia_or_quiz && !is_final_turn {
-                payload["tools"] = crate::ai::tools::get_tools_definition();
+                payload["tools"] = crate::ai::tools::tools_definition_for(guest_mode);
             } else if let Some(obj) = payload.as_object_mut() {
                 obj.remove("tools");
             }
@@ -1401,7 +1422,14 @@ impl AIChatService {
                     } else {
                         tc.id.clone()
                     };
-                    let result = if name == "web_search" {
+                    let result = if guest_mode
+                        && !crate::ai::tools::GUEST_MODE_TOOLS.contains(&name)
+                    {
+                        // Only research tools are offered in guest mode; a model
+                        // that calls anything else gets a refusal, never a side
+                        // effect in someone else's chat.
+                        format!("Tool `{name}` tidak tersedia saat Xiao dipanggil sebagai tamu. Jawab dengan teks saja.")
+                    } else if name == "web_search" {
                         if let Some(s) = sink {
                             s.on_action("Searching", Some(ProgressActivity::Searching));
                         }
@@ -2098,7 +2126,7 @@ impl AIChatService {
                         obj.remove("tools");
                     }
                 } else if supports_tools {
-                    payload["tools"] = crate::ai::tools::get_tools_definition();
+                    payload["tools"] = crate::ai::tools::tools_definition_for(guest_mode);
                 }
 
                 if let Some(s) = sink {
@@ -2245,6 +2273,12 @@ impl AIChatService {
         // partial answer canonical history: retry/follow-up context must only
         // see completed assistant turns.
         if cancelled || stream_interrupted {
+            return (thinking_text, answer_text, staged_documents, cancelled);
+        }
+
+        // Guest replies are not written to history and do not feed memory
+        // curation; the conversation belongs to someone else's chat.
+        if guest_mode {
             return (thinking_text, answer_text, staged_documents, cancelled);
         }
 

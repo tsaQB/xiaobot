@@ -583,6 +583,7 @@ async fn run_generation(runtime: WaRuntime, job: WaJob) -> TaskOutcome {
         video_duration,
         bot: None,
         reply_to_message_id: None,
+        guest_mode: false,
     };
 
     let (_thinking, answer, staged_docs, cancelled) = ai

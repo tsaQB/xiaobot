@@ -135,6 +135,10 @@ impl TelegramBotClient {
         Some((bytes, content_type, file_name.to_string()))
     }
 
+    /// Replaces remote media blocks with a paragraph containing a link. Links
+    /// use the Bot API 10.3 `RichTextUrl` shape (`{"type":"url","text",…,
+    /// "url":…}`); the previous `text_link` type does not exist in the rich
+    /// message API and made Telegram reject the converted message.
     pub fn convert_remote_media_to_rich_links(
         &self,
         rich_message: &InputRichMessage,
@@ -158,7 +162,7 @@ impl TelegramBotClient {
                             text: Value::Array(vec![
                                 json!("🖼️ "),
                                 json!({
-                                    "type": "text_link",
+                                    "type": "url",
                                     "text": cap,
                                     "url": url,
                                 }),
@@ -182,7 +186,7 @@ impl TelegramBotClient {
                             text: Value::Array(vec![
                                 json!("🎬 "),
                                 json!({
-                                    "type": "text_link",
+                                    "type": "url",
                                     "text": cap,
                                     "url": url,
                                 }),
@@ -206,7 +210,7 @@ impl TelegramBotClient {
                             text: Value::Array(vec![
                                 json!("🎵 "),
                                 json!({
-                                    "type": "text_link",
+                                    "type": "url",
                                     "text": cap,
                                     "url": url,
                                 }),
@@ -230,7 +234,7 @@ impl TelegramBotClient {
                             text: Value::Array(vec![
                                 json!("🎞️ "),
                                 json!({
-                                    "type": "text_link",
+                                    "type": "url",
                                     "text": cap,
                                     "url": url,
                                 }),
@@ -254,7 +258,7 @@ impl TelegramBotClient {
                             text: Value::Array(vec![
                                 json!("📄 "),
                                 json!({
-                                    "type": "text_link",
+                                    "type": "url",
                                     "text": cap,
                                     "url": url,
                                 }),
@@ -286,7 +290,7 @@ impl TelegramBotClient {
                             }
                             count += 1;
                             text_parts.push(json!({
-                                "type": "text_link",
+                                "type": "url",
                                 "text": format!("Foto #{count}"),
                                 "url": sub_url,
                             }));
@@ -320,7 +324,7 @@ impl TelegramBotClient {
                             }
                             count += 1;
                             text_parts.push(json!({
-                                "type": "text_link",
+                                "type": "url",
                                 "text": format!("Slide #{count}"),
                                 "url": sub_url,
                             }));

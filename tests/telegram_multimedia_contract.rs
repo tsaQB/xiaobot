@@ -231,7 +231,7 @@ fn convert_remote_media_to_rich_links_contract(msg: &InputRichMessage) -> InputR
                         text: Value::Array(vec![
                             json!("🖼️ "),
                             json!({
-                                "type": "text_link",
+                                "type": "url",
                                 "text": cap_text,
                                 "url": url,
                             }),
@@ -254,7 +254,7 @@ fn convert_remote_media_to_rich_links_contract(msg: &InputRichMessage) -> InputR
                         text: Value::Array(vec![
                             json!("🎵 "),
                             json!({
-                                "type": "text_link",
+                                "type": "url",
                                 "text": cap_text,
                                 "url": url,
                             }),
@@ -2701,7 +2701,7 @@ fn test_tier4_scenario_dead_image_url_zero_download_fallback() {
         RichBlock::Paragraph { text } => {
             let arr = text.as_array().expect("array of text items");
             assert_eq!(arr[0], "🖼️ ");
-            assert_eq!(arr[1]["type"], "text_link");
+            assert_eq!(arr[1]["type"], "url", "Bot API 10.3 RichTextUrl");
             assert_eq!(arr[1]["text"], "Matahari terbenam di Kuta");
             assert_eq!(arr[1]["url"], "https://broken-domain.invalid/sunset.jpg");
         }

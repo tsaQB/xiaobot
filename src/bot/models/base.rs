@@ -1803,10 +1803,79 @@ pub struct Update {
     #[serde(deserialize_with = "deserialize_flexible_i64")]
     pub update_id: i64,
     pub message: Option<Message>,
+    /// Bot API: new version of a message known to the bot that was edited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_message: Option<Message>,
+    /// Bot API 10.0 guest mode: a message from a chat the bot is not a member
+    /// of, answered with `answerGuestQuery` using `Message.guest_query_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_message: Option<Message>,
     pub callback_query: Option<CallbackQuery>,
     pub stopped_message_generation: Option<MessageGenerationStopped>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll: Option<Poll>,
+}
+
+/// A sticker (Bot API `Sticker`). Only the fields Xiao uses are modelled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sticker {
+    pub file_id: String,
+    #[serde(default)]
+    pub file_unique_id: String,
+    #[serde(default)]
+    pub is_animated: bool,
+    #[serde(default)]
+    pub is_video: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<PhotoSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_flexible_opt_i64")]
+    pub file_size: Option<i64>,
+}
+
+impl Sticker {
+    /// Regular (WEBP) stickers are plain images; animated (TGS) and video
+    /// (WEBM) stickers are not, so only their thumbnail can be shown to a
+    /// vision model.
+    pub fn is_static_image(&self) -> bool {
+        !self.is_animated && !self.is_video
+    }
+}
+
+/// A venue (Bot API `Venue`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Venue {
+    pub location: Location,
+    pub title: String,
+    #[serde(default)]
+    pub address: String,
+}
+
+/// A live photo (Bot API 10.0 `LivePhoto`): a still photo plus a short video.
+/// `file_id` identifies the video part; the still photo is also delivered in
+/// `Message.photo` for backward compatibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivePhoto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub photo: Option<Vec<PhotoSize>>,
+    pub file_id: String,
+    #[serde(default)]
+    pub file_unique_id: String,
+    #[serde(default, deserialize_with = "deserialize_flexible_i32")]
+    pub duration: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_flexible_opt_i64")]
+    pub file_size: Option<i64>,
+}
+
+/// Result of `answerGuestQuery` (Bot API 10.0 `SentGuestMessage`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentGuestMessage {
+    pub inline_message_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1843,6 +1912,39 @@ pub struct Message {
     pub community_chat_joined: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll: Option<Poll>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticker: Option<Sticker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub venue: Option<Venue>,
+    /// Bot API 10.0. `photo` is set as well for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_photo: Option<LivePhoto>,
+    /// Bot API 10.1 `RichMessage` (`{"blocks": [...]}`), e.g. a forwarded
+    /// answer from another AI bot. Kept as JSON; only its text is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rich_message: Option<Value>,
+    /// Bot API 10.0 guest mode query id (set on `Update.guest_message`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_query_id: Option<String>,
+    /// Unix time of the last edit (set on `Update.edited_message`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_flexible_opt_i64"
+    )]
+    pub edit_date: Option<i64>,
+}
+
+impl Message {
+    /// Readable text of a forwarded rich message (`Message.rich_message`),
+    /// with its lists, tables, links and media named rather than flattened.
+    pub fn rich_message_text(&self) -> Option<String> {
+        let blocks = self.rich_message.as_ref()?.get("blocks")?.as_array()?;
+        let text = super::rich_text::rich_blocks_to_plain_text(blocks);
+        (!text.trim().is_empty()).then_some(text)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1899,6 +2001,9 @@ pub struct User {
     pub first_name: String,
     pub last_name: Option<String>,
     pub username: Option<String>,
+    /// Bot API 10.0: whether guest mode is enabled for the bot (getMe only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_guest_queries: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

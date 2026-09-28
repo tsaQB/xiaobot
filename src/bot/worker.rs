@@ -21,6 +21,8 @@ pub const SCOPE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const PANIC_RETRY_BACKOFF: Duration = Duration::from_millis(1500);
 /// Attempts (including the first) before an update is quarantined.
 pub const MAX_TASK_ATTEMPTS: i64 = 2;
+/// Mailbox thread id reserved for guest-mode updates (never a real topic id).
+pub const GUEST_SCOPE_THREAD_ID: i64 = i64::MIN;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScopeKey {
@@ -30,7 +32,14 @@ pub struct ScopeKey {
 
 impl ScopeKey {
     pub fn from_update(update: &Update) -> Self {
-        if let Some(msg) = update.message.as_ref() {
+        if let Some(msg) = update.guest_message.as_ref() {
+            // Guest chats get their own mailbox: their ids may coincide with
+            // a chat the bot is a member of (Bot API 10.0).
+            Self {
+                chat_id: msg.chat.id,
+                thread_id: GUEST_SCOPE_THREAD_ID,
+            }
+        } else if let Some(msg) = update.message.as_ref().or(update.edited_message.as_ref()) {
             Self {
                 chat_id: msg.chat.id,
                 thread_id: msg.message_thread_id.unwrap_or(0),
@@ -65,7 +74,12 @@ impl ScopeKey {
 /// before it occupies a mailbox or a concurrency permit. Mirrors the router:
 /// a message without `from` falls back to its chat id.
 pub fn update_actor_id(update: &Update) -> Option<i64> {
-    if let Some(msg) = update.message.as_ref() {
+    if let Some(msg) = update
+        .message
+        .as_ref()
+        .or(update.edited_message.as_ref())
+        .or(update.guest_message.as_ref())
+    {
         return Some(msg.from.as_ref().map_or(msg.chat.id, |user| user.id));
     }
     if let Some(cb) = update.callback_query.as_ref() {
@@ -865,5 +879,49 @@ mod tests {
         )
         .expect("deserialize update succeeds");
         assert_eq!(update_actor_id(&anonymous), Some(-100555));
+    }
+
+    #[test]
+    fn edits_share_their_chat_mailbox_and_guest_queries_get_their_own() {
+        let edited: Update = serde_json::from_str(
+            r#"{"update_id": 11, "edited_message": {"message_id": 3, "date": 1,
+                "edit_date": 5, "message_thread_id": 7,
+                "chat": {"id": -100555, "type": "supergroup", "is_forum": true},
+                "from": {"id": 42, "is_bot": false, "first_name": "Owner"},
+                "text": "halo lagi"}}"#,
+        )
+        .expect("deserialize edited update succeeds");
+        assert_eq!(
+            ScopeKey::from_update(&edited),
+            ScopeKey {
+                chat_id: -100555,
+                thread_id: 7
+            }
+        );
+        assert_eq!(update_actor_id(&edited), Some(42));
+
+        let guest: Update = serde_json::from_str(
+            r#"{"update_id": 12, "guest_message": {"message_id": 4, "date": 1,
+                "chat": {"id": -100555, "type": "supergroup"},
+                "from": {"id": 42, "is_bot": false, "first_name": "Owner"},
+                "guest_query_id": "gq-1", "text": "@XiaoBot halo"}}"#,
+        )
+        .expect("deserialize guest update succeeds");
+        assert_eq!(
+            ScopeKey::from_update(&guest),
+            ScopeKey {
+                chat_id: -100555,
+                thread_id: GUEST_SCOPE_THREAD_ID
+            },
+            "a guest chat id may collide with a real chat, so it gets its own mailbox"
+        );
+        assert_eq!(update_actor_id(&guest), Some(42));
+        assert_eq!(
+            guest
+                .guest_message
+                .as_ref()
+                .and_then(|message| message.guest_query_id.as_deref()),
+            Some("gq-1")
+        );
     }
 }

@@ -7,12 +7,13 @@ pub mod wa_inbox;
 
 #[allow(unused_imports)]
 pub use inbox::{
-    enqueue_telegram_update_async, load_telegram_offset_async, mark_telegram_processed_async,
-    mark_telegram_processing_async, mark_telegram_processing_claim_async,
-    mark_telegram_processing_failed_async, mark_telegram_processing_released_async,
-    mark_telegram_processing_retry_async, pending_telegram_updates_after_async,
-    quarantine_telegram_update_async, recover_telegram_processing_async,
-    skip_telegram_update_async, TelegramInboxRecord,
+    claim_edited_prompt_async, enqueue_telegram_update_async, load_telegram_offset_async,
+    mark_telegram_processed_async, mark_telegram_processing_async,
+    mark_telegram_processing_claim_async, mark_telegram_processing_failed_async,
+    mark_telegram_processing_released_async, mark_telegram_processing_retry_async,
+    pending_telegram_updates_after_async, quarantine_telegram_update_async,
+    record_latest_prompt_async, recover_telegram_processing_async, skip_telegram_update_async,
+    TelegramInboxRecord,
 };
 #[allow(unused_imports)]
 pub use memory::{
@@ -256,6 +257,14 @@ fn ensure_database_initialized(conn: &Connection, path: &Path) -> rusqlite::Resu
             updated_at TEXT NOT NULL,
             PRIMARY KEY(chat_id, thread_id)
         );
+        CREATE TABLE IF NOT EXISTS telegram_latest_prompts (
+            chat_id INTEGER NOT NULL,
+            thread_id INTEGER NOT NULL DEFAULT 0,
+            message_id INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            claimed_update_id INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(chat_id, thread_id)
+        );
         CREATE INDEX IF NOT EXISTS idx_messages_user_session ON messages(user_id, session_id);
         CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id);
         CREATE INDEX IF NOT EXISTS idx_telegram_inbox_status_update_id ON telegram_inbox(status, update_id);
@@ -284,6 +293,12 @@ fn ensure_database_initialized(conn: &Connection, path: &Path) -> rusqlite::Resu
         "telegram_inbox",
         "attempts",
         "ALTER TABLE telegram_inbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    ensure_column(
+        conn,
+        "telegram_latest_prompts",
+        "claimed_update_id",
+        "ALTER TABLE telegram_latest_prompts ADD COLUMN claimed_update_id INTEGER NOT NULL DEFAULT 0;",
     )?;
     let _ = conn.execute(
         "UPDATE messages SET chat_id = user_id WHERE chat_id = 0 AND user_id != 0;",

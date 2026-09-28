@@ -1551,16 +1551,99 @@ impl TelegramBotClient {
         &self,
         rich_message: &InputRichMessage,
     ) -> InputRichMessage {
-        let mut draft = self.inner.convert_remote_media_to_rich_links(rich_message);
-        for block in &mut draft.blocks {
+        self.media_as_links(rich_message, "📎 Lampiran disiapkan…")
+    }
+
+    /// Converts remote media blocks to links and replaces any other media
+    /// block with `placeholder`. Used wherever Telegram only accepts
+    /// previously uploaded files: drafts and inline (guest-mode) messages.
+    pub(crate) fn media_as_links(
+        &self,
+        rich_message: &InputRichMessage,
+        placeholder: &str,
+    ) -> InputRichMessage {
+        let mut converted = self.inner.convert_remote_media_to_rich_links(rich_message);
+        for block in &mut converted.blocks {
             if block.is_media() {
                 *block = crate::bot::models::RichBlock::Paragraph {
-                    text: Value::String("📎 Lampiran disiapkan…".to_string()),
+                    text: Value::String(placeholder.to_string()),
                 };
             }
         }
-        draft.media = None;
-        draft
+        converted.media = None;
+        converted
+    }
+
+    /// Bot API 10.0 guest mode: replies to a guest message with one inline
+    /// query result and returns the id of the inline message it created.
+    pub async fn answer_guest_query(
+        &self,
+        guest_query_id: &str,
+        result: Value,
+    ) -> Result<crate::bot::models::SentGuestMessage, String> {
+        let response = self
+            .post_json(
+                "answerGuestQuery",
+                json!({"guest_query_id": guest_query_id, "result": result}),
+            )
+            .await?;
+        serde_json::from_value(response.get("result").cloned().unwrap_or(Value::Null))
+            .map_err(|error| format!("answerGuestQuery returned an unexpected result: {error}"))
+    }
+
+    /// Edits an inline message (such as a guest-mode reply) into a rich
+    /// message. Inline messages may only reference previously uploaded files,
+    /// so media become links. If Telegram rejects the rich form, the message
+    /// falls back to plain text bounded by the 4096-character text limit.
+    pub async fn edit_inline_rich_message(
+        &self,
+        inline_message_id: &str,
+        rich_message: &InputRichMessage,
+    ) -> Result<(), String> {
+        let rich =
+            self.media_as_links(rich_message, "📎 Lampiran tidak dapat ditampilkan di sini.");
+        let is_done = |response: &Value| {
+            response.get("ok").and_then(Value::as_bool) == Some(true)
+                || response
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .is_some_and(|d| d.to_ascii_lowercase().contains("message is not modified"))
+        };
+        if rich.validate().is_ok() {
+            let rich_json = serde_json::to_value(&rich).map_err(|error| error.to_string())?;
+            let response = self
+                .post_json_raw(
+                    "editMessageText",
+                    json!({"inline_message_id": inline_message_id, "rich_message": rich_json}),
+                )
+                .await?;
+            if is_done(&response) {
+                return Ok(());
+            }
+            if !fallback_allowed_response(&response) {
+                return Err(Self::telegram_api_error("editMessageText", &response));
+            }
+        }
+
+        let mut plain = rich.extract_plain_text();
+        if plain.trim().is_empty() {
+            plain = "…".to_string();
+        }
+        if plain.chars().count() > TELEGRAM_TEXT_SPLIT_THRESHOLD_CHARS {
+            plain = crate::util::truncate_chars(&plain, TELEGRAM_TEXT_CHUNK_CHARS);
+            plain.push_str("\n\n… (jawaban dipotong karena batas panjang pesan)");
+        }
+        let response = self
+            .post_json_raw(
+                "editMessageText",
+                json!({"inline_message_id": inline_message_id, "text": plain}),
+            )
+            .await?;
+        if is_done(&response) {
+            Ok(())
+        } else {
+            Err(Self::telegram_api_error("editMessageText", &response))
+        }
     }
 
     pub async fn send_message_draft(
