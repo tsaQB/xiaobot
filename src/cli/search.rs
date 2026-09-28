@@ -68,16 +68,16 @@ pub fn parse_search_args(args: &[String]) -> (Option<&str>, Option<String>) {
 
 pub fn mask_api_key(key: &str) -> String {
     let trimmed = key.trim();
-    if trimmed.is_empty() {
+    // Counted in characters throughout; mixing byte length with char
+    // skipping produced a wrong (too short) suffix for non-ASCII input.
+    let char_count = trimmed.chars().count();
+    if char_count == 0 {
         "(not set)".to_string()
-    } else if trimmed.len() <= 8 {
+    } else if char_count <= 8 {
         "••••••••".to_string()
     } else {
         let prefix: String = trimmed.chars().take(4).collect();
-        let suffix: String = trimmed
-            .chars()
-            .skip(trimmed.len().saturating_sub(4))
-            .collect();
+        let suffix: String = trimmed.chars().skip(char_count - 4).collect();
         format!("{prefix}••••{suffix}")
     }
 }
@@ -619,5 +619,7 @@ mod tests {
         assert_eq!(mask_api_key("12345678"), "••••••••");
         assert_eq!(mask_api_key("123456789"), "1234••••6789");
         assert_eq!(mask_api_key("sk-ant-api03-abcdefghijklmn"), "sk-a••••klmn");
+        // Multi-byte characters keep a four-character suffix.
+        assert_eq!(mask_api_key("ключ-абвгдежзик"), "ключ••••жзик");
     }
 }

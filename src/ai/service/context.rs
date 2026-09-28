@@ -41,8 +41,25 @@ pub struct ContextStats {
     pub messages_breakdown: Vec<ContextMessageItem>,
 }
 
+/// Conservative token estimate without a model-specific tokenizer.
+///
+/// ASCII text averages about four characters per token. Non-ASCII scripts
+/// (CJK, Thai, Arabic, emoji) are far denser — often one token or more per
+/// character — so dividing every character by four under-counted them and let
+/// requests overflow the context window. Non-ASCII characters are therefore
+/// counted as one token each, which over-estimates slightly for accented
+/// Latin text; over-estimating only trims history a little earlier.
 pub(crate) fn estimate_text_tokens(text: &str) -> usize {
-    text.chars().count().div_ceil(4).max(1)
+    let mut ascii = 0usize;
+    let mut other = 0usize;
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            ascii += 1;
+        } else {
+            other += 1;
+        }
+    }
+    ascii.div_ceil(4).saturating_add(other).max(1)
 }
 
 pub(crate) fn estimate_stored_content_tokens(content: &Value) -> usize {

@@ -106,7 +106,8 @@ pub(crate) async fn run_cli_chat(ai_service: &AIChatService, initial_prompt: Opt
 
     // One-shot prompt mode
     if let Some(prompt) = initial_prompt.filter(|p| !p.trim().is_empty()) {
-        execute_cli_chat_turn(ai_service, user_id, &prompt, &model_name, false).await;
+        let thread_id = active_session_thread(ai_service, user_id).await;
+        execute_cli_chat_turn(ai_service, user_id, thread_id, &prompt, &model_name, false).await;
         return;
     }
 
@@ -130,7 +131,7 @@ pub(crate) async fn run_cli_chat(ai_service: &AIChatService, initial_prompt: Opt
             "● #{} — {} ({} messages)",
             sess.id,
             sess.name,
-            sess.messages.len()
+            session_message_count(user_id, sess.id).await
         )
     } else {
         "● #1 — Default Chat (0 messages)".to_string()
@@ -147,23 +148,23 @@ pub(crate) async fn run_cli_chat(ai_service: &AIChatService, initial_prompt: Opt
     println!("{hud}\r\n");
     println!("  \x1b[38;5;244mTip: Type /help for chat commands, or run '\x1b[1;37mxiao menu\x1b[0m\x1b[38;5;244m' for Control Center.\x1b[0m\r\n");
 
-    let stdin = io::stdin();
+    // Lines are read on a dedicated thread so the async runtime is never
+    // blocked by a pending `read_line`, and Ctrl+C at the prompt can end the
+    // chat (once tokio's Ctrl+C handler is installed by a turn, the default
+    // SIGINT behaviour no longer applies).
+    let mut lines = spawn_stdin_line_reader();
     loop {
         print!("  \x1b[1;38;5;45mYou ▸ \x1b[0m");
         let _ = io::stdout().flush();
 
-        let mut input = String::new();
-        match stdin.read_line(&mut input) {
-            Ok(0) => {
-                println!("\n\x1b[38;5;244mChat finished.\x1b[0m\n");
-                break;
-            }
-            Err(_) => {
-                println!("\n\x1b[38;5;244mChat finished.\x1b[0m\n");
-                break;
-            }
-            Ok(_) => {}
-        }
+        let input = tokio::select! {
+            line = lines.recv() => line.flatten(),
+            _ = tokio::signal::ctrl_c() => None,
+        };
+        let Some(input) = input else {
+            println!("\n\x1b[38;5;244mChat finished.\x1b[0m\n");
+            break;
+        };
 
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -206,7 +207,7 @@ pub(crate) async fn run_cli_chat(ai_service: &AIChatService, initial_prompt: Opt
                             marker,
                             s.id,
                             s.name,
-                            s.messages.len(),
+                            session_message_count(user_id, s.id).await,
                             s.created_at,
                             act_label
                         );
@@ -303,19 +304,17 @@ pub(crate) async fn run_cli_chat(ai_service: &AIChatService, initial_prompt: Opt
                         let sessions = ai_service.get_sessions(user_id).await;
                         let active_id =
                             ai_service.get_active_session_id(user_id).await.unwrap_or(0);
-                        let mut items: Vec<String> = sessions
-                            .iter()
-                            .map(|s| {
-                                let marker = if s.id == active_id { " [ACTIVE]" } else { "" };
-                                format!(
-                                    "#{:<2} — {:<24} ({} msgs){}",
-                                    s.id,
-                                    s.name,
-                                    s.messages.len(),
-                                    marker
-                                )
-                            })
-                            .collect();
+                        let mut items: Vec<String> = Vec::with_capacity(sessions.len() + 1);
+                        for s in &sessions {
+                            let marker = if s.id == active_id { " [ACTIVE]" } else { "" };
+                            items.push(format!(
+                                "#{:<2} — {:<24} ({} msgs){}",
+                                s.id,
+                                s.name,
+                                session_message_count(user_id, s.id).await,
+                                marker
+                            ));
+                        }
                         items.push("Cancel / Back".to_string());
                         let sel = crate::cli::tui::terminal_interactive_select(
                             "Select conversation session to activate:",
@@ -351,7 +350,8 @@ pub(crate) async fn run_cli_chat(ai_service: &AIChatService, initial_prompt: Opt
             }
         }
 
-        execute_cli_chat_turn(ai_service, user_id, trimmed, &model_name, true).await;
+        let thread_id = active_session_thread(ai_service, user_id).await;
+        execute_cli_chat_turn(ai_service, user_id, thread_id, trimmed, &model_name, true).await;
     }
 }
 
@@ -460,6 +460,7 @@ pub fn render_reasoning_box(thinking: &str, bar_width: usize) -> String {
 pub(crate) async fn execute_cli_chat_turn(
     ai_service: &AIChatService,
     user_id: i64,
+    thread_id: i64,
     prompt: &str,
     model_name: &str,
     interactive: bool,
@@ -513,57 +514,117 @@ pub(crate) async fn execute_cli_chat_turn(
 
     let start = std::time::Instant::now();
 
-    tokio::select! {
-        res = ai_service.generate_response(user_id, 0, user_id, generation_input, &mut cancel_rx) => {
-            spinner_done.store(true, Ordering::Relaxed);
-            if let Some(handle) = spinner_handle {
-                let _ = handle.await;
-            }
-
-            let (thinking, answer, _staged_docs, cancelled) = res;
-            let elapsed = start.elapsed().as_secs_f64();
-
-            if cancelled {
-                println!("\r\x1b[38;5;214m◈\x1b[0m \x1b[33mRequest cancelled.\x1b[0m\n");
-                return;
-            }
-
-            if is_tty {
-                if let Some(think) = thinking.filter(|t| !t.trim().is_empty()) {
-                    let bar_width = get_terminal_bar_width();
-                    println!("{}\n", render_reasoning_box(&think, bar_width));
-                }
-
-                let rendered = crate::parser::render_terminal_markdown(&answer);
-                let rendered_trimmed = rendered.trim();
-
-                if rendered_trimmed.contains('\n')
-                    || rendered_trimmed.contains("┌─")
-                    || rendered_trimmed.contains("▌")
-                {
-                    println!("  \x1b[1;38;2;16;185;129mXiao ▸\x1b[0m\n{}", rendered_trimmed);
-                } else {
-                    println!("  \x1b[1;38;2;16;185;129mXiao ▸\x1b[0m {}", rendered_trimmed);
-                }
-
-                if interactive {
-                    println!("\n  \x1b[38;5;243m[{:.1}s • {}]\x1b[0m\n", elapsed, model_name);
-                } else {
-                    println!("\n  \x1b[38;5;243m[{:.1}s • {}]\x1b[0m", elapsed, model_name);
-                }
-            } else {
-                println!("{}", answer.trim());
-            }
-        }
+    // The generation future is kept alive when Ctrl+C arrives: the cancel
+    // signal is sent to it and it is awaited so it can stop cleanly. Before,
+    // the future was dropped first and the cancel was sent to nobody.
+    let generation = ai_service.generate_response(
+        user_id,
+        thread_id,
+        user_id,
+        generation_input,
+        &mut cancel_rx,
+    );
+    tokio::pin!(generation);
+    let mut interrupted_by_user = false;
+    let res = tokio::select! {
+        res = &mut generation => res,
         _ = tokio::signal::ctrl_c() => {
-            spinner_done.store(true, Ordering::Relaxed);
-            if let Some(handle) = spinner_handle {
-                let _ = handle.await;
-            }
+            interrupted_by_user = true;
             let _ = cancel_tx.send(true);
-            println!("\r\x1b[38;5;214m◈\x1b[0m \x1b[33mRequest cancelled by user (Ctrl+C).\x1b[0m\n");
+            generation.await
         }
+    };
+
+    spinner_done.store(true, Ordering::Relaxed);
+    if let Some(handle) = spinner_handle {
+        let _ = handle.await;
     }
+
+    let (thinking, answer, _staged_docs, cancelled) = res;
+    let elapsed = start.elapsed().as_secs_f64();
+
+    if cancelled || interrupted_by_user {
+        println!("\r\x1b[38;5;214m◈\x1b[0m \x1b[33mRequest cancelled by user (Ctrl+C).\x1b[0m\n");
+        return;
+    }
+
+    if is_tty {
+        if let Some(think) = thinking.filter(|t| !t.trim().is_empty()) {
+            let bar_width = get_terminal_bar_width();
+            println!("{}\n", render_reasoning_box(&think, bar_width));
+        }
+
+        let rendered = crate::parser::render_terminal_markdown(&answer);
+        let rendered_trimmed = rendered.trim();
+
+        if rendered_trimmed.contains('\n')
+            || rendered_trimmed.contains("┌─")
+            || rendered_trimmed.contains("▌")
+        {
+            println!(
+                "  \x1b[1;38;2;16;185;129mXiao ▸\x1b[0m\n{}",
+                rendered_trimmed
+            );
+        } else {
+            println!(
+                "  \x1b[1;38;2;16;185;129mXiao ▸\x1b[0m {}",
+                rendered_trimmed
+            );
+        }
+
+        if interactive {
+            println!(
+                "\n  \x1b[38;5;243m[{:.1}s • {}]\x1b[0m\n",
+                elapsed, model_name
+            );
+        } else {
+            println!(
+                "\n  \x1b[38;5;243m[{:.1}s • {}]\x1b[0m",
+                elapsed, model_name
+            );
+        }
+    } else {
+        println!("{}", answer.trim());
+    }
+}
+
+/// Number of stored messages in a terminal session's own history scope.
+async fn session_message_count(user_id: i64, session_id: usize) -> usize {
+    crate::ai::storage::count_scoped_messages_async(
+        user_id,
+        crate::ai::service::session::cli_session_thread_id(session_id),
+    )
+    .await
+}
+
+/// History scope of the currently active terminal session.
+async fn active_session_thread(ai_service: &AIChatService, user_id: i64) -> i64 {
+    let session_id = ai_service.get_active_session_id(user_id).await.unwrap_or(1);
+    crate::ai::service::session::cli_session_thread_id(session_id)
+}
+
+/// Reads stdin lines on a plain thread. `Some(line)` per line, `None` once
+/// at end-of-input or on a read error.
+fn spawn_stdin_line_reader() -> tokio::sync::mpsc::UnboundedReceiver<Option<String>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        loop {
+            let mut line = String::new();
+            match stdin.read_line(&mut line) {
+                Ok(0) | Err(_) => {
+                    let _ = tx.send(None);
+                    break;
+                }
+                Ok(_) => {
+                    if tx.send(Some(line)).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    rx
 }
 
 #[cfg(test)]

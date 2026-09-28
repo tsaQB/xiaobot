@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, LazyLock, RwLock as StdRwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -13,10 +13,7 @@ use crate::bot::image_flow::{
     handle_image_generation, plan_image_generation_intent, ImageGenerationIntent,
     UserLastImagePrompt,
 };
-use crate::bot::models::{
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputMedia,
-    MessageGenerationStopped, Update,
-};
+use crate::bot::models::{CallbackQuery, MessageGenerationStopped, Update};
 use crate::document;
 use crate::parser::build_full_rich_message;
 use crate::timeline::{ExecutionTimeline, GenerationProgressSink, ProgressActivity};
@@ -514,6 +511,19 @@ pub async fn handle_ai_chat(
     ai_service.end_generation(chat_id, draft_id).await;
     timeline.stop_ticker();
     if cancelled {
+        if ai_service.is_shutting_down() {
+            // Not a user decision: leave the update in the durable inbox so it
+            // is answered after restart.
+            crate::bot::worker::record_task_outcome(crate::bot::worker::TaskOutcome::Interrupted);
+            return;
+        }
+        // The user pressed Stop. Drafts disappear shortly afterwards unless the
+        // bot sends a real message, so keep whatever was already generated.
+        let partial = answer_text.trim();
+        if !partial.is_empty() && partial != ai::service::generation::GENERATION_STOPPED_NOTICE {
+            let stopped_msg = build_full_rich_message(&answer_text, None);
+            deliver_final_answer(bot, &timeline, chat_id, &stopped_msg, Vec::new()).await;
+        }
         return;
     }
     if answer_text == "[QUIZ_SENT]" || answer_text == "[MEDIA_SENT]" {
@@ -535,15 +545,92 @@ pub async fn handle_ai_chat(
     }
 
     let full_rich_msg = build_full_rich_message(&answer_text, Some(&elapsed));
-    let res = timeline
-        .finalize_answer_with_media(&full_rich_msg, staged_documents)
-        .await;
+    deliver_final_answer(bot, &timeline, chat_id, &full_rich_msg, staged_documents).await;
+}
 
-    if let Err(error) = res {
-        // send_rich_message already exhausts canonical Rich -> safe HTML ->
-        // semantic plain-text fallback. Never re-send raw model Markdown here.
-        warn!("Unable to deliver final canonical answer: {error}");
+/// One place for the "could not download your file" reply (previously four
+/// near-identical copies), now explaining *why*: too large, gone, or a
+/// transient network problem.
+pub(crate) fn download_failure_text(
+    what: &str,
+    error: Option<crate::bot::client::FileDownloadError>,
+) -> String {
+    use crate::bot::client::FileDownloadError;
+    let detail = match error {
+        Some(FileDownloadError::TooLarge) => {
+            "Telegram membatasi unduhan file untuk bot maksimal <b>20 MB</b>. Kirim versi yang lebih kecil."
+        }
+        Some(FileDownloadError::NotFound) => {
+            "File tidak lagi tersedia di server Telegram. Silakan kirim ulang."
+        }
+        Some(FileDownloadError::Network) | None => {
+            "Terjadi gangguan jaringan saat mengunduh. Silakan coba kirim ulang."
+        }
+    };
+    format!("⚠️ <b>Gagal mengunduh {what} dari Telegram.</b>\n\n{detail}")
+}
+
+async fn notify_download_failure(
+    bot: &TelegramBotClient,
+    chat_id: i64,
+    what: &str,
+    error: Option<crate::bot::client::FileDownloadError>,
+) {
+    let text = download_failure_text(what, error);
+    let _ = bot
+        .send_message(chat_id, &text, Some("HTML"), None, None, None)
+        .await;
+}
+
+/// Delays before re-attempting delivery of a final answer.
+const FINAL_DELIVERY_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
+
+/// Delivers a final answer with bounded retries. Each attempt already walks
+/// the Rich -> safe HTML -> plain text fallback chain; retries cover transient
+/// network failures. If every attempt fails the owner gets a short notice (if
+/// Telegram is reachable at all) and the inbox entry is marked as a delivery
+/// failure instead of silently "completed".
+async fn deliver_final_answer(
+    bot: &TelegramBotClient,
+    timeline: &ExecutionTimeline,
+    chat_id: i64,
+    rich_message: &crate::bot::models::InputRichMessage,
+    staged_documents: Vec<crate::bot::models::StagedDocument>,
+) {
+    let mut last_error = String::new();
+    for attempt in 0..=FINAL_DELIVERY_RETRY_DELAYS.len() {
+        match timeline
+            .finalize_answer_with_media(rich_message, staged_documents.clone())
+            .await
+        {
+            Ok(_) => return,
+            Err(error) => {
+                last_error = error;
+                if let Some(delay) = FINAL_DELIVERY_RETRY_DELAYS.get(attempt) {
+                    warn!(
+                        attempt = attempt + 1,
+                        "Final answer delivery failed; retrying"
+                    );
+                    tokio::time::sleep(*delay).await;
+                }
+            }
+        }
     }
+    // Never re-send raw model Markdown here; only a fixed notice.
+    warn!("Unable to deliver final canonical answer: {last_error}");
+    crate::bot::worker::record_task_outcome(crate::bot::worker::TaskOutcome::DeliveryFailed(
+        "final answer could not be delivered",
+    ));
+    let _ = bot
+        .send_message(
+            chat_id,
+            "⚠️ Jawaban Xiao gagal terkirim karena gangguan Telegram. Silakan kirim ulang pertanyaan Anda.",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
 }
 
 pub fn delivery_context_for_update(update: &Update) -> TelegramDeliveryContext {
@@ -715,97 +802,6 @@ pub async fn handle_stopped_generation(
     }
 }
 
-#[allow(dead_code)]
-pub const CAROUSEL_TTL: Duration = Duration::from_secs(3600 * 24);
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct CarouselState {
-    pub id: String,
-    pub slides: Vec<String>,
-    pub caption: Option<String>,
-    pub created_at: std::time::Instant,
-}
-
-#[allow(dead_code)]
-pub static GLOBAL_CAROUSEL_CACHE: LazyLock<StdRwLock<HashMap<String, CarouselState>>> =
-    LazyLock::new(|| StdRwLock::new(HashMap::new()));
-
-#[allow(dead_code)]
-pub fn register_carousel(id: String, slides: Vec<String>, caption: Option<String>) {
-    let state = CarouselState {
-        id: id.clone(),
-        slides,
-        caption,
-        created_at: std::time::Instant::now(),
-    };
-
-    let mut cache = match GLOBAL_CAROUSEL_CACHE.write() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let now = std::time::Instant::now();
-    cache.retain(|_, item| {
-        now.checked_duration_since(item.created_at)
-            .unwrap_or(Duration::ZERO)
-            < CAROUSEL_TTL
-    });
-    cache.insert(id, state);
-}
-
-pub fn get_carousel(id: &str) -> Option<CarouselState> {
-    let mut cache = match GLOBAL_CAROUSEL_CACHE.write() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if let Some(state) = cache.get(id) {
-        if state.created_at.elapsed() < CAROUSEL_TTL {
-            return Some(state.clone());
-        }
-    }
-    cache.remove(id);
-    None
-}
-
-pub fn build_carousel_keyboard(
-    id: &str,
-    current_index: usize,
-    total_slides: usize,
-) -> InlineKeyboardMarkup {
-    if total_slides <= 1 {
-        return InlineKeyboardMarkup::new(vec![]);
-    }
-
-    let current_index = current_index.min(total_slides.saturating_sub(1));
-    let prev_index = if current_index == 0 {
-        total_slides.saturating_sub(1)
-    } else {
-        current_index - 1
-    };
-    let next_index = if current_index + 1 >= total_slides {
-        0
-    } else {
-        current_index + 1
-    };
-
-    let prev_data = format!("carousel:{id}:{prev_index}:prev");
-    let indicator_data = format!("carousel:{id}:{current_index}:noop");
-    let next_data = format!("carousel:{id}:{next_index}:next");
-
-    if prev_data.len() > 64 || indicator_data.len() > 64 || next_data.len() > 64 {
-        warn!(id, "Carousel callback_data exceeds Telegram 64-byte limit");
-        return InlineKeyboardMarkup::new(vec![]);
-    }
-
-    let indicator_text = format!("{}/{}", current_index + 1, total_slides);
-    let row = vec![
-        InlineKeyboardButton::callback("⬅️", prev_data),
-        InlineKeyboardButton::callback(indicator_text, indicator_data),
-        InlineKeyboardButton::callback("➡️", next_data),
-    ];
-    InlineKeyboardMarkup::new(vec![row])
-}
-
 pub async fn handle_callback_query(bot: &TelegramBotClient, cq: CallbackQuery) {
     let cq_id = &cq.id;
     let data = match cq.data.as_deref() {
@@ -816,73 +812,17 @@ pub async fn handle_callback_query(bot: &TelegramBotClient, cq: CallbackQuery) {
         }
     };
 
-    if let Some(rest) = data.strip_prefix("carousel:") {
-        let parts: Vec<&str> = rest.split(':').collect();
-        if parts.len() != 3 {
-            let _ = bot.answer_callback_query(cq_id, None, false).await;
-            return;
-        }
-
-        let id = parts[0];
-        if id.trim().is_empty() {
-            let _ = bot.answer_callback_query(cq_id, None, false).await;
-            return;
-        }
-
-        let index = parts[1].parse::<usize>().unwrap_or(0);
-        let action = parts[2];
-
-        let state = match get_carousel(id) {
-            Some(s) => s,
-            None => {
-                let _ = bot
-                    .answer_callback_query(cq_id, Some("Slide carousel expired."), false)
-                    .await;
-                return;
-            }
-        };
-
-        let total = state.slides.len();
-        if total == 0 {
-            let _ = bot.answer_callback_query(cq_id, None, false).await;
-            return;
-        }
-
-        if action == "noop" {
-            let _ = bot.answer_callback_query(cq_id, None, false).await;
-            return;
-        }
-
-        let target_index = index.min(total.saturating_sub(1));
-
-        if let Some(msg) = &cq.message {
-            let chat_id = msg.chat.id;
-            let message_id = msg.message_id;
-            let new_media_url = &state.slides[target_index];
-            let media = InputMedia::photo(
-                new_media_url,
-                state.caption.clone(),
-                if state.caption.is_some() {
-                    Some("HTML".to_string())
-                } else {
-                    None
-                },
-            );
-            let reply_markup = build_carousel_keyboard(id, target_index, total);
-
-            if let Err(err) = bot
-                .edit_message_media(chat_id, message_id, media, Some(reply_markup))
-                .await
-            {
-                warn!(chat_id, message_id, err, "Failed to edit carousel media");
-            }
-        }
-
-        let _ = bot.answer_callback_query(cq_id, None, false).await;
+    // Carousel keyboards were only produced by earlier versions; slideshows
+    // now use Telegram's native `<tg-slideshow>` block. Old buttons get a
+    // clear answer instead of having their message deleted.
+    if data.starts_with("carousel:") {
+        let _ = bot
+            .answer_callback_query(cq_id, Some("Slide carousel ini sudah tidak aktif."), false)
+            .await;
         return;
     }
 
-    // Default fallback for legacy or non-carousel callbacks
+    // Default fallback for legacy callbacks
     let _ = bot
         .answer_callback_query(
             cq_id,
@@ -932,12 +872,14 @@ pub async fn dispatch_text_or_image_chat<'a>(
             bot,
             ai_service,
             user_last_image_prompt,
-            chat_id,
-            thread_id,
-            user_id,
-            &intent.image_prompt,
-            intent.explanation_prompt.as_deref(),
-            input.reply_to_message_id,
+            crate::bot::image_flow::ImageGenerationRequest {
+                chat_id,
+                thread_id,
+                user_id,
+                prompt: &intent.image_prompt,
+                explanation_prompt: intent.explanation_prompt.as_deref(),
+                reply_to_message_id: input.reply_to_message_id,
+            },
         )
         .await;
     } else {
@@ -1027,11 +969,16 @@ pub async fn handle_update(
         let mut video_bytes: Option<Vec<u8>> = None;
         let mut video_mime: Option<String> = None;
         let mut video_duration: i32 = 0;
+        let mut download_error: Option<crate::bot::client::FileDownloadError> = None;
+        let mut fetch_file =
+            |result: Result<(Vec<u8>, String), crate::bot::client::FileDownloadError>| {
+                result.map_err(|error| download_error = Some(error)).ok()
+            };
 
         if let Some(ref v) = msg.voice {
             audio_duration = v.duration;
             audio_mime = v.mime_type.clone();
-            if let Some((data, path)) = bot.get_file_bytes(&v.file_id).await {
+            if let Some((data, path)) = fetch_file(bot.get_file_bytes(&v.file_id).await) {
                 audio_bytes = Some(data);
                 doc_name = path.split('/').next_back().map(str::to_string);
             }
@@ -1039,14 +986,14 @@ pub async fn handle_update(
             audio_duration = a.duration;
             audio_mime = a.mime_type.clone();
             let audio_file_name = a.file_name.clone();
-            if let Some((data, path)) = bot.get_file_bytes(&a.file_id).await {
+            if let Some((data, path)) = fetch_file(bot.get_file_bytes(&a.file_id).await) {
                 audio_bytes = Some(data);
                 doc_name =
                     audio_file_name.or_else(|| path.split('/').next_back().map(str::to_string));
             }
         } else if let Some(ref vid) = msg.video {
             video_duration = vid.duration;
-            if let Some((data, path)) = bot.get_file_bytes(&vid.file_id).await {
+            if let Some((data, path)) = fetch_file(bot.get_file_bytes(&vid.file_id).await) {
                 video_bytes = Some(data);
                 let ext = path.split('.').next_back().unwrap_or("mp4");
                 video_mime = vid
@@ -1056,13 +1003,13 @@ pub async fn handle_update(
             }
         } else if let Some(ref vn) = msg.video_note {
             video_duration = vn.duration;
-            if let Some((data, _)) = bot.get_file_bytes(&vn.file_id).await {
+            if let Some((data, _)) = fetch_file(bot.get_file_bytes(&vn.file_id).await) {
                 video_bytes = Some(data);
                 video_mime = Some("video/mp4".to_string());
             }
         } else if let Some(ref photos) = msg.photo {
             if let Some(largest) = photos.last() {
-                if let Some((data, path)) = bot.get_file_bytes(&largest.file_id).await {
+                if let Some((data, path)) = fetch_file(bot.get_file_bytes(&largest.file_id).await) {
                     image_bytes = Some(data);
                     let ext = path.split('.').next_back().unwrap_or("jpeg");
                     mime_type = Some(if ext == "jpg" {
@@ -1078,7 +1025,7 @@ pub async fn handle_update(
                 .file_name
                 .clone()
                 .unwrap_or_else(|| "dokumen".to_string());
-            if let Some((data, path)) = bot.get_file_bytes(&doc.file_id).await {
+            if let Some((data, path)) = fetch_file(bot.get_file_bytes(&doc.file_id).await) {
                 let ClassifiedTelegramDocument {
                     kind,
                     mime_type: resolved_mime,
@@ -1146,29 +1093,11 @@ pub async fn handle_update(
         }
 
         if has_photo && image_bytes.is_none() {
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    "⚠️ <b>Gagal mengunduh gambar dari server Telegram.</b> Silakan coba kirim ulang.",
-                    Some("HTML"),
-                    None,
-                    None,
-                    None,
-                )
-                .await;
+            notify_download_failure(bot, chat_id, "gambar", download_error).await;
             return;
         }
         if has_audio && audio_bytes.is_none() {
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    "⚠️ <b>Gagal mengunduh audio dari Telegram.</b> Silakan kirim ulang pesan suara/audio.",
-                    Some("HTML"),
-                    None,
-                    None,
-                    None,
-                )
-                .await;
+            notify_download_failure(bot, chat_id, "audio", download_error).await;
             return;
         }
         if has_document
@@ -1180,16 +1109,7 @@ pub async fn handle_update(
                 .as_ref()
                 .is_none_or(|pages| pages.is_empty())
         {
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    "⚠️ <b>Gagal mengunduh dokumen dari Telegram.</b> Silakan kirim ulang file tersebut.",
-                    Some("HTML"),
-                    None,
-                    None,
-                    None,
-                )
-                .await;
+            notify_download_failure(bot, chat_id, "dokumen", download_error).await;
             return;
         }
 
@@ -1281,17 +1201,7 @@ pub async fn handle_update(
             .await;
             return;
         } else if has_video {
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    "⚠️ <b>Gagal mengunduh video dari Telegram.</b>\n\n\
-                     Telegram membatasi ukuran unduhan file bot maksimal <b>20MB</b>. Pastikan durasi atau ukuran video di bawah 20MB.",
-                    Some("HTML"),
-                    None,
-                    None,
-                    None,
-                )
-                .await;
+            notify_download_failure(bot, chat_id, "video", download_error).await;
             return;
         }
 
@@ -2068,106 +1978,6 @@ mod tests {
 
         assert!(doc_guard.contains("document_images"));
         assert!(doc_guard.contains("is_none_or(|pages| pages.is_empty())"));
-    }
-
-    #[test]
-    fn test_carousel_state_cache_register_and_get() {
-        let slides = vec![
-            "https://example.com/s1.jpg".to_string(),
-            "https://example.com/s2.jpg".to_string(),
-            "https://example.com/s3.jpg".to_string(),
-        ];
-        register_carousel(
-            "test_c1".to_string(),
-            slides.clone(),
-            Some("Caption 1".to_string()),
-        );
-
-        let retrieved = get_carousel("test_c1").expect("carousel must exist");
-        assert_eq!(retrieved.id, "test_c1");
-        assert_eq!(retrieved.slides, slides);
-        assert_eq!(retrieved.caption.as_deref(), Some("Caption 1"));
-
-        assert!(get_carousel("non_existent_id").is_none());
-    }
-
-    #[test]
-    fn test_carousel_state_cache_ttl_expiry() {
-        let expired_state = CarouselState {
-            id: "expired_c".to_string(),
-            slides: vec!["https://example.com/expired.jpg".to_string()],
-            caption: None,
-            created_at: std::time::Instant::now() - Duration::from_secs(3600 * 25),
-        };
-        {
-            let mut cache = match GLOBAL_CAROUSEL_CACHE.write() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            cache.insert("expired_c".to_string(), expired_state);
-        }
-
-        assert!(get_carousel("expired_c").is_none());
-    }
-
-    #[test]
-    fn test_build_carousel_keyboard_structure_and_limits() {
-        // <= 1 slides returns empty
-        assert!(build_carousel_keyboard("c_test", 0, 0)
-            .inline_keyboard
-            .is_empty());
-        assert!(build_carousel_keyboard("c_test", 0, 1)
-            .inline_keyboard
-            .is_empty());
-
-        // 3 slides, at index 0 (circular: prev -> 2, next -> 1)
-        let kb_0 = build_carousel_keyboard("c_test", 0, 3);
-        assert_eq!(kb_0.inline_keyboard.len(), 1);
-        let row_0 = &kb_0.inline_keyboard[0];
-        assert_eq!(row_0.len(), 3);
-        assert_eq!(row_0[0].text, "⬅️");
-        assert_eq!(
-            row_0[0].callback_data.as_deref(),
-            Some("carousel:c_test:2:prev")
-        );
-        assert_eq!(row_0[1].text, "1/3");
-        assert_eq!(
-            row_0[1].callback_data.as_deref(),
-            Some("carousel:c_test:0:noop")
-        );
-        assert_eq!(row_0[2].text, "➡️");
-        assert_eq!(
-            row_0[2].callback_data.as_deref(),
-            Some("carousel:c_test:1:next")
-        );
-
-        // 3 slides, at index 2 (circular: prev -> 1, next -> 0)
-        let kb_2 = build_carousel_keyboard("c_test", 2, 3);
-        let row_2 = &kb_2.inline_keyboard[0];
-        assert_eq!(
-            row_2[0].callback_data.as_deref(),
-            Some("carousel:c_test:1:prev")
-        );
-        assert_eq!(row_2[1].text, "3/3");
-        assert_eq!(
-            row_2[1].callback_data.as_deref(),
-            Some("carousel:c_test:2:noop")
-        );
-        assert_eq!(
-            row_2[2].callback_data.as_deref(),
-            Some("carousel:c_test:0:next")
-        );
-
-        // Strict 64-byte validation
-        for btn in row_0 {
-            let data = btn.callback_data.as_deref().expect("callback data");
-            assert!(data.len() <= 64);
-        }
-
-        // Oversized ID exceeding 64 bytes is rejected with empty keyboard
-        let huge_id = "x".repeat(50);
-        let kb_huge = build_carousel_keyboard(&huge_id, 0, 3);
-        assert!(kb_huge.inline_keyboard.is_empty());
     }
 
     #[test]

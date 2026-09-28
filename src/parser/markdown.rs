@@ -80,11 +80,29 @@ fn try_format_standalone_logic_symbol(inner: &str) -> Option<&'static str> {
     }
 }
 
+/// Maximum nesting of inline formatting spans. Real model output rarely nests
+/// more than three levels; the cap keeps adversarial input from turning into
+/// deep recursion or runaway work.
+const MAX_INLINE_DEPTH: usize = 12;
+
+/// Characters that a backslash turns into literal text, following CommonMark.
+/// `(`, `)`, `[` and `]` are deliberately excluded because `\(` / `\[` open
+/// LaTeX math that the parsers below must still see.
+const INLINE_ESCAPABLE: &str = "\\*_~|`$+!#";
+
 pub fn parse_inline(input_str: &str) -> Value {
     if input_str.is_empty() {
         return Value::String(String::new());
     }
+    let unescaped = normalize_inline_html(input_str);
+    parse_inline_tokens(&unescaped, 0)
+}
 
+/// Converts inline HTML to Markdown markers, strips leaked tags and decodes
+/// entities exactly once. Nested spans reuse the decoded text, so escaped
+/// sequences like `&amp;lt;b&amp;gt;` stay literal instead of being decoded
+/// again at every nesting level.
+fn normalize_inline_html(input_str: &str) -> String {
     // Normalize well-formed inline HTML tags before cleaning leaked residual HTML
     let mut normalized = input_str.to_string();
     if normalized.contains("spoiler") || normalized.contains("<tg-spoiler") {
@@ -127,15 +145,61 @@ pub fn parse_inline(input_str: &str) -> Value {
     let cleaned = RE_HTML_LEAKED_TAGS
         .replace_all(&normalized, "")
         .into_owned();
-    let unescaped = html_escape::decode_html_entities(&cleaned).to_string();
+    html_escape::decode_html_entities(&cleaned).to_string()
+}
+
+/// Returns the offset of the `*` that closes a single-star italic span,
+/// stepping over complete `**bold**` pairs so `*a **b** c*` stays one italic
+/// span that contains bold text.
+fn find_closing_single_star(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'*' {
+            if bytes.get(index + 1) == Some(&b'*') {
+                if let Some(close) = text[index + 2..].find("**") {
+                    index += 2 + close + 2;
+                    continue;
+                }
+            }
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn parse_inline_tokens(input: &str, depth: usize) -> Value {
+    if input.is_empty() {
+        return Value::String(String::new());
+    }
+    if depth >= MAX_INLINE_DEPTH {
+        return Value::String(input.to_string());
+    }
+    let parse_inline = |text: &str| parse_inline_tokens(text, depth + 1);
 
     let mut out: Vec<Value> = Vec::new();
-    let mut rest = unescaped.as_str();
+    let mut rest = input;
 
     while !rest.is_empty() {
-        // 1. Bold **text**
-        if rest.starts_with("**") {
-            if let Some(end) = rest[2..].find("**") {
+        // 0. Backslash escape (`\*` renders a literal asterisk)
+        if let Some(after) = rest.strip_prefix('\\') {
+            if let Some(ch) = after
+                .chars()
+                .next()
+                .filter(|ch| INLINE_ESCAPABLE.contains(*ch))
+            {
+                out.push(Value::String(ch.to_string()));
+                rest = &after[ch.len_utf8()..];
+                continue;
+            }
+        }
+
+        // 1. Bold **text** (but not the exponent operator in `a**2`)
+        let offset = input.len() - rest.len();
+        if rest.starts_with("**") && !is_exponent_marker(input, offset) {
+            if let Some(close) = find_bold_marker(input, offset + 2) {
+                let end = close - offset - 2;
                 let inner = &rest[2..2 + end];
                 out.push(json!({
                     "type": "bold",
@@ -213,7 +277,7 @@ pub fn parse_inline(input_str: &str) -> Value {
 
         // 4. Italic *text*
         if rest.starts_with('*') && !rest.starts_with("**") {
-            if let Some(end) = rest[1..].find('*') {
+            if let Some(end) = find_closing_single_star(&rest[1..]) {
                 if end > 0 && !rest[1..].starts_with('*') {
                     let inner = &rest[1..1 + end];
                     out.push(json!({
@@ -369,7 +433,7 @@ pub fn parse_inline(input_str: &str) -> Value {
         // 9. Plain text chunk until next token
         let mut next_pos = rest.len();
         for delim in &[
-            "**", "__", "||", "~~", "++", "`", "*", "_", "![", "[", "$", r"\(",
+            "**", "__", "||", "~~", "++", "`", "*", "_", "![", "[", "$", r"\(", r"\",
         ] {
             if let Some(idx) = rest.find(delim) {
                 if idx > 0 && idx < next_pos {
@@ -660,6 +724,9 @@ fn split_table_row_cells(row_str: &str, is_box_table: bool) -> Vec<String> {
     cells
 }
 
+/// Upper bound on lines inspected when probing for a box-drawing table.
+const MAX_TABLE_SCAN_LINES: usize = 500;
+
 fn try_parse_table(
     lines: &[String],
     i: usize,
@@ -785,8 +852,11 @@ fn try_parse_table(
     if is_unicode_box || is_ascii_grid {
         let mut table_lines = Vec::new();
         let mut curr_i = i;
+        // Bounded look-ahead: this probe runs for every paragraph line, so an
+        // unbounded scan made long runs of box-drawing text quadratic.
+        let scan_end = n.min(i.saturating_add(MAX_TABLE_SCAN_LINES));
 
-        while curr_i < n {
+        while curr_i < scan_end {
             let curr = lines[curr_i].trim();
             if curr.is_empty() {
                 break;
@@ -1048,6 +1118,10 @@ fn provisional_markdown_start(text: &str) -> Option<usize> {
                 cursor = index + 3;
                 continue;
             }
+            if marker == "**" && is_exponent_marker(text, index) {
+                cursor = index + 2;
+                continue;
+            }
             open = if open.is_some() { None } else { Some(index) };
             cursor = index + marker.len();
         }
@@ -1179,10 +1253,42 @@ static RE_DRAFT_DIVIDER: LazyLock<Regex> = LazyLock::new(|| {
 static RE_DRAFT_QUOTE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^\s*(?:\*\*>|>>>|>)\s*").expect("valid static regex"));
 
+/// `**` used as an exponent operator (`a**2`, `(x+1)**3`) rather than as a
+/// bold delimiter: an alphanumeric or `)` directly before and a digit directly
+/// after. Treating it as bold turned `a**2 + b**2` into `a` + bold `2 + b`.
+pub(crate) fn is_exponent_marker(text: &str, index: usize) -> bool {
+    let prev = text[..index].chars().next_back();
+    let next = text.get(index + 2..).and_then(|tail| tail.chars().next());
+    prev.is_some_and(|c| c.is_ascii_alphanumeric() || c == ')')
+        && next.is_some_and(|c| c.is_ascii_digit())
+}
+
+/// Finds the next `**` in `text` at or after `from` that is a bold delimiter.
+fn find_bold_marker(text: &str, from: usize) -> Option<usize> {
+    let mut cursor = from;
+    while let Some(relative) = text.get(cursor..)?.find("**") {
+        let index = cursor + relative;
+        if !is_exponent_marker(text, index) {
+            return Some(index);
+        }
+        cursor = index + 2;
+    }
+    None
+}
+
+fn strip_bold_markers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    while let Some(index) = find_bold_marker(text, cursor) {
+        out.push_str(&text[cursor..index]);
+        cursor = index + 2;
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
 fn sanitize_provisional_markdown(tail: &str) -> String {
-    let mut safe = tail
-        .replace("```", "")
-        .replace("**", "")
+    let mut safe = strip_bold_markers(&tail.replace("```", ""))
         .replace("__", "")
         .replace("||", "")
         .replace("~~", "")
@@ -1440,7 +1546,7 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
             let after_open = &stripped[caps.get(0).map_or(0, |m| m.end())..];
             let close_tag = format!("</h{level}>");
 
-            if let Some(end) = after_open.to_lowercase().rfind(&close_tag) {
+            if let Some(end) = after_open.to_ascii_lowercase().rfind(&close_tag) {
                 let inner = after_open[..end].trim();
                 blocks.push(RichBlock::SectionHeading {
                     text: parse_inline(inner),
@@ -1449,7 +1555,7 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
                 i += 1;
                 continue;
             }
-            if let Some(end) = after_open.to_lowercase().rfind("</h") {
+            if let Some(end) = after_open.to_ascii_lowercase().rfind("</h") {
                 if let Some(_gt) = after_open[end..].find('>') {
                     let inner = after_open[..end].trim();
                     blocks.push(RichBlock::SectionHeading {
@@ -1469,7 +1575,7 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
             i += 1;
             while i < n {
                 let line_str = lines[i].trim();
-                let lower = line_str.to_lowercase();
+                let lower = line_str.to_ascii_lowercase();
                 if let Some(end) = lower.rfind(&close_tag) {
                     let before = line_str[..end].trim();
                     if !before.is_empty() {
@@ -2171,6 +2277,11 @@ fn normalize_html_blocks(html: &str) -> String {
 
     let mut result = String::with_capacity(html.len() + 128);
     let mut last_end = 0;
+    // Computed once: lowercasing the whole document per matched tag made this
+    // loop quadratic in the input size.
+    let html_lower = html.to_ascii_lowercase();
+    let has_audio_close = html_lower.contains("</audio>");
+    let has_tg_audio_close = html_lower.contains("</tg-audio>");
 
     for mat in RE_NORM_BLOCKS.find_iter(html) {
         let text_before = &html[last_end..mat.start()];
@@ -2181,16 +2292,15 @@ fn normalize_html_blocks(html: &str) -> String {
         }
 
         let is_closing = tag.starts_with("</");
+        let tag_lower = tag.to_ascii_lowercase();
         let is_self_closing = tag.ends_with("/>")
-            || tag.eq_ignore_ascii_case("<hr>")
-            || tag.to_lowercase().starts_with("<hr ")
-            || tag.to_lowercase().starts_with("<img")
-            || tag.to_lowercase().starts_with("<tg-photo")
-            || tag.to_lowercase().starts_with("<tg-map")
-            || (tag.to_lowercase().starts_with("<audio")
-                && !html.to_lowercase().contains("</audio>"))
-            || (tag.to_lowercase().starts_with("<tg-audio")
-                && !html.to_lowercase().contains("</tg-audio>"));
+            || tag_lower == "<hr>"
+            || tag_lower.starts_with("<hr ")
+            || tag_lower.starts_with("<img")
+            || tag_lower.starts_with("<tg-photo")
+            || tag_lower.starts_with("<tg-map")
+            || (tag_lower.starts_with("<audio") && !has_audio_close)
+            || (tag_lower.starts_with("<tg-audio") && !has_tg_audio_close);
 
         if is_closing {
             result.push_str(tag);

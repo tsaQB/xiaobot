@@ -3,6 +3,10 @@ use serde_json::Value;
 use super::TelegramBotClient;
 use crate::bot::models::{RichBlock, RichBlockCaption, RichBlockTableCell};
 
+/// Compiled once instead of on every render call.
+static RE_HTML_TAG: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"</?[^>]+>").expect("valid static regex"));
+
 impl TelegramBotClient {
     pub fn render_blocks_to_html_chunks(
         &self,
@@ -11,7 +15,7 @@ impl TelegramBotClient {
     ) -> Vec<String> {
         let mut chunks = Vec::new();
         let mut current_text = String::new();
-        let tag_clean_re = regex::Regex::new(r"</?[^>]+>").ok();
+        let tag_clean_re = Some(&*RE_HTML_TAG);
 
         for block in blocks {
             let b_html = self.render_single_block_html(block);
@@ -771,7 +775,7 @@ impl TelegramBotClient {
             return String::new();
         }
 
-        let tag_clean_re = regex::Regex::new(r"</?[^>]+>").ok();
+        let tag_clean_re = Some(&*RE_HTML_TAG);
         let mut norm_rows: Vec<Vec<(String, String)>> = Vec::new();
         for r in rows {
             let mut row_cells: Vec<(String, String)> = r

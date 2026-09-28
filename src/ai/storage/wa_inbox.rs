@@ -3,6 +3,11 @@ use rusqlite::{params, Connection};
 
 use super::{open_session_db, run_db};
 
+/// Completed rows kept as deduplication tombstones: at least this many of the
+/// newest, plus everything completed within [`TOMBSTONE_MIN_AGE_DAYS`].
+const TOMBSTONE_MIN_COUNT: i64 = 5_000;
+const TOMBSTONE_MIN_AGE_DAYS: i64 = 14;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WhatsAppInboxRecord {
     pub message_key: String,
@@ -10,8 +15,67 @@ pub struct WhatsAppInboxRecord {
     pub sender_id: i64,
     pub payload_json: String,
     pub attempts: i64,
+    pub received_at: String,
 }
 
+/// One authorized inbound message to persist before it is acknowledged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhatsAppInboxEntry {
+    pub message_key: String,
+    pub chat_id: i64,
+    pub sender_id: i64,
+    pub payload_json: String,
+}
+
+fn prune_whatsapp_tombstones_on_conn(conn: &Connection) -> rusqlite::Result<usize> {
+    // Keep the newest TOMBSTONE_MIN_COUNT completed rows and anything completed
+    // recently. A redelivery older than both windows is vanishingly unlikely,
+    // whereas a count-only window could be exhausted by a busy day.
+    let cutoff = (Local::now() - chrono::Duration::days(TOMBSTONE_MIN_AGE_DAYS)).to_rfc3339();
+    conn.execute(
+        "DELETE FROM whatsapp_inbox
+         WHERE status='completed' AND received_at < ?1 AND received_at < (
+           SELECT COALESCE(MIN(received_at),'')
+           FROM (
+             SELECT received_at FROM whatsapp_inbox
+             WHERE status='completed'
+             ORDER BY received_at DESC
+             LIMIT ?2
+           )
+         )",
+        params![cutoff, TOMBSTONE_MIN_COUNT],
+    )
+}
+
+/// Inserts a batch of messages in one transaction (all-or-nothing), ignoring
+/// keys that already exist. Returns how many rows were newly inserted.
+fn enqueue_whatsapp_messages_on_conn(
+    conn: &mut Connection,
+    entries: &[WhatsAppInboxEntry],
+) -> rusqlite::Result<usize> {
+    let tx = conn.transaction()?;
+    let now = Local::now().to_rfc3339();
+    let mut inserted = 0usize;
+    for entry in entries {
+        inserted += tx.execute(
+            "INSERT OR IGNORE INTO whatsapp_inbox(
+                 message_key,chat_id,sender_id,payload_json,status,attempts,received_at
+             ) VALUES(?1,?2,?3,?4,'pending',0,?5)",
+            params![
+                entry.message_key,
+                entry.chat_id,
+                entry.sender_id,
+                entry.payload_json,
+                now
+            ],
+        )?;
+    }
+    prune_whatsapp_tombstones_on_conn(&tx)?;
+    tx.commit()?;
+    Ok(inserted)
+}
+
+#[cfg(test)]
 fn enqueue_whatsapp_message_on_conn(
     conn: &mut Connection,
     message_key: &str,
@@ -19,46 +83,16 @@ fn enqueue_whatsapp_message_on_conn(
     sender_id: i64,
     payload_json: &str,
 ) -> rusqlite::Result<bool> {
-    let tx = conn.transaction()?;
-    let inserted = tx.execute(
-        "INSERT OR IGNORE INTO whatsapp_inbox(
-             message_key,chat_id,sender_id,payload_json,status,attempts,received_at
-         ) VALUES(?1,?2,?3,?4,'pending',0,?5)",
-        params![
-            message_key,
+    enqueue_whatsapp_messages_on_conn(
+        conn,
+        &[WhatsAppInboxEntry {
+            message_key: message_key.to_string(),
             chat_id,
             sender_id,
-            payload_json,
-            Local::now().to_rfc3339()
-        ],
-    )? == 1;
-    // Completed tombstones deduplicate a repeated WhatsApp delivery. Keep only a
-    // bounded recent window so the inbox itself cannot grow forever.
-    tx.execute(
-        "DELETE FROM whatsapp_inbox
-         WHERE status='completed' AND received_at < (
-           SELECT COALESCE(MIN(received_at),'')
-           FROM (
-             SELECT received_at FROM whatsapp_inbox
-             WHERE status='completed'
-             ORDER BY received_at DESC
-             LIMIT 5000
-           )
-         )",
-        [],
-    )?;
-    tx.commit()?;
-    Ok(inserted)
-}
-
-fn enqueue_whatsapp_message_db(
-    message_key: &str,
-    chat_id: i64,
-    sender_id: i64,
-    payload_json: &str,
-) -> rusqlite::Result<bool> {
-    let mut conn = open_session_db()?;
-    enqueue_whatsapp_message_on_conn(&mut conn, message_key, chat_id, sender_id, payload_json)
+            payload_json: payload_json.to_string(),
+        }],
+    )
+    .map(|inserted| inserted == 1)
 }
 
 fn mark_whatsapp_processing_claim_on_conn(
@@ -85,11 +119,6 @@ fn mark_whatsapp_processing_claim_on_conn(
     Ok(Some(attempts))
 }
 
-fn mark_whatsapp_processing_claim_db(message_key: &str) -> rusqlite::Result<Option<i64>> {
-    let conn = open_session_db()?;
-    mark_whatsapp_processing_claim_on_conn(&conn, message_key)
-}
-
 fn mark_whatsapp_processing_retry_on_conn(
     conn: &Connection,
     message_key: &str,
@@ -103,9 +132,19 @@ fn mark_whatsapp_processing_retry_on_conn(
     )? == 1)
 }
 
-fn mark_whatsapp_processing_retry_db(message_key: &str, reason: &str) -> rusqlite::Result<bool> {
-    let conn = open_session_db()?;
-    mark_whatsapp_processing_retry_on_conn(&conn, message_key, reason)
+/// Returns an in-flight message to `pending` without charging the attempt
+/// (used when the process shuts down mid-generation).
+fn mark_whatsapp_processing_released_on_conn(
+    conn: &Connection,
+    message_key: &str,
+    reason: &str,
+) -> rusqlite::Result<bool> {
+    Ok(conn.execute(
+        "UPDATE whatsapp_inbox
+         SET status='pending',attempts=MAX(attempts-1,0),last_error=?2
+         WHERE message_key=?1 AND status='processing'",
+        params![message_key, reason],
+    )? == 1)
 }
 
 fn mark_whatsapp_processing_failed_on_conn(
@@ -116,14 +155,9 @@ fn mark_whatsapp_processing_failed_on_conn(
     Ok(conn.execute(
         "UPDATE whatsapp_inbox
          SET status='failed',last_error=?2
-         WHERE message_key=?1 AND status='processing'",
+         WHERE message_key=?1 AND status IN ('pending','processing')",
         params![message_key, reason],
     )? == 1)
-}
-
-fn mark_whatsapp_processing_failed_db(message_key: &str, reason: &str) -> rusqlite::Result<bool> {
-    let conn = open_session_db()?;
-    mark_whatsapp_processing_failed_on_conn(&conn, message_key, reason)
 }
 
 fn mark_whatsapp_processed_on_conn(conn: &Connection, message_key: &str) -> rusqlite::Result<bool> {
@@ -140,11 +174,6 @@ fn mark_whatsapp_processed_on_conn(conn: &Connection, message_key: &str) -> rusq
     )? == 1)
 }
 
-fn mark_whatsapp_processed_db(message_key: &str) -> rusqlite::Result<bool> {
-    let conn = open_session_db()?;
-    mark_whatsapp_processed_on_conn(&conn, message_key)
-}
-
 fn recover_whatsapp_processing_on_conn(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute(
         "UPDATE whatsapp_inbox
@@ -154,54 +183,52 @@ fn recover_whatsapp_processing_on_conn(conn: &Connection) -> rusqlite::Result<us
     )
 }
 
-fn recover_whatsapp_processing_db() -> rusqlite::Result<usize> {
-    let conn = open_session_db()?;
-    recover_whatsapp_processing_on_conn(&conn)
-}
-
+/// Pending messages in arrival order, strictly after the `(received_at,
+/// message_key)` cursor so callers can page through an arbitrarily long
+/// backlog instead of stopping at the first batch.
 fn pending_whatsapp_messages_on_conn(
     conn: &Connection,
+    after: Option<(&str, &str)>,
     limit: usize,
 ) -> rusqlite::Result<Vec<WhatsAppInboxRecord>> {
+    let (after_time, after_key) = after.unwrap_or(("", ""));
     let mut stmt = conn.prepare(
-        "SELECT message_key,chat_id,sender_id,payload_json,attempts
+        "SELECT message_key,chat_id,sender_id,payload_json,attempts,received_at
          FROM whatsapp_inbox
          WHERE status='pending'
-         ORDER BY received_at
-         LIMIT ?1",
+           AND (received_at > ?1 OR (received_at = ?1 AND message_key > ?2))
+         ORDER BY received_at, message_key
+         LIMIT ?3",
     )?;
-    let rows = stmt.query_map(params![limit as i64], |row| {
+    let rows = stmt.query_map(params![after_time, after_key, limit as i64], |row| {
         Ok(WhatsAppInboxRecord {
             message_key: row.get(0)?,
             chat_id: row.get(1)?,
             sender_id: row.get(2)?,
             payload_json: row.get(3)?,
             attempts: row.get(4)?,
+            received_at: row.get(5)?,
         })
     })?;
     rows.collect()
 }
 
-fn pending_whatsapp_messages_db(limit: usize) -> rusqlite::Result<Vec<WhatsAppInboxRecord>> {
+fn with_conn<T>(f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> rusqlite::Result<T> {
     let conn = open_session_db()?;
-    pending_whatsapp_messages_on_conn(&conn, limit)
+    f(&conn)
 }
 
-pub async fn enqueue_whatsapp_message_async(
-    message_key: String,
-    chat_id: i64,
-    sender_id: i64,
-    payload_json: String,
-) -> Option<bool> {
-    run_db("enqueue_whatsapp_message", move || {
-        enqueue_whatsapp_message_db(&message_key, chat_id, sender_id, &payload_json)
+pub async fn enqueue_whatsapp_messages_async(entries: Vec<WhatsAppInboxEntry>) -> Option<usize> {
+    run_db("enqueue_whatsapp_messages", move || {
+        let mut conn = open_session_db()?;
+        enqueue_whatsapp_messages_on_conn(&mut conn, &entries)
     })
     .await
 }
 
 pub async fn mark_whatsapp_processing_claim_async(message_key: String) -> Option<i64> {
     run_db("mark_whatsapp_processing_claim", move || {
-        mark_whatsapp_processing_claim_db(&message_key)
+        with_conn(|conn| mark_whatsapp_processing_claim_on_conn(conn, &message_key))
     })
     .await
     .flatten()
@@ -210,7 +237,16 @@ pub async fn mark_whatsapp_processing_claim_async(message_key: String) -> Option
 pub async fn mark_whatsapp_processing_retry_async(message_key: String, reason: &str) -> bool {
     let reason = reason.to_string();
     run_db("mark_whatsapp_processing_retry", move || {
-        mark_whatsapp_processing_retry_db(&message_key, &reason)
+        with_conn(|conn| mark_whatsapp_processing_retry_on_conn(conn, &message_key, &reason))
+    })
+    .await
+    .unwrap_or(false)
+}
+
+pub async fn mark_whatsapp_processing_released_async(message_key: String, reason: &str) -> bool {
+    let reason = reason.to_string();
+    run_db("mark_whatsapp_processing_released", move || {
+        with_conn(|conn| mark_whatsapp_processing_released_on_conn(conn, &message_key, &reason))
     })
     .await
     .unwrap_or(false)
@@ -219,7 +255,7 @@ pub async fn mark_whatsapp_processing_retry_async(message_key: String, reason: &
 pub async fn mark_whatsapp_processing_failed_async(message_key: String, reason: &str) -> bool {
     let reason = reason.to_string();
     run_db("mark_whatsapp_processing_failed", move || {
-        mark_whatsapp_processing_failed_db(&message_key, &reason)
+        with_conn(|conn| mark_whatsapp_processing_failed_on_conn(conn, &message_key, &reason))
     })
     .await
     .unwrap_or(false)
@@ -227,24 +263,34 @@ pub async fn mark_whatsapp_processing_failed_async(message_key: String, reason: 
 
 pub async fn mark_whatsapp_processed_async(message_key: String) -> bool {
     run_db("mark_whatsapp_processed", move || {
-        mark_whatsapp_processed_db(&message_key)
+        with_conn(|conn| mark_whatsapp_processed_on_conn(conn, &message_key))
     })
     .await
     .unwrap_or(false)
 }
 
 pub async fn recover_whatsapp_processing_async() -> usize {
-    run_db(
-        "recover_whatsapp_processing",
-        recover_whatsapp_processing_db,
-    )
+    run_db("recover_whatsapp_processing", || {
+        with_conn(recover_whatsapp_processing_on_conn)
+    })
     .await
     .unwrap_or_default()
 }
 
-pub async fn pending_whatsapp_messages_async(limit: usize) -> Vec<WhatsAppInboxRecord> {
+pub async fn pending_whatsapp_messages_async(
+    after: Option<(String, String)>,
+    limit: usize,
+) -> Vec<WhatsAppInboxRecord> {
     run_db("pending_whatsapp_messages", move || {
-        pending_whatsapp_messages_db(limit)
+        with_conn(|conn| {
+            pending_whatsapp_messages_on_conn(
+                conn,
+                after
+                    .as_ref()
+                    .map(|(time, key)| (time.as_str(), key.as_str())),
+                limit,
+            )
+        })
     })
     .await
     .unwrap_or_default()
@@ -287,7 +333,7 @@ mod tests {
         let recovered = recover_whatsapp_processing_on_conn(&conn).expect("recovery succeeds");
         assert_eq!(recovered, 1);
 
-        let pending = pending_whatsapp_messages_on_conn(&conn, 10).expect("listing succeeds");
+        let pending = pending_whatsapp_messages_on_conn(&conn, None, 10).expect("listing succeeds");
         assert_eq!(pending.len(), 1, "pesan harus kembali antre, bukan hilang");
         assert_eq!(pending[0].chat_id, 100);
         assert_eq!(pending[0].sender_id, 200);
@@ -362,10 +408,76 @@ mod tests {
             mark_whatsapp_processing_failed_on_conn(&conn, "KEY-RETRY", "poison pill")
                 .expect("fail succeeds")
         );
-        let pending = pending_whatsapp_messages_on_conn(&conn, 10).expect("listing succeeds");
+        let pending = pending_whatsapp_messages_on_conn(&conn, None, 10).expect("listing succeeds");
         assert!(
             pending.is_empty(),
             "pesan terkarantina tidak boleh diantre lagi"
         );
+    }
+
+    #[test]
+    fn batch_enqueue_is_idempotent_and_released_work_keeps_its_attempt() {
+        let mut conn = wa_inbox_test_conn();
+        let entries: Vec<WhatsAppInboxEntry> = (0..3)
+            .map(|index| WhatsAppInboxEntry {
+                message_key: format!("chat:sender:{index}"),
+                chat_id: 1,
+                sender_id: 2,
+                payload_json: "{}".to_string(),
+            })
+            .collect();
+        assert_eq!(
+            enqueue_whatsapp_messages_on_conn(&mut conn, &entries).expect("enqueue succeeds"),
+            3
+        );
+        // Redelivery of the same batch inserts nothing new.
+        assert_eq!(
+            enqueue_whatsapp_messages_on_conn(&mut conn, &entries).expect("enqueue succeeds"),
+            0
+        );
+
+        assert_eq!(
+            mark_whatsapp_processing_claim_on_conn(&conn, "chat:sender:0").expect("claim"),
+            Some(1)
+        );
+        assert!(
+            mark_whatsapp_processing_released_on_conn(&conn, "chat:sender:0", "shutdown")
+                .expect("release succeeds")
+        );
+        assert_eq!(
+            mark_whatsapp_processing_claim_on_conn(&conn, "chat:sender:0").expect("claim"),
+            Some(1),
+            "shutdown must not consume an attempt"
+        );
+    }
+
+    #[test]
+    fn pending_backlog_can_be_paged_past_the_first_batch() {
+        let mut conn = wa_inbox_test_conn();
+        let entries: Vec<WhatsAppInboxEntry> = (0..5)
+            .map(|index| WhatsAppInboxEntry {
+                message_key: format!("k{index}"),
+                chat_id: 1,
+                sender_id: 2,
+                payload_json: "{}".to_string(),
+            })
+            .collect();
+        enqueue_whatsapp_messages_on_conn(&mut conn, &entries).expect("enqueue succeeds");
+        let mut seen = Vec::new();
+        let mut cursor: Option<(String, String)> = None;
+        loop {
+            let page = pending_whatsapp_messages_on_conn(
+                &conn,
+                cursor
+                    .as_ref()
+                    .map(|(time, key)| (time.as_str(), key.as_str())),
+                2,
+            )
+            .expect("listing succeeds");
+            let Some(last) = page.last() else { break };
+            cursor = Some((last.received_at.clone(), last.message_key.clone()));
+            seen.extend(page.into_iter().map(|record| record.message_key));
+        }
+        assert_eq!(seen, vec!["k0", "k1", "k2", "k3", "k4"]);
     }
 }

@@ -225,8 +225,12 @@ pub fn is_unsupported_image_format(url: &str) -> bool {
 
 pub(crate) fn extract_html_attribute<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
     let mut cursor = 0;
-    let attr_lower = attr.to_lowercase();
-    let tag_lower = tag.to_lowercase();
+    // ASCII-only lowercasing keeps byte offsets identical to `tag`, so indexes
+    // found in `tag_lower` are always valid char boundaries in `tag`. Unicode
+    // lowercasing (e.g. `İ` -> `i̇`) changes byte lengths and made the slice
+    // below panic on crafted attribute values.
+    let attr_lower = attr.to_ascii_lowercase();
+    let tag_lower = tag.to_ascii_lowercase();
     while let Some(idx) = tag_lower[cursor..].find(&attr_lower) {
         let pos = cursor + idx;
         let after_attr = &tag[pos + attr.len()..];

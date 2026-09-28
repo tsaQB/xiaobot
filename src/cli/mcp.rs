@@ -50,6 +50,53 @@ pub fn parse_mcp_cli_action<'a>(
     }
 }
 
+/// Validates (SSRF policy) and saves a new MCP endpoint. Prompts for the URL
+/// when none was given and the terminal is interactive. Returns whether the
+/// endpoint was saved. Shared by `mcp add`, `mcp url` and the menu, which
+/// previously carried three copies of this logic.
+async fn apply_mcp_endpoint(raw_url: Option<&str>, usage: &str) -> bool {
+    let raw_url = match raw_url.map(str::trim).filter(|url| !url.is_empty()) {
+        Some(url) => url.to_string(),
+        None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
+            print!("\nEnter new MCP Endpoint URL: ");
+            let _ = io::stdout().flush();
+            let mut input = String::new();
+            if io::stdin().read_line(&mut input).is_err() || input.trim().is_empty() {
+                println!("\x1b[33mOperation cancelled.\x1b[0m\n");
+                return false;
+            }
+            input.trim().to_string()
+        }
+        None => {
+            println!("\n\x1b[31m✖ Error: <URL> parameter is required.\x1b[0m");
+            println!("  Usage: {usage}\n");
+            return false;
+        }
+    };
+
+    match crate::bot::url_policy::resolve_download_url(&raw_url).await {
+        Ok(_) => {
+            if crate::ai::service::save_app_setting("EXA_MCP_URL", &raw_url).is_ok() {
+                println!(
+                    "\n\x1b[1;32m✔ MCP server successfully connected:\x1b[0m {}\n",
+                    raw_url
+                );
+                true
+            } else {
+                println!("\n\x1b[31m✖ Failed to save MCP configuration to database.\x1b[0m\n");
+                false
+            }
+        }
+        Err(err) => {
+            println!(
+                "\n\x1b[31m✖ URL rejected by security policy (SSRF/Protocol): {}\x1b[0m\n",
+                err
+            );
+            false
+        }
+    }
+}
+
 pub fn print_tools_summary() {
     crate::cli::tui::print_mini_header("Registered Function Calling Tools");
     let tools_value = crate::ai::tools::get_tools_definition();
@@ -164,34 +211,8 @@ async fn run_interactive_mcp_menu() {
             }
             1 => {
                 println!("\n\x1b[1;36mAdd / Connect New MCP Server\x1b[0m");
-                print!("Enter endpoint URL (e.g. https://mcp.exa.ai/): ");
-                let _ = io::stdout().flush();
-                let mut url_input = String::new();
-                let _ = io::stdin().read_line(&mut url_input);
-                let trimmed = url_input.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                match crate::bot::url_policy::resolve_download_url(trimmed).await {
-                    Ok(_) => {
-                        if crate::ai::service::save_app_setting("EXA_MCP_URL", trimmed).is_ok() {
-                            println!(
-                                "\n\x1b[1;32m✔ MCP server successfully connected:\x1b[0m {}\n",
-                                trimmed
-                            );
-                        } else {
-                            println!(
-                                "\n\x1b[31m✖ Failed to save MCP configuration to database.\x1b[0m\n"
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        println!(
-                            "\n\x1b[31m✖ URL rejected by security policy (SSRF/Protocol): {}\x1b[0m\n",
-                            err
-                        );
-                    }
-                }
+                println!("  \x1b[38;5;244mExample: https://mcp.exa.ai/\x1b[0m");
+                let _ = apply_mcp_endpoint(None, "xiao mcp url <URL>").await;
                 crate::cli::tui::print_press_enter();
             }
             2 => {
@@ -278,89 +299,18 @@ pub(crate) async fn run_cli_mcp_hub(
             println!("      Tools     : web_search_exa\n");
         }
         McpCliAction::Add(name_opt, url_opt) => {
-            let raw_url = if let Some(u) = url_opt {
-                u.to_string()
-            } else if let Some(u) =
+            // `xiao mcp add <URL>`; a leading name argument is still accepted
+            // for backward compatibility (`xiao mcp add <name> <URL>`).
+            let raw_url = url_opt.or_else(|| {
                 name_opt.filter(|s| s.starts_with("http://") || s.starts_with("https://"))
-            {
-                u.to_string()
-            } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
-                print!("\nEnter new MCP Endpoint URL: ");
-                let _ = io::stdout().flush();
-                let mut input = String::new();
-                if io::stdin().read_line(&mut input).is_err() || input.trim().is_empty() {
-                    println!("\x1b[33mOperation cancelled.\x1b[0m\n");
-                    return;
-                }
-                input.trim().to_string()
-            } else {
-                println!("\n\x1b[31m✖ Error: <URL> parameter is required.\x1b[0m");
-                println!("  Usage: xiao mcp add <name> <URL>\n");
+            });
+            if !apply_mcp_endpoint(raw_url, "xiao mcp add <URL>").await {
                 std::process::exit(1);
-            };
-            let trimmed = raw_url.trim();
-            match crate::bot::url_policy::resolve_download_url(trimmed).await {
-                Ok(_) => {
-                    if crate::ai::service::save_app_setting("EXA_MCP_URL", trimmed).is_ok() {
-                        println!(
-                            "\n\x1b[1;32m✔ MCP server successfully connected:\x1b[0m {}\n",
-                            trimmed
-                        );
-                    } else {
-                        println!(
-                            "\n\x1b[31m✖ Failed to save MCP configuration to database.\x1b[0m\n"
-                        );
-                        std::process::exit(1);
-                    }
-                }
-                Err(err) => {
-                    println!(
-                        "\n\x1b[31m✖ URL rejected by security policy (SSRF/Protocol): {}\x1b[0m\n",
-                        err
-                    );
-                    std::process::exit(1);
-                }
             }
         }
         McpCliAction::Url(tgt) => {
-            let raw_url = if let Some(u) = tgt {
-                u.to_string()
-            } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
-                print!("\nEnter new MCP Endpoint URL: ");
-                let _ = io::stdout().flush();
-                let mut input = String::new();
-                if io::stdin().read_line(&mut input).is_err() || input.trim().is_empty() {
-                    println!("\x1b[33mOperation cancelled.\x1b[0m\n");
-                    return;
-                }
-                input.trim().to_string()
-            } else {
-                println!("\n\x1b[31m✖ Error: <URL> parameter is required.\x1b[0m");
-                println!("  Usage: xiao mcp url <URL>\n");
+            if !apply_mcp_endpoint(tgt, "xiao mcp url <URL>").await {
                 std::process::exit(1);
-            };
-            let trimmed = raw_url.trim();
-            match crate::bot::url_policy::resolve_download_url(trimmed).await {
-                Ok(_) => {
-                    if crate::ai::service::save_app_setting("EXA_MCP_URL", trimmed).is_ok() {
-                        println!(
-                            "\n\x1b[1;32m✔ MCP server successfully connected:\x1b[0m {}\n",
-                            trimmed
-                        );
-                    } else {
-                        println!(
-                            "\n\x1b[31m✖ Failed to save MCP configuration to database.\x1b[0m\n"
-                        );
-                        std::process::exit(1);
-                    }
-                }
-                Err(err) => {
-                    println!(
-                        "\n\x1b[31m✖ URL rejected by security policy (SSRF/Protocol): {}\x1b[0m\n",
-                        err
-                    );
-                    std::process::exit(1);
-                }
             }
         }
         McpCliAction::Remove(_) => {

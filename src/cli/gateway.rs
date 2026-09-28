@@ -35,25 +35,48 @@ pub fn parse_gateway_cli_args<'a>(args: &'a [String]) -> GatewayCliAction<'a> {
     }
 }
 
+/// Short probe so an offline machine does not freeze the menu for the full
+/// request timeout.
+const GATEWAY_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn telegram_status_label(token: &str) -> String {
+    if token.is_empty() || token == "YOUR_TELEGRAM_BOT_TOKEN_HERE" {
+        return "\x1b[38;5;244m○ Not configured\x1b[0m".to_string();
+    }
+    let bot = TelegramBotClient::new(token);
+    match tokio::time::timeout(GATEWAY_STATUS_TIMEOUT, bot.get_me()).await {
+        Ok(Ok(resp)) if resp.ok => {
+            let uname = resp
+                .result
+                .and_then(|i| i.username)
+                .unwrap_or_else(|| "Bot".to_string());
+            format!("\x1b[1;32m●\x1b[0m \x1b[1;37mOnline\x1b[0m \x1b[38;5;244m(@{uname} · Bot API 10.3)\x1b[0m")
+        }
+        // Telegram answered and rejected the token.
+        Ok(Ok(_)) => "\x1b[31m✖ Invalid Token\x1b[0m".to_string(),
+        Ok(Err(error)) if error.contains("code=401") || error.contains("code=404") => {
+            "\x1b[31m✖ Invalid Token\x1b[0m".to_string()
+        }
+        // No answer: a network problem is not an invalid token.
+        _ => "\x1b[33m◌ Tidak dapat dihubungi\x1b[0m \x1b[38;5;244m(periksa koneksi)\x1b[0m"
+            .to_string(),
+    }
+}
+
 pub(crate) async fn run_cli_gateway_menu() {
     load_environment();
+    // The status is checked once per token instead of on every redraw.
+    let mut telegram_status: Option<(String, String)> = None;
     loop {
         let token = get_configured_token().unwrap_or_default();
         let owner_id = get_configured_owner_id();
 
-        let val_tg = if token.is_empty() || token == "YOUR_TELEGRAM_BOT_TOKEN_HERE" {
-            "\x1b[38;5;244m○ Not configured\x1b[0m".to_string()
-        } else {
-            let bot = TelegramBotClient::new(&token);
-            match bot.get_me().await {
-                Ok(resp) if resp.ok => {
-                    let uname = resp
-                        .result
-                        .and_then(|i| i.username)
-                        .unwrap_or_else(|| "Bot".to_string());
-                    format!("\x1b[1;32m●\x1b[0m \x1b[1;37mOnline\x1b[0m \x1b[38;5;244m(@{uname} · Bot API 10.3)\x1b[0m")
-                }
-                _ => "\x1b[31m✖ Invalid Token\x1b[0m".to_string(),
+        let val_tg = match &telegram_status {
+            Some((checked_token, label)) if *checked_token == token => label.clone(),
+            _ => {
+                let label = telegram_status_label(&token).await;
+                telegram_status = Some((token.clone(), label.clone()));
+                label
             }
         };
 
@@ -321,14 +344,28 @@ async fn run_cli_gateway_whatsapp_submenu() {
                 crate::cli::tui::print_press_enter();
             }
             4 => {
-                if let Err(e) = crate::gateway::whatsapp::WhatsAppGateway::logout(&db_path) {
-                    println!("\n  \x1b[31m✖ Gagal unlink session: {e}\x1b[0m\n");
-                } else {
-                    println!("\n  \x1b[1;32m✔ Sesi WhatsApp berhasil di-unlink/dihapus.\x1b[0m\n");
-                }
+                unlink_whatsapp_session(&db_path);
                 crate::cli::tui::print_press_enter();
             }
             _ => break,
+        }
+    }
+}
+
+/// Deletes the local WhatsApp session and explains what that does and does
+/// not do: the linked device stays listed on the phone until it is removed
+/// there, and a running daemon keeps its in-memory session until restarted.
+fn unlink_whatsapp_session(db_path: &std::path::Path) {
+    match crate::gateway::whatsapp::WhatsAppGateway::logout(db_path) {
+        Err(e) => {
+            println!("\n  \x1b[31m✖ Gagal menghapus sesi lokal: {e}\x1b[0m");
+            println!("  \x1b[38;5;244mJika daemon `xiao start` sedang berjalan, hentikan dulu lalu ulangi.\x1b[0m\n");
+        }
+        Ok(()) => {
+            println!("\n  \x1b[1;32m✔ Sesi WhatsApp lokal dihapus.\x1b[0m");
+            println!("  \x1b[38;5;244mLangkah lanjutan:\x1b[0m");
+            println!("  \x1b[38;5;244m  1. Di HP: WhatsApp › Perangkat Tertaut › hapus perangkat Xiao agar tautan di server juga dicabut.\x1b[0m");
+            println!("  \x1b[38;5;244m  2. Jika daemon sedang berjalan, restart agar sesi di memori ikut berhenti.\x1b[0m\n");
         }
     }
 }
@@ -340,12 +377,31 @@ async fn run_cli_whatsapp_pair(phone_login: Option<String>) {
         db_path,
         owner_number,
         phone_login,
+        dedicated_groups: crate::get_whatsapp_dedicated_groups(),
     };
     let ai_service = Arc::new(crate::ai::AIChatService::new());
     println!("\n  \x1b[1;37mMengkoneksikan ke server WhatsApp...\x1b[0m");
     println!("  \x1b[38;5;244mTekan Ctrl+C kapan saja untuk kembali ke menu.\x1b[0m\n");
-    if let Err(e) = crate::gateway::whatsapp::WhatsAppGateway::start(config, ai_service).await {
-        println!("\n  \x1b[31m✖ WhatsApp connection error: {e}\x1b[0m\n");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let ctrl_c = tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = shutdown_tx.send(true);
+    });
+    let exit = crate::gateway::whatsapp::WhatsAppGateway::start(
+        config,
+        Arc::clone(&ai_service),
+        shutdown_rx,
+    )
+    .await;
+    ctrl_c.abort();
+    match exit {
+        crate::gateway::whatsapp::client::WhatsAppExit::Shutdown => {}
+        crate::gateway::whatsapp::client::WhatsAppExit::LoggedOut => {
+            println!("\n  \x1b[33m⚠ Perangkat dilepas dari WhatsApp. Sesi lokal dihapus; lakukan pairing ulang.\x1b[0m\n");
+        }
+        crate::gateway::whatsapp::client::WhatsAppExit::Failed(error) => {
+            println!("\n  \x1b[31m✖ WhatsApp connection error: {error}\x1b[0m\n");
+        }
     }
 }
 
@@ -415,12 +471,7 @@ pub(crate) async fn run_cli_gateway_hub(action: GatewayCliAction<'_>) {
                 println!("    Storage: {}\n", db_path.display());
             }
             Some("unlink") | Some("logout") => {
-                let db_path = get_whatsapp_db_path();
-                if let Err(e) = crate::gateway::whatsapp::WhatsAppGateway::logout(&db_path) {
-                    println!("  \x1b[31m✖ Gagal unlink session: {e}\x1b[0m\n");
-                } else {
-                    println!("  \x1b[1;32m✔ Sesi WhatsApp berhasil di-unlink/dihapus.\x1b[0m\n");
-                }
+                unlink_whatsapp_session(&get_whatsapp_db_path());
             }
             Some(other) => {
                 println!("\x1b[31m✖ Unknown WhatsApp action: '{other}'. Try 'xiao gateway wa [pair|code|owner|status|unlink]'.\x1b[0m\n");

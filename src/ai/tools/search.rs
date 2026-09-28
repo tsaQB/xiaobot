@@ -8,8 +8,45 @@ use super::{
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, REFERER, USER_AGENT};
 use serde_json::{json, Value};
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 use url::Url;
+
+/// Upper bound for any search-engine response body. Search APIs return a few
+/// kilobytes; the cap only stops a misbehaving or hostile endpoint from
+/// ballooning memory.
+const MAX_SEARCH_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// Upper bound for a result page scraped for images.
+const MAX_SCRAPED_PAGE_BYTES: usize = 2 * 1024 * 1024;
+
+async fn read_bytes_bounded(resp: reqwest::Response) -> Result<Vec<u8>, String> {
+    if resp
+        .content_length()
+        .is_some_and(|length| length > MAX_SEARCH_RESPONSE_BYTES as u64)
+    {
+        return Err("respons melebihi batas ukuran".to_string());
+    }
+    let mut stream = resp.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+        let chunk = chunk.map_err(|e| format!("stream terputus: {e}"))?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_SEARCH_RESPONSE_BYTES {
+            return Err("respons melebihi batas ukuran".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+async fn read_text_bounded(resp: reqwest::Response) -> Result<String, String> {
+    read_bytes_bounded(resp)
+        .await
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+async fn read_json_bounded(resp: reqwest::Response) -> Result<Value, String> {
+    let bytes = read_bytes_bounded(resp).await?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("JSON tidak valid: {e}"))
+}
 
 pub fn get_brave_key() -> Option<String> {
     env::var("BRAVE_API_KEY")
@@ -91,7 +128,7 @@ pub async fn execute_web_search(query: &str) -> String {
 
     // 1. Check Brave Search API
     if let Some(brave_key) = get_brave_key() {
-        info!("Using Brave Search API for query: {q}");
+        debug!("Using Brave Search API");
         match search_brave(&client, &brave_key, q).await {
             Ok(mut res) => {
                 if is_visual && !res.contains("🖼️ **URL Foto/Gambar Raster Terverifikasi") {
@@ -115,7 +152,7 @@ pub async fn execute_web_search(query: &str) -> String {
 
     // 2. Check Tavily API
     if let Some(tavily_key) = get_tavily_key() {
-        info!("Using Tavily API for query: {q}");
+        debug!("Using Tavily API");
         match search_tavily(&client, &tavily_key, q).await {
             Ok(mut res) => {
                 if is_visual && !res.contains("🖼️ **URL Foto/Gambar Raster Terverifikasi") {
@@ -139,7 +176,7 @@ pub async fn execute_web_search(query: &str) -> String {
 
     // 3. Check Exa REST API
     if let Some(exa_key) = get_exa_key() {
-        info!("Using Exa API for query: {q}");
+        debug!("Using Exa API");
         match search_exa_api(&client, &exa_key, q).await {
             Ok(mut res) => {
                 if is_visual && !res.contains("🖼️ **URL Foto/Gambar Raster Terverifikasi") {
@@ -167,7 +204,7 @@ pub async fn execute_web_search(query: &str) -> String {
 
     // 4. Default / Keyless Exa MCP
     let mcp_url = get_configured_mcp_url();
-    info!("Trying Exa Keyless MCP for query: {q}");
+    debug!("Trying Exa Keyless MCP");
     match search_exa_mcp(&client, &mcp_url, q).await {
         Ok(mut res) => {
             if is_visual && !res.contains("🖼️ **URL Foto/Gambar Raster Terverifikasi") {
@@ -195,7 +232,7 @@ pub async fn execute_web_search(query: &str) -> String {
     }
 
     // 5. DuckDuckGo Search Fallback
-    info!("Using DuckDuckGo for query: {q}");
+    debug!("Using DuckDuckGo");
     match search_duckduckgo(&client, q).await {
         Ok(mut res) => {
             if is_visual && !res.contains("🖼️ **URL Foto/Gambar Raster Terverifikasi") {
@@ -265,7 +302,7 @@ async fn search_brave(
             .await
         {
             if resp.status().is_success() {
-                if let Ok(img_body) = resp.json::<Value>().await {
+                if let Ok(img_body) = read_json_bounded(resp).await {
                     if let Some(results) = img_body.get("results").and_then(Value::as_array) {
                         for item in results.iter().take(5) {
                             let raw_url = item
@@ -309,8 +346,7 @@ async fn search_brave(
         return Err(format!("Brave Search API returned HTTP {status}"));
     }
 
-    let body: Value = resp
-        .json()
+    let body: Value = read_json_bounded(resp)
         .await
         .map_err(|e| format!("Gagal membaca JSON Brave: {e}"))?;
 
@@ -408,8 +444,7 @@ async fn search_tavily(
         return Err(format!("Tavily API returned HTTP {status}"));
     }
 
-    let body: Value = resp
-        .json()
+    let body: Value = read_json_bounded(resp)
         .await
         .map_err(|e| format!("Gagal membaca JSON Tavily: {e}"))?;
 
@@ -501,8 +536,7 @@ async fn search_exa_api(
         return Err(format!("Exa API returned HTTP {status}"));
     }
 
-    let body: Value = resp
-        .json()
+    let body: Value = read_json_bounded(resp)
         .await
         .map_err(|e| format!("Gagal membaca JSON Exa: {e}"))?;
 
@@ -575,8 +609,7 @@ pub(crate) async fn search_exa_mcp(
         return Err(format!("Exa MCP returned HTTP {status}"));
     }
 
-    let text = resp
-        .text()
+    let text = read_text_bounded(resp)
         .await
         .map_err(|e| format!("Gagal membaca stream Exa MCP: {e}"))?;
 
@@ -681,8 +714,7 @@ async fn search_duckduckgo(client: &reqwest::Client, query: &str) -> Result<Stri
         return Err(format!("DuckDuckGo mengembalikan status HTTP {status}"));
     }
 
-    let html = resp
-        .text()
+    let html = read_text_bounded(resp)
         .await
         .map_err(|e| format!("Gagal membaca respon DuckDuckGo: {e}"))?;
 
@@ -719,31 +751,23 @@ async fn search_duckduckgo(client: &reqwest::Client, query: &str) -> Result<Stri
     if is_visual && extracted_images.is_empty() {
         for target_url in urls.iter().take(2) {
             if target_url.starts_with("http://") || target_url.starts_with("https://") {
-                if let Ok(page_resp) = client
-                    .get(target_url)
-                    .timeout(Duration::from_secs(4))
-                    .header(
-                        USER_AGENT,
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    )
-                    .header(
-                        ACCEPT,
-                        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    )
-                    .send()
-                    .await
+                // Result URLs come from third-party HTML, so they go through
+                // the SSRF-safe fetcher: a crafted result pointing at a private
+                // or loopback address (or redirecting there) is refused.
+                if let Ok((page_html, final_url)) = super::fetch_public_html(
+                    target_url,
+                    Duration::from_secs(4),
+                    MAX_SCRAPED_PAGE_BYTES,
+                )
+                .await
                 {
-                    if page_resp.status().is_success() {
-                        if let Ok(page_html) = page_resp.text().await {
-                            let scraped = extract_raster_images_from_html(&page_html, Some(target_url));
-                            for img in scraped {
-                                if !extracted_images.contains(&img) {
-                                    extracted_images.push(img);
-                                }
-                                if extracted_images.len() >= 6 {
-                                    break;
-                                }
-                            }
+                    let scraped = extract_raster_images_from_html(&page_html, Some(&final_url));
+                    for img in scraped {
+                        if !extracted_images.contains(&img) {
+                            extracted_images.push(img);
+                        }
+                        if extracted_images.len() >= 6 {
+                            break;
                         }
                     }
                 }
@@ -798,8 +822,7 @@ async fn fetch_wikipedia_article_images(
         return Err(format!("Wikipedia gallery status HTTP {}", resp.status()));
     }
 
-    let body: Value = resp
-        .json()
+    let body: Value = read_json_bounded(resp)
         .await
         .map_err(|e| format!("Failed to parse Wikipedia gallery JSON: {e}"))?;
 
@@ -897,8 +920,7 @@ async fn search_wikimedia_commons_files(
         return Err(format!("Wikimedia Commons status HTTP {}", resp.status()));
     }
 
-    let body: Value = resp
-        .json()
+    let body: Value = read_json_bounded(resp)
         .await
         .map_err(|e| format!("Failed to parse Wikimedia Commons JSON: {e}"))?;
 
@@ -1001,7 +1023,7 @@ async fn search_wikipedia(client: &reqwest::Client, query: &str) -> Result<Strin
                 continue;
             }
 
-            let body: Value = match resp.json().await {
+            let body: Value = match read_json_bounded(resp).await {
                 Ok(b) => b,
                 Err(e) => {
                     warn!("Failed to parse Wikipedia JSON for {lang}: {e}");

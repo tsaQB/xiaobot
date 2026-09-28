@@ -11,6 +11,10 @@ pub struct WhatsAppConfig {
     pub db_path: PathBuf,
     pub owner_number: Option<String>,
     pub phone_login: Option<String>,
+    /// Groups (JID or numeric id) where every owner message is answered
+    /// without mentioning the bot. Elsewhere in groups a mention, a reply to
+    /// the bot, or a leading `/` is required.
+    pub dedicated_groups: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +42,10 @@ impl WhatsAppGateway {
             Ok(c) => c,
             Err(_) => return WhatsAppStatus::Unlinked,
         };
+        // The running daemon writes to this database. Without a busy timeout a
+        // momentary lock made the query fail and a linked session was
+        // reported as unlinked.
+        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
 
         let table_exists: bool = conn
             .query_row(
@@ -80,11 +88,12 @@ impl WhatsAppGateway {
         Ok(())
     }
 
-    /// Menjalankan loop client WhatsApp
+    /// Menjalankan satu sesi client WhatsApp sampai shutdown, logout, atau error.
     pub async fn start(
         config: WhatsAppConfig,
         ai_service: std::sync::Arc<crate::ai::AIChatService>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        client::WhatsAppClientRunner::run(config, ai_service).await
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> client::WhatsAppExit {
+        client::WhatsAppClientRunner::run(config, ai_service, shutdown).await
     }
 }

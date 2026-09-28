@@ -11,6 +11,17 @@ use crate::{
     get_configured_owner_id, get_configured_token, load_environment, save_env_kv, save_token_to_env,
 };
 
+/// Reads one line of interactive input. Returns `None` on end-of-input or a
+/// read error, so retry loops can stop instead of spinning forever when stdin
+/// is closed (`read_line` returns `Ok(0)` at EOF, which is not an error).
+pub(crate) fn read_prompt_line(reader: &mut impl BufRead) -> Option<String> {
+    let mut input = String::new();
+    match reader.read_line(&mut input) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(input),
+    }
+}
+
 pub(crate) async fn run_cli_quickstart_wizard(ai_service: &AIChatService) -> Option<String> {
     crate::cli::tui::print_mini_header("Quickstart Setup Wizard");
     println!("  \x1b[38;5;245mInitial configuration for AI Provider and Telegram Gateway · \x1b[1;37m[Ctrl+C]\x1b[0m \x1b[38;5;245mCancel\x1b[0m\n");
@@ -71,11 +82,11 @@ pub(crate) async fn run_cli_quickstart_wizard(ai_service: &AIChatService) -> Opt
                 "  \x1b[1;38;2;6;182;212m▸\x1b[0m \x1b[1;37mEndpoint URL\x1b[0m \x1b[38;5;244m[default: {default_custom}]:\x1b[0m "
             );
             let _ = io::stdout().flush();
-            let mut input = String::new();
-            if reader.read_line(&mut input).is_err() {
+            // EOF (e.g. non-interactive stdin) cancels instead of looping forever.
+            let Some(input) = read_prompt_line(&mut reader) else {
                 println!("\n  \x1b[38;5;244mSetup cancelled.\x1b[0m\n");
                 return None;
-            }
+            };
             let trimmed = input.trim();
             if trimmed.is_empty() {
                 break default_custom.clone();
@@ -247,11 +258,11 @@ pub(crate) async fn run_cli_quickstart_wizard(ai_service: &AIChatService) -> Opt
                 print!("  \x1b[1;38;2;6;182;212m▸\x1b[0m \x1b[1;37mTelegram Bot Token:\x1b[0m ");
             }
             let _ = io::stdout().flush();
-            let mut input = String::new();
-            if reader.read_line(&mut input).is_err() {
+            // EOF (e.g. non-interactive stdin) cancels instead of looping forever.
+            let Some(input) = read_prompt_line(&mut reader) else {
                 println!("\n  \x1b[38;5;244mSetup cancelled.\x1b[0m\n");
                 return None;
-            }
+            };
             let trimmed = input.trim();
             let user_token = if trimmed.is_empty() {
                 if let Some(ref tok) = env_token {
@@ -302,11 +313,11 @@ pub(crate) async fn run_cli_quickstart_wizard(ai_service: &AIChatService) -> Opt
                 print!("  \x1b[1;38;2;6;182;212m▸\x1b[0m \x1b[1;37mOwner User ID:\x1b[0m ");
             }
             let _ = io::stdout().flush();
-            let mut input = String::new();
-            if reader.read_line(&mut input).is_err() {
+            // EOF (e.g. non-interactive stdin) cancels instead of looping forever.
+            let Some(input) = read_prompt_line(&mut reader) else {
                 println!("\n  \x1b[38;5;244mSetup cancelled.\x1b[0m\n");
                 return None;
-            }
+            };
             let trimmed = input.trim();
             if trimmed.is_empty() {
                 if let Some(oid) = env_owner {
@@ -475,6 +486,19 @@ pub(crate) fn normalize_endpoint_url(raw: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_reader_reports_end_of_input() {
+        let mut closed = std::io::Cursor::new(Vec::<u8>::new());
+        assert_eq!(
+            read_prompt_line(&mut closed),
+            None,
+            "EOF must cancel prompts"
+        );
+        let mut one_line = std::io::Cursor::new(b"123\n".to_vec());
+        assert_eq!(read_prompt_line(&mut one_line).as_deref(), Some("123\n"));
+        assert_eq!(read_prompt_line(&mut one_line), None);
+    }
 
     #[test]
     fn test_normalize_endpoint_url() {

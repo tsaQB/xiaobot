@@ -73,6 +73,29 @@ fn normalized_api_error_code(error: &str) -> Option<u16> {
     None
 }
 
+/// Bot API methods that can be repeated without a visible side effect: reads,
+/// edits, deletions and ephemeral indicators. `send*` methods (other than
+/// drafts and chat actions) are excluded because repeating them after an
+/// ambiguous timeout would post the message twice.
+pub fn is_idempotent_method(method: &str) -> bool {
+    method.starts_with("get")
+        || method.starts_with("edit")
+        || method.starts_with("delete")
+        || matches!(
+            method,
+            "answerCallbackQuery"
+                | "sendChatAction"
+                | "sendMessageDraft"
+                | "sendRichMessageDraft"
+                | "setMyCommands"
+        )
+}
+
+/// Backoff for retrying a timed-out idempotent request.
+pub fn retry_delay_for_idempotent_timeout(attempt: usize) -> Option<Duration> {
+    bounded_attempt(attempt).then(|| backoff(attempt))
+}
+
 pub fn fallback_allowed_response(response: &Value) -> bool {
     response.get("error_code").and_then(Value::as_i64) == Some(400)
 }
@@ -206,5 +229,28 @@ mod tests {
         assert!(retry_delay_from_error("body failure", 0).is_none());
         assert!(retry_delay_from_error("transport failure", 0).is_none());
         assert!(retry_delay_from_error("request failure", 0).is_none());
+    }
+
+    #[test]
+    fn only_idempotent_methods_retry_after_timeouts() {
+        for method in [
+            "getUpdates",
+            "getFile",
+            "editMessageText",
+            "deleteMessage",
+            "answerCallbackQuery",
+            "sendChatAction",
+            "sendRichMessageDraft",
+        ] {
+            assert!(is_idempotent_method(method), "{method} is safe to repeat");
+        }
+        for method in ["sendMessage", "sendRichMessage", "sendPoll", "sendDocument"] {
+            assert!(
+                !is_idempotent_method(method),
+                "{method} could post twice after an ambiguous timeout"
+            );
+        }
+        assert!(retry_delay_for_idempotent_timeout(0).is_some());
+        assert!(retry_delay_for_idempotent_timeout(MAX_TELEGRAM_ATTEMPTS).is_none());
     }
 }

@@ -20,20 +20,40 @@ use crate::ai::http::{is_retryable_status, retry_delay, MAX_PROVIDER_ATTEMPTS};
 use crate::ai::routing::{GenerationModelSnapshot, ModelRole, ResolvedModelRoute, RouteOrigin};
 use crate::ai::storage::{
     get_scoped_summary_async, get_user_memories_async, load_scoped_messages_async,
-    save_scoped_message_async, CapabilityKind, CapabilityState,
+    save_scoped_turn_async, CapabilityKind, CapabilityState,
 };
 use crate::ai::stream::{SseDecoder, StreamEvent};
 
 pub(crate) const MAX_STREAM_VISIBLE_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_STREAM_REASONING_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_STREAM_WIRE_BYTES: usize = 32 * 1024 * 1024;
+/// Answer text of a generation stopped before it produced any content.
+pub(crate) const GENERATION_STOPPED_NOTICE: &str = "⏹️ Generasi dihentikan oleh pengguna.";
+/// Upper bound on parallel tool calls accepted from one streamed turn.
+pub(crate) const MAX_TOOL_CALLS_PER_TURN: usize = 32;
+/// Upper bound on a single tool result injected back into the conversation.
+pub(crate) const MAX_TOOL_RESULT_CHARS: usize = 12_000;
 
 pub(crate) use crate::bot::models::StagedDocument;
 
 /// (thinking_text, answer_text, staged_documents, cancelled)
 pub(crate) type ChatGenerationResult = (Option<String>, String, Vec<StagedDocument>, bool);
 
-static NEXT_DRAFT_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(100_000);
+/// Draft ids are seeded from the wall clock so they do not restart at the same
+/// value after every process restart. A fixed seed let a replayed "stop"
+/// update from before a restart cancel an unrelated new generation that
+/// happened to receive the same id.
+static NEXT_DRAFT_ID: std::sync::LazyLock<std::sync::atomic::AtomicI64> =
+    std::sync::LazyLock::new(|| {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .ok()
+            .and_then(|millis| i64::try_from(millis).ok())
+            .unwrap_or(100_000)
+            .max(100_000);
+        std::sync::atomic::AtomicI64::new(seed)
+    });
 
 pub fn next_draft_id() -> i64 {
     NEXT_DRAFT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -83,6 +103,61 @@ pub(crate) async fn sleep_or_cancel(
     race_with_cancel(cancel_rx, tokio::time::sleep(delay)).await
 }
 
+/// Serializes the persisted user turn. Serializing a `serde_json::Value`
+/// cannot realistically fail, but if it ever did the plain prompt is stored
+/// instead of an empty string that would silently erase the user's message.
+fn serialize_user_content(content: &Value, fallback_text: &str) -> String {
+    serde_json::to_string(content).unwrap_or_else(|error| {
+        warn!("Failed to serialize user turn for history: {error}");
+        Value::String(fallback_text.to_string()).to_string()
+    })
+}
+
+/// Minimum spacing between partial-answer refreshes pushed to a progress sink.
+const PARTIAL_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Allowance for per-message role/format overhead added by chat templates.
+const PROMPT_FRAMING_TOKENS: usize = 512;
+/// Rough token cost of one inline image or rendered document page.
+const INLINE_IMAGE_TOKENS: usize = 1_500;
+
+/// Estimates the context cost of media sent inline with the current prompt.
+pub(crate) fn inline_media_token_estimate(
+    media_to_main: bool,
+    document_images: Option<&[Vec<u8>]>,
+    has_image: bool,
+    has_audio: bool,
+    has_video: bool,
+) -> usize {
+    if !media_to_main {
+        return 0;
+    }
+    let pages = document_images.map_or(0, <[Vec<u8>]>::len);
+    let mut tokens = pages.saturating_mul(INLINE_IMAGE_TOKENS);
+    if has_image {
+        tokens = tokens.saturating_add(INLINE_IMAGE_TOKENS);
+    }
+    if has_audio {
+        tokens = tokens.saturating_add(INLINE_IMAGE_TOKENS);
+    }
+    if has_video {
+        tokens = tokens.saturating_add(INLINE_IMAGE_TOKENS.saturating_mul(4));
+    }
+    tokens
+}
+
+/// Tool output re-enters the prompt on the next turn. Unbounded results (web
+/// pages, search dumps) could push the request past the model context even
+/// though the history had been trimmed to fit.
+pub(crate) fn bound_tool_result(result: &str) -> String {
+    if result.chars().nth(MAX_TOOL_RESULT_CHARS).is_none() {
+        return result.to_string();
+    }
+    let mut bounded = truncate_chars(result, MAX_TOOL_RESULT_CHARS);
+    bounded.push_str("\n\n[Hasil tool dipotong Xiao agar muat di context window model.]");
+    bounded
+}
+
 pub(crate) fn push_bounded(target: &mut String, chunk: &str, max_bytes: usize) -> bool {
     if target.len().saturating_add(chunk.len()) > max_bytes {
         return false;
@@ -98,14 +173,41 @@ pub(crate) fn canonical_persisted_prompt<'a>(
     canonical.unwrap_or(runtime_prompt)
 }
 
+/// Fallback output-token ceiling used only when the provider did not report
+/// `max_completion_tokens` (that metadata always wins, see the caller).
+///
+/// Matching works on whole name segments (`anthropic/claude-sonnet-5` ->
+/// `anthropic`, `claude`, `sonnet`, `5`) instead of raw substrings, so an
+/// unrelated model such as `console-7b` or `solar-pro` no longer inherits a
+/// 65k budget that the provider would reject.
 pub(crate) fn max_output_tokens_for_model(model: &str) -> usize {
     let lower = model.to_ascii_lowercase();
-    if lower.contains("claude") {
+    let segments: Vec<&str> = lower
+        .split(['/', '-', ':', '_', '.', '@', ' '])
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let has = |name: &str| segments.contains(&name);
+    let family_prefix = |prefix: &str| {
+        segments.first().is_some_and(|first| *first == prefix)
+            || lower
+                .split('/')
+                .next_back()
+                .is_some_and(|base| base == prefix || base.starts_with(&format!("{prefix}-")))
+    };
+
+    if has("claude") {
         64_000
-    } else if lower.contains("gemini")
-        || ["o1", "o3", "gpt-4o", "gpt-5", "sol", "terra", "luna"]
-            .iter()
-            .any(|needle| lower.contains(needle))
+    } else if has("gemini")
+        || has("o1")
+        || has("o3")
+        || has("o4")
+        || has("gpt")
+            && segments
+                .iter()
+                .any(|segment| matches!(*segment, "4o" | "5"))
+        || family_prefix("sol")
+        || family_prefix("terra")
+        || family_prefix("luna")
     {
         65_536
     } else {
@@ -121,7 +223,7 @@ pub(crate) fn cancelled_chat_result(
     }
     (
         None,
-        "⏹️ Generasi dihentikan oleh pengguna.".to_string(),
+        GENERATION_STOPPED_NOTICE.to_string(),
         Vec::new(),
         true,
     )
@@ -769,13 +871,50 @@ impl AIChatService {
         if let Some(limit) = metadata_max_completion_tokens.filter(|limit| *limit > 0) {
             max_output_tokens = max_output_tokens.min(limit);
         }
+        // Everything that is sent besides history counts against the context
+        // window: the system prompt (instructions + memory + summary), the
+        // tool schemas, inline media, and a small allowance for message
+        // framing. Previously only the output reserve and user prompt were
+        // counted, so long memories or summaries could still overflow the
+        // window after history had been trimmed.
+        let user_memories = get_user_memories_async(user_id).await;
+        let scoped_summary = get_scoped_summary_async(chat_id, thread_id).await;
+        let system_text =
+            super::prompt::build_system_prompt(&user_memories, scoped_summary.as_deref());
+
+        let cap_record = self.capability_record(&provider.endpoint, model).await;
+        let supports_tools = cap_record
+            .as_ref()
+            .map(|r| r.effective_state_for(CapabilityKind::Tools) != CapabilityState::Unsupported)
+            .unwrap_or(true);
+        let tools_tokens = if supports_tools {
+            estimate_text_tokens(&crate::ai::tools::get_tools_definition().to_string())
+        } else {
+            0
+        };
+        let media_tokens = inline_media_token_estimate(
+            media_to_main,
+            document_images.as_deref(),
+            image_bytes.is_some(),
+            audio_bytes.is_some(),
+            video_bytes.is_some(),
+        );
+        let fixed_overhead = estimate_text_tokens(&system_text)
+            .saturating_add(tools_tokens)
+            .saturating_add(media_tokens)
+            .saturating_add(PROMPT_FRAMING_TOKENS);
+
         let max_prompt_tokens = resolved_capability
             .context_limit
             .saturating_sub(max_output_tokens)
-            .saturating_sub(2_048)
+            .saturating_sub(fixed_overhead)
             .max(1);
-        if estimate_text_tokens(&clean_prompt) > max_prompt_tokens {
-            let max_chars = max_prompt_tokens.saturating_mul(4);
+        let prompt_tokens = estimate_text_tokens(&clean_prompt);
+        if prompt_tokens > max_prompt_tokens {
+            // Scale by the observed chars-per-token ratio so dense scripts
+            // (CJK, Arabic) are cut to the budget too, not just ASCII.
+            let prompt_chars = clean_prompt.chars().count();
+            let max_chars = prompt_chars.saturating_mul(max_prompt_tokens) / prompt_tokens.max(1);
             clean_prompt = truncate_chars(&clean_prompt, max_chars);
             clean_prompt.push_str("\n\n[Input dipotong Xiao agar muat di context window model.]");
         }
@@ -783,7 +922,7 @@ impl AIChatService {
 
         let reserved_tokens = max_output_tokens
             .saturating_add(estimate_text_tokens(&enhanced_prompt))
-            .saturating_add(2_048);
+            .saturating_add(fixed_overhead);
         let history_budget = resolved_capability
             .context_limit
             .saturating_sub(reserved_tokens);
@@ -817,40 +956,10 @@ impl AIChatService {
             history.push(json!({ "role": message.role, "content": content }));
         }
 
-        let user_memories = get_user_memories_async(user_id).await;
-        let mut system_text = "Kamu adalah Xiao, asisten AI yang cerdas, komunikatif, dan ramah. \
-                    Gunakan input multimodal hanya ketika input tersebut benar-benar disediakan dan endpoint/model mendukungnya. \
-                    Dokumen Xiao diekstrak menjadi teks bila memungkinkan; PDF scan dapat diberikan sebagai halaman hasil render untuk OCR visual. \
-                    Lakukan penalaran secara internal dan berikan hanya jawaban yang berguna bagi pengguna; jangan menampilkan chain-of-thought tersembunyi. \
-                    Gunakan gaya bahasa yang alami dan format teks yang elegan. \
-                    Jika membuat tabel atau data berkolom, gunakan Markdown Table standar agar Xiao dapat merendernya secara rapi. \
-                    Jika pengguna meminta atau membutuhkan konten visual, foto, gambar, logo, lambang/ikon, album kolase, tayangan slide, berkas audio/musik, rekaman suara, lokasi peta, dokumen berkas, pembuatan file/arsip langsung, atau kuis interaktif, SELALU panggil tool resmi yang sesuai (`send_photo`, `send_collage`, `send_slideshow`, `send_audio`, `send_voice`, `send_location`, `send_document`, `create_document`, `create_archive`, `create_quiz`). Jika Anda membutuhkan URL gambar untuk memanggil tool foto/kolase, gunakan tool `web_search` terlebih dahulu untuk memperoleh URL gambar raster terverifikasi (.jpg, .png, .webp). \
-                    Khusus untuk pembuatan berkas/dokumen (termasuk dokumen PDF `.pdf`, berkas HTML `.html`, script kode, data CSV/JSON, atau teks): Anda MEMILIKI kemampuan membuat dan mengirimkannya secara langsung via tool `create_document`. Jika pengguna meminta bundel/paket arsip ZIP berisi beberapa file sekaligus (multi-file), SELALU gunakan tool `create_archive` dengan daftar berkas `files: [{filename, content}, ...]`. JANGAN PERNAH menolak permintaan pembuatan PDF, dokumen, atau arsip ZIP dengan alasan teknis. SELALU panggil tool `create_document` atau `create_archive` yang sesuai. \
-                    Ketika Anda memanggil tool multimedia atau pembuatan dokumen, tool akan menyiapkan media dan mengembalikan tag media yang siap disematkan. WAJIB sematkan tag media tersebut langsung di tengah-tengah penjelasan teks pada posisi yang paling relevan (misalnya di bawah heading pembuka atau di antara paragraf narasi) agar tampil elegan di dalam gelembung pesan utama Xiao. Jangan mengarang URL atau tag media fiktif tanpa memanggil tool terlebih dahulu. \
-                    Untuk tautan video streaming eksternal (seperti YouTube, Vimeo, Twitch), sertakan tautan teks Markdown standar [Judul Video](https://...) agar Telegram otomatis memunculkan rich link preview interaktif. \
-                    Jika pengguna meminta kuis interaktif, latihan soal, atau tebak-tebakan, selalu panggil tool `create_quiz` (gunakan parameter `preamble` terformat Markdown jika ada materi pengantar, studi kasus, atau potongan kode sebelum kuis).\n\
-                    Jangan pernah menampilkan tag internal seperti <think>, <thought>, <tool_call>, atau blok JSON raw ke pengguna.\n\
-                    Jika pengguna mengirim '/start' atau salam pembuka di awal sesi baru, sambut mereka dengan hangat, ramah, dan ringkas sebagai asisten AI Xiao tanpa menyebut-nyebut perintah slash. \
-                    Jika pengguna mengirim '/start' ketika percakapan sudah berjalan, berikan rangkuman ringkas mengenai hal-hal yang telah dibahas sebelumnya dan tanyakan kelanjutannya secara natural.".to_string();
-
-        if !user_memories.is_empty() {
-            system_text.push_str("\n\n[User Profile (Long-Term Memory)]:\n");
-            for (key, fact) in &user_memories {
-                system_text.push_str(&format!("- {key}: {fact}\n"));
-            }
-        }
-
-        if let Some(summary) = get_scoped_summary_async(chat_id, thread_id).await {
-            system_text.push_str(&format!(
-                "\n\n[Previous Conversation Summary for this Topic]:\n{summary}\n"
-            ));
-        }
-
         let mut messages = vec![json!({
             "role": "system",
             "content": system_text
         })];
-
         messages.extend(history);
 
         if media_to_main {
@@ -926,12 +1035,6 @@ impl AIChatService {
             }));
         }
 
-        let cap_record = self.capability_record(&provider.endpoint, model).await;
-        let supports_tools = cap_record
-            .as_ref()
-            .map(|r| r.effective_state_for(CapabilityKind::Tools) != CapabilityState::Unsupported)
-            .unwrap_or(true);
-
         let url = provider_url(&provider.endpoint, "chat/completions");
         let mut payload = json!({
             "model": model,
@@ -964,6 +1067,7 @@ impl AIChatService {
             accumulated_reasoning.clear();
             let mut accumulated_tool_calls: Vec<PendingToolCall> = Vec::new();
             let mut streamed_wire_bytes = 0usize;
+            let mut last_partial_at: Option<std::time::Instant> = None;
             let mut stream_done = false;
             has_started_answer = false;
 
@@ -1149,8 +1253,19 @@ impl AIChatService {
                                 delta.get("tool_calls").and_then(Value::as_array)
                             {
                                 for tc in tool_calls {
-                                    let index = tc.get("index").and_then(Value::as_u64).unwrap_or(0)
-                                        as usize;
+                                    // The index comes straight from the provider. Anything
+                                    // outside the small per-turn budget is rejected rather
+                                    // than used to size the accumulator, so a hostile or
+                                    // buggy `index: 4000000000` cannot exhaust memory.
+                                    let Some(index) = tc
+                                        .get("index")
+                                        .map_or(Some(0), Value::as_u64)
+                                        .and_then(|raw| usize::try_from(raw).ok())
+                                        .filter(|index| *index < MAX_TOOL_CALLS_PER_TURN)
+                                    else {
+                                        warn!("Provider sent an out-of-range tool_call index; ignoring it");
+                                        continue;
+                                    };
                                     while accumulated_tool_calls.len() <= index {
                                         accumulated_tool_calls.push(PendingToolCall::default());
                                     }
@@ -1212,6 +1327,19 @@ impl AIChatService {
                                 break 'streaming;
                             }
 
+                            // Re-sanitizing the whole accumulated answer on every
+                            // chunk made streaming O(n^2). Partials only matter to a
+                            // progress sink, which itself syncs at most every ~1.2s,
+                            // so refresh them on a short interval instead.
+                            let Some(s) = sink else {
+                                continue;
+                            };
+                            if last_partial_at
+                                .is_some_and(|at| at.elapsed() < PARTIAL_REFRESH_INTERVAL)
+                            {
+                                continue;
+                            }
+                            last_partial_at = Some(std::time::Instant::now());
                             let visible_partial =
                                 crate::parser::markdown::sanitize_leaked_llm_artifacts(
                                     &accumulated_raw,
@@ -1227,12 +1355,8 @@ impl AIChatService {
                                     );
 
                                 if !is_tool_preamble {
-                                    if !has_started_answer {
-                                        has_started_answer = true;
-                                    }
-                                    if let Some(s) = sink {
-                                        s.on_partial_answer(&visible_partial);
-                                    }
+                                    has_started_answer = true;
+                                    s.on_partial_answer(&visible_partial);
                                 }
                             }
                         }
@@ -1867,27 +1991,20 @@ impl AIChatService {
                         attachment_refs,
                     );
                     let user_content_str =
-                        serde_json::to_string(&user_message_content).unwrap_or_default();
-
-                    save_scoped_message_async(
-                        chat_id,
-                        thread_id,
-                        user_id,
-                        "user".to_string(),
-                        user_content_str,
-                    )
-                    .await;
-
+                        serialize_user_content(&user_message_content, &clean_prompt);
                     let assistant_content = quiz_history_summary
                         .unwrap_or_else(|| "[Kuis Native Telegram]".to_string());
-                    save_scoped_message_async(
+                    if !save_scoped_turn_async(
                         chat_id,
                         thread_id,
                         user_id,
-                        "assistant".to_string(),
+                        user_content_str,
                         assistant_content.clone(),
                     )
-                    .await;
+                    .await
+                    {
+                        warn!("Quiz turn was not persisted to history");
+                    }
 
                     let service_clone = self.clone();
                     let prompt_for_bg = clean_prompt.clone();
@@ -1943,7 +2060,7 @@ impl AIChatService {
                     messages.push(json!({
                         "role": "tool",
                         "tool_call_id": id,
-                        "content": res
+                        "content": bound_tool_result(res)
                     }));
                 }
 
@@ -2071,7 +2188,7 @@ impl AIChatService {
 
         if cancelled {
             if answer_text.trim().is_empty() {
-                answer_text = "⏹️ Generasi dihentikan oleh pengguna.".to_string();
+                answer_text = GENERATION_STOPPED_NOTICE.to_string();
             } else {
                 answer_text.push_str("\n\n_⏹️ Generasi dihentikan oleh pengguna._");
             }
@@ -2150,28 +2267,18 @@ impl AIChatService {
             canonical_persisted_prompt(canonical_history_prompt.as_deref(), &clean_prompt),
             attachment_refs.clone(),
         );
-        let user_content_str = serde_json::to_string(&user_message_content).unwrap_or_default();
-        if cancelled {
-            return (thinking_text, answer_text, staged_documents, true);
-        }
-        let assistant_content_str = answer_text.clone();
-
-        save_scoped_message_async(
+        let user_content_str = serialize_user_content(&user_message_content, &clean_prompt);
+        if !save_scoped_turn_async(
             chat_id,
             thread_id,
             user_id,
-            "user".to_string(),
             user_content_str,
+            answer_text.clone(),
         )
-        .await;
-        save_scoped_message_async(
-            chat_id,
-            thread_id,
-            user_id,
-            "assistant".to_string(),
-            assistant_content_str,
-        )
-        .await;
+        .await
+        {
+            warn!("Conversation turn was not persisted to history");
+        }
 
         let service_clone = self.clone();
         let prompt_for_bg = clean_prompt.clone();

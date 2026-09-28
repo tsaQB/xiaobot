@@ -327,9 +327,14 @@ impl InputRichMessageMedia {
                 "InputRichMessageMedia ID must be 1-64 characters, found {count}"
             ));
         }
-        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        // Bot API 10.3 `InputRichMessageMedia.id`: "1-64 characters, only
+        // A-Z, a-z, 0-9, _ and - are allowed."
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
             return Err(format!(
-                "InputRichMessageMedia ID must contain only ASCII alphanumeric characters or underscores; found '{id}'"
+                "InputRichMessageMedia ID must contain only ASCII alphanumeric characters, underscores or hyphens; found '{id}'"
             ));
         }
         Ok(())
@@ -612,12 +617,28 @@ impl BotCommand {
 // Telegram Bot API 10.3: Rich Message Blocks
 // ==========================================
 
-// Diverifikasi oleh suite kontrak Bot API 10.3; produksi membangun tombol
-// lewat varian RichBlock, bukan struct ini secara langsung.
+/// Inline rich-text button (`{"type":"button","button":{...}}`).
+///
+/// Diverifikasi oleh suite kontrak Bot API 10.3; produksi membangun tombol
+/// lewat varian RichBlock, bukan struct ini secara langsung. Satu-satunya
+/// definisi: salinan lama tanpa diskriminator `type` sudah dihapus.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RichTextButton {
     pub button: RichMessageButton,
+}
+
+impl Serialize for RichTextButton {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("RichTextButton", 2)?;
+        state.serialize_field("type", "button")?;
+        state.serialize_field("button", &self.button)?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -782,11 +803,13 @@ pub struct RichBlockTableCell {
 }
 
 impl RichBlockTableCell {
+    /// Bot API 10.3 lists `align` and `valign` as required cell fields, so a
+    /// missing alignment defaults to `left` instead of being omitted.
     pub fn new(text: Value, is_header: bool, align: Option<&str>) -> Self {
         Self {
             text,
             is_header: if is_header { Some(true) } else { None },
-            align: align.map(|a| a.to_string()),
+            align: Some(align.unwrap_or("left").to_string()),
             valign: "middle".to_string(),
             colspan: None,
             rowspan: None,
@@ -1219,11 +1242,15 @@ pub struct InputRichMessage {
     pub skip_entity_detection: Option<bool>,
 }
 
+// Source: Telegram Bot API 10.3, "Formatting options" -> "Rich Message Limits"
+// (https://core.telegram.org/bots/api#rich-message-limits).
 pub const RICH_MESSAGE_MAX_TEXT_CHARS: usize = 32_768;
 pub const RICH_MESSAGE_MAX_BLOCKS: usize = 500;
 pub const RICH_MESSAGE_MAX_NESTING: usize = 16;
 pub const RICH_MESSAGE_MAX_MEDIA: usize = 50;
 pub const RICH_MESSAGE_MAX_TABLE_COLUMNS: usize = 20;
+// Xiao's own layout choice: Telegram does not publish a per-row button cap,
+// but wider rows become unreadable on phones.
 pub const RICH_MESSAGE_MAX_BUTTONS_PER_ROW: usize = 8;
 
 #[derive(Default)]
@@ -1233,27 +1260,31 @@ struct RichMessageStats {
     max_depth: usize,
 }
 
+/// JSON keys that carry metadata rather than user-visible rich text. Shared by
+/// the length validator and the plain-text extractor so the two cannot drift.
+fn is_non_text_key(key: &str) -> bool {
+    matches!(
+        key,
+        "type"
+            | "url"
+            | "callback_data"
+            | "web_app"
+            | "style"
+            | "align"
+            | "valign"
+            | "language"
+            | "name"
+            | "document"
+    )
+}
+
 fn value_text_chars(value: &Value) -> usize {
     match value {
         Value::String(text) => text.chars().count(),
         Value::Array(values) => values.iter().map(value_text_chars).sum(),
         Value::Object(object) => object
             .iter()
-            .filter(|(key, _)| {
-                !matches!(
-                    key.as_str(),
-                    "type"
-                        | "url"
-                        | "callback_data"
-                        | "web_app"
-                        | "style"
-                        | "align"
-                        | "valign"
-                        | "language"
-                        | "name"
-                        | "document"
-                )
-            })
+            .filter(|(key, _)| !is_non_text_key(key))
             .map(|(_, value)| value_text_chars(value))
             .sum(),
         _ => 0,
@@ -1273,19 +1304,7 @@ pub(crate) fn value_to_text(value: &Value, out: &mut String) {
                 value_to_text(text, out);
             } else {
                 for (key, val) in object {
-                    if !matches!(
-                        key.as_str(),
-                        "type"
-                            | "url"
-                            | "callback_data"
-                            | "web_app"
-                            | "style"
-                            | "align"
-                            | "valign"
-                            | "language"
-                            | "name"
-                            | "document"
-                    ) {
+                    if !is_non_text_key(key) {
                         value_to_text(val, out);
                     }
                 }
@@ -2007,9 +2026,13 @@ pub struct FileInfo {
 // Poll & Quiz Models
 // ==========================================
 
+// Source: Telegram Bot API 10.3, method `sendPoll` and class `InputPollOption`
+// (https://core.telegram.org/bots/api#sendpoll). Telegram accepts 1-12
+// options; Xiao requires at least two because a one-answer quiz is not a
+// question, and rejects duplicate options because they make grading ambiguous.
 pub const QUIZ_MAX_QUESTION_CHARS: usize = 300;
 pub const QUIZ_MIN_OPTIONS: usize = 2;
-pub const QUIZ_MAX_OPTIONS: usize = 10;
+pub const QUIZ_MAX_OPTIONS: usize = 12;
 pub const QUIZ_MAX_OPTION_CHARS: usize = 100;
 pub const QUIZ_MAX_EXPLANATION_CHARS: usize = 200;
 pub const QUIZ_MAX_EXPLANATION_LINE_BREAKS: usize = 2;
@@ -2115,6 +2138,10 @@ pub struct Poll {
         deserialize_with = "deserialize_flexible_opt_i32"
     )]
     pub correct_option_id: Option<i32>,
+    /// Bot API 9.6 replaced `correct_option_id` with this array. The legacy
+    /// field is kept so updates stored before the migration still decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correct_option_ids: Option<Vec<i32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -9,6 +9,19 @@ use crate::bot::image_flow::UserLastImagePrompt;
 use crate::bot::models::Update;
 use crate::bot::router::{delivery_context_for_update, handle_update, ChatRouteScope};
 
+/// Maximum number of updates processed at the same time across all chats.
+pub const GLOBAL_WORKER_PERMITS: usize = 8;
+/// Updates buffered per chat/topic before the dispatcher applies backpressure.
+pub const SCOPE_MAILBOX_CAPACITY: usize = 32;
+/// Updates buffered between the poll loop and the dispatcher.
+pub const DISPATCH_CHANNEL_CAPACITY: usize = 64;
+/// Idle time after which a per-scope worker exits.
+pub const SCOPE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Delay before retrying an update whose handler panicked.
+pub const PANIC_RETRY_BACKOFF: Duration = Duration::from_millis(1500);
+/// Attempts (including the first) before an update is quarantined.
+pub const MAX_TASK_ATTEMPTS: i64 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScopeKey {
     pub chat_id: i64,
@@ -48,6 +61,65 @@ impl ScopeKey {
     }
 }
 
+/// Identity of whoever caused an update, used to drop non-owner traffic
+/// before it occupies a mailbox or a concurrency permit. Mirrors the router:
+/// a message without `from` falls back to its chat id.
+pub fn update_actor_id(update: &Update) -> Option<i64> {
+    if let Some(msg) = update.message.as_ref() {
+        return Some(msg.from.as_ref().map_or(msg.chat.id, |user| user.id));
+    }
+    if let Some(cb) = update.callback_query.as_ref() {
+        return Some(cb.from.id);
+    }
+    update
+        .stopped_message_generation
+        .as_ref()
+        .map(|stopped| stopped.chat.id)
+}
+
+/// How a durable task ended. Anything other than [`TaskOutcome::Completed`]
+/// leaves a trace in the inbox instead of silently looking "answered".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskOutcome {
+    /// Handled; the reply (if any) was delivered.
+    Completed,
+    /// Cancelled because the process is shutting down. The entry returns to
+    /// `pending` without spending an attempt and is replayed after restart.
+    Interrupted,
+    /// Processing finished but the reply could not be delivered even after
+    /// retries. The entry is quarantined as `failed` with this reason.
+    DeliveryFailed(&'static str),
+}
+
+tokio::task_local! {
+    static TASK_OUTCOME: Arc<std::sync::Mutex<TaskOutcome>>;
+}
+
+/// Records the outcome of the durable task currently running. A no-op outside
+/// [`with_outcome_recorder`], e.g. in the CLI chat.
+pub fn record_task_outcome(outcome: TaskOutcome) {
+    let _ = TASK_OUTCOME.try_with(|cell| {
+        if let Ok(mut guard) = cell.lock() {
+            *guard = outcome;
+        }
+    });
+}
+
+/// Runs `future` with an outcome recorder in scope and returns what the
+/// handler recorded (defaulting to [`TaskOutcome::Completed`]).
+pub async fn with_outcome_recorder<F>(future: F) -> TaskOutcome
+where
+    F: std::future::Future<Output = ()>,
+{
+    let cell = Arc::new(std::sync::Mutex::new(TaskOutcome::Completed));
+    TASK_OUTCOME.scope(Arc::clone(&cell), future).await;
+    let outcome = match cell.lock() {
+        Ok(guard) => *guard,
+        Err(poisoned) => *poisoned.into_inner(),
+    };
+    outcome
+}
+
 #[derive(Clone)]
 pub struct WorkerContext {
     pub bot: TelegramBotClient,
@@ -69,7 +141,7 @@ pub async fn scoped_chat_worker(
     loop {
         let update_opt = tokio::select! {
             msg = rx.recv() => msg,
-            _ = tokio::time::sleep(Duration::from_secs(30)) => None,
+            _ = tokio::time::sleep(SCOPE_IDLE_TIMEOUT) => None,
         };
 
         match update_opt {
@@ -107,8 +179,8 @@ pub struct ScopedRetryPolicy {
 impl Default for ScopedRetryPolicy {
     fn default() -> Self {
         Self {
-            max_attempts: 2,
-            backoff: Duration::from_millis(1500),
+            max_attempts: MAX_TASK_ATTEMPTS,
+            backoff: PANIC_RETRY_BACKOFF,
         }
     }
 }
@@ -120,6 +192,8 @@ pub enum RetryOutcome {
     ExceededMaxAttempts,
     ClaimFailed,
     Cancelled,
+    Interrupted,
+    DeliveryFailed,
 }
 
 pub trait ScopedRetryStorage: Send + Sync {
@@ -127,6 +201,8 @@ pub trait ScopedRetryStorage: Send + Sync {
     fn retry(&self, reason: &'static str) -> impl std::future::Future<Output = bool> + Send;
     fn failed(&self, reason: &'static str) -> impl std::future::Future<Output = bool> + Send;
     fn processed(&self) -> impl std::future::Future<Output = bool> + Send;
+    /// Returns the entry to `pending` without charging the attempt.
+    fn release(&self, reason: &'static str) -> impl std::future::Future<Output = bool> + Send;
 }
 
 pub struct DurableInboxStorage {
@@ -146,6 +222,9 @@ impl ScopedRetryStorage for DurableInboxStorage {
     async fn processed(&self) -> bool {
         ai::storage::mark_telegram_processed_async(self.update_id).await
     }
+    async fn release(&self, reason: &'static str) -> bool {
+        ai::storage::mark_telegram_processing_released_async(self.update_id, reason).await
+    }
 }
 
 pub async fn execute_with_scoped_retry<S, F, Fut>(
@@ -157,7 +236,7 @@ pub async fn execute_with_scoped_retry<S, F, Fut>(
 where
     S: ScopedRetryStorage,
     F: FnMut() -> Fut + Send,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
+    Fut: std::future::Future<Output = TaskOutcome> + Send + 'static,
 {
     loop {
         // Acquire global permit only while actively executing
@@ -190,12 +269,30 @@ where
         let join_res = tokio::spawn(fut).await;
 
         match join_res {
-            Ok(()) => {
+            Ok(TaskOutcome::Completed) => {
                 if !storage.processed().await {
                     warn!("Gagal menyelesaikan durable processing checkpoint");
                 }
                 drop(permit);
                 return RetryOutcome::Success;
+            }
+            Ok(TaskOutcome::Interrupted) => {
+                if !storage
+                    .release("interrupted by shutdown before completion")
+                    .await
+                {
+                    warn!("Gagal mengembalikan pekerjaan yang terpotong shutdown ke antrean");
+                }
+                drop(permit);
+                return RetryOutcome::Interrupted;
+            }
+            Ok(TaskOutcome::DeliveryFailed(reason)) => {
+                warn!("Balasan gagal dikirim setelah beberapa percobaan: {reason}");
+                if !storage.failed(reason).await {
+                    warn!("Gagal mencatat kegagalan pengiriman ke durable inbox");
+                }
+                drop(permit);
+                return RetryOutcome::DeliveryFailed;
             }
             Err(join_err) if join_err.is_panic() => {
                 // REQUIREMENT: RELEASE PERMIT BEFORE BACKOFF SLEEP
@@ -239,6 +336,12 @@ pub async fn process_scoped_update(
     ctx: &WorkerContext,
     update: Update,
 ) {
+    // Updates still queued when shutdown starts are left untouched in the
+    // durable inbox (`pending`) and replayed after restart, instead of
+    // starting new generations that would be cancelled immediately.
+    if ctx.ai_service.is_shutting_down() {
+        return;
+    }
     let update_id = update.update_id;
     let storage = DurableInboxStorage { update_id };
     let policy = ScopedRetryPolicy::default();
@@ -257,7 +360,7 @@ pub async fn process_scoped_update(
 
         async move {
             let delivery_context = delivery_context_for_update(&update_clone);
-            TelegramBotClient::with_delivery_context(
+            with_outcome_recorder(TelegramBotClient::with_delivery_context(
                 delivery_context,
                 handle_update(
                     &worker_bot,
@@ -266,18 +369,22 @@ pub async fn process_scoped_update(
                     &worker_route,
                     update_clone,
                 ),
-            )
-            .await;
+            ))
+            .await
         }
     })
     .await;
 }
 
+/// Handles a native-stop update immediately, outside the per-scope queues.
+///
+/// Runs the handler in its own task so a panic is contained instead of
+/// unwinding into the poll loop and taking the daemon down.
 pub async fn process_durable_update(
     bot: &TelegramBotClient,
-    ai_service: &AIChatService,
+    ai_service: &Arc<AIChatService>,
     user_last_image_prompt: &UserLastImagePrompt,
-    route_scope: &ChatRouteScope,
+    route_scope: &Arc<ChatRouteScope>,
     update: Update,
 ) {
     let update_id = update.update_id;
@@ -285,15 +392,95 @@ pub async fn process_durable_update(
         return;
     }
 
-    let delivery_context = delivery_context_for_update(&update);
-    TelegramBotClient::with_delivery_context(
-        delivery_context,
-        handle_update(bot, ai_service, user_last_image_prompt, route_scope, update),
-    )
+    let bot = bot.clone();
+    let ai_service = Arc::clone(ai_service);
+    let user_last_image_prompt = Arc::clone(user_last_image_prompt);
+    let route_scope = Arc::clone(route_scope);
+    let handled = tokio::spawn(async move {
+        let delivery_context = delivery_context_for_update(&update);
+        TelegramBotClient::with_delivery_context(
+            delivery_context,
+            handle_update(
+                &bot,
+                &ai_service,
+                &user_last_image_prompt,
+                &route_scope,
+                update,
+            ),
+        )
+        .await;
+    })
     .await;
 
-    if !ai::storage::mark_telegram_processed_async(update_id).await {
-        warn!("Gagal menyelesaikan durable Telegram inbox update {update_id}");
+    match handled {
+        Ok(()) => {
+            if !ai::storage::mark_telegram_processed_async(update_id).await {
+                warn!("Gagal menyelesaikan durable Telegram inbox update {update_id}");
+            }
+        }
+        Err(join_err) => {
+            error!("Handler native stop gagal ({join_err}); update dikarantina");
+            let _ = ai::storage::mark_telegram_processing_failed_async(
+                update_id,
+                "native stop handler panicked",
+            )
+            .await;
+        }
+    }
+}
+
+/// Dispatches one update into its scope mailbox, spawning the scope worker if
+/// needed. When the mailbox is full the dispatcher waits for room (outside
+/// the scope-map lock) instead of dropping the update, which previously left
+/// it stranded until restart and let later messages overtake it.
+async fn dispatch_to_scope(
+    update: Update,
+    active_scopes: &ActiveScopes,
+    global_concurrency: &Arc<tokio::sync::Semaphore>,
+    ctx: &WorkerContext,
+    workers: &mut tokio::task::JoinSet<()>,
+) {
+    let scope_key = ScopeKey::from_update(&update);
+    let mut pending = Some(update);
+
+    while let Some(update) = pending.take() {
+        let mut scopes = active_scopes.lock().await;
+        if let Some(sender) = scopes.get(&scope_key).cloned() {
+            match sender.try_send(update) {
+                Ok(()) => return,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(rejected)) => {
+                    drop(scopes);
+                    warn!(
+                        "Scope {:?} backlog penuh ({SCOPE_MAILBOX_CAPACITY} pesan); dispatcher menunggu ruang (backpressure)",
+                        scope_key
+                    );
+                    match sender.send(rejected).await {
+                        Ok(()) => return,
+                        // The worker exited while we waited; retry with a fresh one.
+                        Err(tokio::sync::mpsc::error::SendError(returned)) => {
+                            pending = Some(returned);
+                            continue;
+                        }
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(rejected)) => {
+                    scopes.remove(&scope_key);
+                    pending = Some(rejected);
+                    continue;
+                }
+            }
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Update>(SCOPE_MAILBOX_CAPACITY);
+        let _ = tx.try_send(update);
+        scopes.insert(scope_key, tx);
+        workers.spawn(scoped_chat_worker(
+            scope_key,
+            rx,
+            Arc::clone(active_scopes),
+            Arc::clone(global_concurrency),
+            ctx.clone(),
+        ));
     }
 }
 
@@ -306,9 +493,10 @@ pub fn spawn_workers(
     tokio::sync::mpsc::Sender<Update>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<Update>(64);
+    let (update_tx, mut update_rx) =
+        tokio::sync::mpsc::channel::<Update>(DISPATCH_CHANNEL_CAPACITY);
     let active_scopes: ActiveScopes = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let global_concurrency = Arc::new(tokio::sync::Semaphore::new(8));
+    let global_concurrency = Arc::new(tokio::sync::Semaphore::new(GLOBAL_WORKER_PERMITS));
 
     let worker_ctx = WorkerContext {
         bot,
@@ -316,11 +504,18 @@ pub fn spawn_workers(
         user_last_image_prompt,
         route_scope,
     };
-    let worker_active_scopes = Arc::clone(&active_scopes);
-    let worker_global_concurrency = Arc::clone(&global_concurrency);
 
     let update_worker = tokio::spawn(async move {
+        let mut workers = tokio::task::JoinSet::new();
         while let Some(update) = update_rx.recv().await {
+            // Hard single-owner boundary, enforced before any queueing so
+            // non-owner traffic can never occupy mailboxes or permits.
+            let owner = worker_ctx.route_scope.owner_user_id;
+            if update_actor_id(&update).is_some_and(|actor| actor != owner) {
+                let _ = ai::storage::skip_telegram_update_async(update.update_id).await;
+                continue;
+            }
+
             if update.stopped_message_generation.is_some() {
                 // Native Stop bypasses worker queues for immediate zero-latency cancellation
                 process_durable_update(
@@ -334,57 +529,31 @@ pub fn spawn_workers(
                 continue;
             }
 
-            let scope_key = ScopeKey::from_update(&update);
-            let mut scopes = worker_active_scopes.lock().await;
+            dispatch_to_scope(
+                update,
+                &active_scopes,
+                &global_concurrency,
+                &worker_ctx,
+                &mut workers,
+            )
+            .await;
 
-            if let Some(sender) = scopes.get(&scope_key) {
-                match sender.try_send(update) {
-                    Ok(()) => continue,
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(rejected)) => {
-                        warn!(
-                            "Scope {:?} backlog penuh (>32 pesan); update {} dipertahankan berstatus pending di SQLite inbox",
-                            scope_key, rejected.update_id
-                        );
-                        continue;
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(rejected)) => {
-                        scopes.remove(&scope_key);
-                        let (tx, rx) = tokio::sync::mpsc::channel::<Update>(32);
-                        let _ = tx.try_send(rejected);
-                        scopes.insert(scope_key, tx);
-                        tokio::spawn(scoped_chat_worker(
-                            scope_key,
-                            rx,
-                            Arc::clone(&worker_active_scopes),
-                            Arc::clone(&worker_global_concurrency),
-                            worker_ctx.clone(),
-                        ));
-                        continue;
-                    }
-                }
-            }
-
-            let (tx, rx) = tokio::sync::mpsc::channel::<Update>(32);
-            let _ = tx.try_send(update);
-            scopes.insert(scope_key, tx);
-            tokio::spawn(scoped_chat_worker(
-                scope_key,
-                rx,
-                Arc::clone(&worker_active_scopes),
-                Arc::clone(&worker_global_concurrency),
-                worker_ctx.clone(),
-            ));
+            // Reap finished scope workers so the set does not grow unbounded.
+            while workers.try_join_next().is_some() {}
         }
+
+        // Shutdown: close every mailbox so scope workers finish their current
+        // item (queued items stay `pending` because the service is shutting
+        // down) and exit, then wait for them.
+        active_scopes.lock().await.clear();
+        while workers.join_next().await.is_some() {}
     });
 
     (update_tx, update_worker)
 }
 
 pub async fn replay_durable_inbox(
-    bot: &TelegramBotClient,
     ai_service: &Arc<AIChatService>,
-    user_last_image_prompt: &UserLastImagePrompt,
-    route_scope: &Arc<ChatRouteScope>,
     update_tx: &tokio::sync::mpsc::Sender<Update>,
 ) {
     let interrupted = ai::storage::recover_telegram_processing_async().await;
@@ -403,12 +572,12 @@ pub async fn replay_durable_inbox(
         }
         for record in replay_batch {
             replay_after_update_id = record.update_id;
-            if record.attempts >= 2 {
+            if record.attempts >= MAX_TASK_ATTEMPTS {
                 warn!(
                     "Durable Telegram update {} sudah mencapai batas percobaan ({} attempts) saat startup; mengarantina sebagai failed",
                     record.update_id, record.attempts
                 );
-                let _ = ai::storage::mark_telegram_processing_failed_async(
+                let _ = ai::storage::quarantine_telegram_update_async(
                     record.update_id,
                     "quarantined after exceeding max attempts across restarts",
                 )
@@ -418,16 +587,15 @@ pub async fn replay_durable_inbox(
             match serde_json::from_str::<Update>(&record.payload_json) {
                 Ok(update) => {
                     if update.stopped_message_generation.is_some() {
-                        // Native Stop bypasses the queue for immediate cancellation.
-                        process_durable_update(
-                            bot,
-                            ai_service,
-                            user_last_image_prompt,
-                            route_scope,
-                            update,
-                        )
-                        .await;
-                    } else if update_tx.send(update).await.is_err() {
+                        // A stop request from before the restart refers to a
+                        // generation that no longer exists; acknowledge it.
+                        let _ = ai::storage::skip_telegram_update_async(record.update_id).await;
+                        continue;
+                    }
+                    if ai_service.is_shutting_down() {
+                        return;
+                    }
+                    if update_tx.send(update).await.is_err() {
                         error!("Update worker stopped while replaying durable inbox");
                         return;
                     }
@@ -437,14 +605,11 @@ pub async fn replay_durable_inbox(
                         "Durable Telegram update {} tidak dapat didecode: {error}",
                         record.update_id
                     );
-                    if ai::storage::mark_telegram_processing_async(record.update_id).await
-                        && !ai::storage::mark_telegram_processed_async(record.update_id).await
-                    {
-                        warn!(
-                            "Gagal menandai durable Telegram update {} yang invalid sebagai completed",
-                            record.update_id
-                        );
-                    }
+                    let _ = ai::storage::quarantine_telegram_update_async(
+                        record.update_id,
+                        "payload could not be decoded",
+                    )
+                    .await;
                 }
             }
         }
@@ -532,6 +697,7 @@ mod tests {
         retry_count: Arc<std::sync::atomic::AtomicUsize>,
         failed_count: Arc<std::sync::atomic::AtomicUsize>,
         processed_count: Arc<std::sync::atomic::AtomicUsize>,
+        released_count: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl ScopedRetryStorage for MockRetryStorage {
@@ -557,6 +723,11 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             true
         }
+        async fn release(&self, _reason: &'static str) -> bool {
+            self.released_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        }
     }
 
     #[tokio::test]
@@ -579,6 +750,7 @@ mod tests {
                     if count == 0 {
                         panic!("simulated transient panic on attempt 1");
                     }
+                    TaskOutcome::Completed
                 }
             })
             .await
@@ -622,7 +794,10 @@ mod tests {
         };
 
         let outcome = execute_with_scoped_retry(&sem, &storage, policy, || async {
-            panic!("unrecoverable panic");
+            if std::hint::black_box(true) {
+                panic!("unrecoverable panic");
+            }
+            TaskOutcome::Completed
         })
         .await;
 
@@ -634,5 +809,61 @@ mod tests {
             processed_counter.load(std::sync::atomic::Ordering::SeqCst),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn interrupted_task_is_released_not_completed() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let storage = MockRetryStorage::default();
+        let released = Arc::clone(&storage.released_count);
+        let processed = Arc::clone(&storage.processed_count);
+        let outcome =
+            execute_with_scoped_retry(&sem, &storage, ScopedRetryPolicy::default(), || async {
+                TaskOutcome::Interrupted
+            })
+            .await;
+        assert_eq!(outcome, RetryOutcome::Interrupted);
+        assert_eq!(released.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(processed.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_delivery_is_recorded_instead_of_completed() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let storage = MockRetryStorage::default();
+        let failed = Arc::clone(&storage.failed_count);
+        let processed = Arc::clone(&storage.processed_count);
+        let outcome =
+            execute_with_scoped_retry(&sem, &storage, ScopedRetryPolicy::default(), || async {
+                with_outcome_recorder(async {
+                    record_task_outcome(TaskOutcome::DeliveryFailed(
+                        "final answer delivery failed",
+                    ));
+                })
+                .await
+            })
+            .await;
+        assert_eq!(outcome, RetryOutcome::DeliveryFailed);
+        assert_eq!(failed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(processed.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn non_owner_actor_is_identified_for_prefiltering() {
+        let group_message: Update = serde_json::from_str(
+            r#"{"update_id": 9, "message": {"message_id": 1, "date": 1,
+                "chat": {"id": -100555, "type": "supergroup"},
+                "from": {"id": 42, "is_bot": false, "first_name": "Guest"},
+                "text": "hi"}}"#,
+        )
+        .expect("deserialize update succeeds");
+        assert_eq!(update_actor_id(&group_message), Some(42));
+
+        let anonymous: Update = serde_json::from_str(
+            r#"{"update_id": 10, "message": {"message_id": 2, "date": 1,
+                "chat": {"id": -100555, "type": "supergroup"}, "text": "hi"}}"#,
+        )
+        .expect("deserialize update succeeds");
+        assert_eq!(update_actor_id(&anonymous), Some(-100555));
     }
 }

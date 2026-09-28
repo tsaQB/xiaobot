@@ -118,8 +118,11 @@ Xiao is an autonomous, single-owner AI gateway designed to run continuously on l
 ### 5. 📱 WhatsApp Multi-Device Gateway
 - **Self-Service Linking**: Link by scanning a QR code or by entering a phone pairing code.
 - **Single-Owner Boundary**: Authorization is decided on the phone number, recognizing both legacy and LID addressing modes. Device suffixes such as `:12` never corrupt the match. Other senders are dropped silently.
-- **Durable Queue**: Incoming messages are recorded to `whatsapp_inbox` before processing, so they survive restarts and hard kills.
-- **Ordered Processing**: Messages within a single chat are processed one at a time, in arrival order.
+- **Durable Queue (at-least-once)**: A durability hook records every authorized message to `whatsapp_inbox` *before* WhatsApp acknowledges it, so messages survive restarts, crashes, and dropped events. Media is re-downloadable on replay.
+- **Ordered, Concurrent Processing**: Messages within a chat are processed one at a time in arrival order; different chats are processed concurrently, and a slow answer never blocks intake.
+- **Groups**: In group chats Xiao answers owner messages only when mentioned, replied to, addressed with a leading `/`, or when the group is listed in `WHATSAPP_DEDICATED_GROUPS`.
+- **Files & Long Replies**: Documents created by tools are sent as WhatsApp documents; long answers are split into numbered parts.
+- **Self-Healing**: The daemon restarts a failed WhatsApp session with backoff and notifies the owner on Telegram when the device is unlinked from the phone.
 - **Hardened Credentials**: The session database holding Signal keys is locked to `0o600` on Unix, together with its WAL and SHM sidecars.
 
 ---
@@ -431,7 +434,11 @@ Settings can be provided via `.env` or managed dynamically through the CLI:
 | `EXA_MCP_URL` | `https://mcp.exa.ai/` | Model Context Protocol search server endpoint. |
 | `WHATSAPP_ENABLED` | `false` | Enables the WhatsApp gateway in the daemon. A linked session also enables it automatically. |
 | `WHATSAPP_OWNER_NUMBER` | *Empty* | Owner phone number in E.164 form without the plus sign. |
+| `WHATSAPP_DEDICATED_GROUPS` | *Empty* | Comma-separated group JIDs (or numeric ids) where Xiao answers every owner message without a mention. |
+| `XIAO_HISTORY_RETENTION` | `2000` | Messages kept per chat/topic in canonical history (older context lives on in the topic summary). `0` disables pruning. |
 | `XIAO_DATA_DIR` | `~/.local/share/xiaoai` | Base filesystem directory for database, secrets, and attachments. |
+
+> API keys and tokens set through the CLI (`xiao search`, `xiao gateway`, `xiao ai`) are stored in the file vault, never in the SQLite `settings` table. A `.env` in the working directory is only loaded when it is owned by you and not writable by other users.
 
 ---
 
@@ -446,7 +453,7 @@ cargo fmt --all -- --check
 # Compiler check without emitting binaries
 cargo check --locked
 
-# Unit tests and Telegram Bot API 10.3 contract suite (794 tests)
+# Unit, behavioural (fake Bot API server) and Bot API 10.3 contract tests
 cargo test --locked
 
 # Strict Clippy lint check (CI enforced)
@@ -459,8 +466,8 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 
 1. **Hard Single-Owner Invariant**: Non-owner updates are dropped silently at the gateway (`src/bot/router.rs`). Never acknowledge unauthorized Telegram IDs.
 2. **Pure Zero-Slash Gateway**: Menus are cleared on boot. Xiao interacts conversationally or via CLI.
-3. **Outbound SSRF Firewall**: Remote downloads validate target IPs against RFC 1918, RFC 4193, loopback, and SIIT/NAT64 ranges.
-4. **Secret Isolation**: Secrets are stored in `~/.local/share/xiaoai/secrets/` with mode `0o600`/`0o700`. Database only stores `secret://` URIs.
+3. **Outbound SSRF Firewall**: Every fetch of a user-, model- or web-supplied URL (media downloads, `fetch_url`, search result scraping) validates each redirect hop against RFC 1918, RFC 4193, loopback, and SIIT/NAT64 ranges and pins the connection to the vetted address.
+4. **Secret Isolation**: Secrets are stored in `~/.local/share/xiaoai/secrets/` with mode `0o600`/`0o700`. The database only stores opaque `secret://` references; the values themselves are protected by file permissions, not encryption.
 5. **Zero `.unwrap()` Policy**: Handled idiomatically with `?`, pattern matching, or `.expect()` with descriptive invariant explanations in tests.
 6. **WhatsApp Single-Owner Boundary**: Authorization is decided on the phone number, not raw JID text. Both `sender` and `sender_alt` are inspected so LID mode is recognized, and device or agent suffixes never corrupt the match. Unauthorized senders are dropped with no reply and no identity trace in the logs.
 7. **WhatsApp Credential Handling**: `whatsapp.db` holds Signal session keys and is treated the same as the secret vault. The file and its `-wal` and `-shm` sidecars are locked to `0o600` on Unix systems.

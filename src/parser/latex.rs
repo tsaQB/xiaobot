@@ -6,6 +6,12 @@ use std::sync::LazyLock;
 static RE_DECIMAL_COMMA: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?P<before>\d+),(?P<after>\d+)").expect("valid static regex"));
 
+/// Numbers with two or more comma-separated thousands groups (`1,234,567`).
+/// Unlike `7,5` these are never decimals, so every separator is kept, wrapped
+/// as `{,}` so TeX does not add operator spacing after it.
+static RE_THOUSANDS_GROUPED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b\d{1,3}(?:,\d{3}){2,}\b").expect("valid static regex"));
+
 /// Regex to detect digits glued to (or followed by) text/mathrm/mbox units, e.g.:
 /// "10\text{cm}", "50\text{cm}", "44\text{cm}", "7.5\text{hari}", "100 \text{ m}", "10\,\text{cm}"
 static RE_NUMBER_UNIT: LazyLock<Regex> = LazyLock::new(|| {
@@ -160,7 +166,14 @@ pub fn sanitize_latex_for_telegram(input: &str) -> String {
         return String::new();
     }
 
-    // 1. Convert decimal commas (e.g., "7,5" -> "7.5", "3,14" -> "3.14"), skipping coordinate pairs
+    // 1a. Keep thousands separators intact ("1,234,567" -> "1{,}234{,}567").
+    //     Previously only the first comma was converted, producing "1.234,567".
+    let grouped = RE_THOUSANDS_GROUPED.replace_all(trimmed, |caps: &regex::Captures| {
+        caps[0].replace(',', "{,}")
+    });
+    let trimmed = grouped.as_ref();
+
+    // 1b. Convert decimal commas (e.g., "7,5" -> "7.5", "3,14" -> "3.14"), skipping coordinate pairs
     let commas_normalized = RE_DECIMAL_COMMA.replace_all(trimmed, |caps: &regex::Captures| {
         let m = caps.get(0).expect("full match capture exists");
         let start = m.start();
@@ -271,6 +284,14 @@ mod tests {
         assert_eq!(
             sanitize_latex_for_telegram(line3),
             r"= \frac{1}{2} \times 20 \times 5 = 50\ \mathrm{cm}"
+        );
+    }
+
+    #[test]
+    fn keeps_every_thousands_separator() {
+        assert_eq!(
+            sanitize_latex_for_telegram("1,234,567 + 7,5"),
+            "1{,}234{,}567 + 7.5"
         );
     }
 

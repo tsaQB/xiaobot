@@ -70,8 +70,8 @@ pub(crate) fn visible_width(s: &str) -> usize {
                     }
                 }
             }
-        } else if !c.is_control() {
-            width += 1;
+        } else {
+            width += crate::parser::terminal::char_display_width(c);
         }
     }
     width
@@ -378,20 +378,33 @@ pub fn terminal_interactive_select(
             ));
         }
 
-        let _ = execute!(
-            stdout,
-            cursor::MoveTo(0, 0),
-            Clear(ClearType::All),
-            Print(buffer.join("\r\n"))
-        );
+        // Redraw in place: each line is overwritten and cleared to its end,
+        // then everything below is cleared. Clearing the whole screen before
+        // every repaint made the menu flicker on each key press.
+        let _ = execute!(stdout, cursor::MoveTo(0, 0));
+        for line in &buffer {
+            let _ = execute!(
+                stdout,
+                Print(line),
+                Clear(ClearType::UntilNewLine),
+                Print("\r\n")
+            );
+        }
+        let _ = execute!(stdout, Clear(ClearType::FromCursorDown));
         let _ = stdout.flush();
 
-        if let Ok(Event::Key(KeyEvent {
+        let event = match event::read() {
+            Ok(event) => event,
+            // stdin closed or the terminal went away: cancel instead of
+            // redrawing in a tight loop at full CPU.
+            Err(_) => return None,
+        };
+        if let Event::Key(KeyEvent {
             code,
             modifiers,
             kind,
             ..
-        })) = event::read()
+        }) = event
         {
             if kind == KeyEventKind::Release {
                 continue;
@@ -465,7 +478,8 @@ mod tests {
         assert_eq!(visible_width(""), 0);
         assert_eq!(visible_width("hello"), 5);
         assert_eq!(visible_width("\x1b[1;32mhello\x1b[0m"), 5);
-        assert_eq!(visible_width("你好"), 2);
+        // CJK characters occupy two terminal columns each.
+        assert_eq!(visible_width("你好"), 4);
         assert_eq!(visible_width("\x1b[1;32m[ACTIVE]\x1b[0m"), 8);
         assert_eq!(visible_width("\x1b[38;5;81m ▸ \x1b[0m"), 3);
         assert_eq!(

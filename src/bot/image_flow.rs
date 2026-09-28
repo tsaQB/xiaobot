@@ -470,18 +470,30 @@ pub fn build_image_generation_error_rich(error: &ImageGenerationError) -> InputR
     InputRichMessage::new(blocks)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Where an image request came from and what to do after the image is sent.
+pub struct ImageGenerationRequest<'a> {
+    pub chat_id: i64,
+    pub thread_id: i64,
+    pub user_id: i64,
+    pub prompt: &'a str,
+    pub explanation_prompt: Option<&'a str>,
+    pub reply_to_message_id: Option<i64>,
+}
+
 pub async fn handle_image_generation(
     bot: &TelegramBotClient,
     ai_service: &AIChatService,
     user_last_image_prompt: &UserLastImagePrompt,
-    chat_id: i64,
-    thread_id: i64,
-    user_id: i64,
-    prompt: &str,
-    explanation_prompt: Option<&str>,
-    reply_to_message_id: Option<i64>,
+    request: ImageGenerationRequest<'_>,
 ) {
+    let ImageGenerationRequest {
+        chat_id,
+        thread_id,
+        user_id,
+        prompt,
+        explanation_prompt,
+        reply_to_message_id,
+    } = request;
     let clean_prompt = resolve_image_generation_prompt(
         prompt,
         user_last_image_prompt,
@@ -544,6 +556,14 @@ pub async fn handle_image_generation(
             timeline.sync_draft(true).await;
 
             if error.kind == ImageGenerationErrorKind::Cancelled {
+                if ai_service.is_shutting_down() {
+                    // Interrupted by shutdown, not by the user: keep the update
+                    // pending so the image is generated after restart.
+                    crate::bot::worker::record_task_outcome(
+                        crate::bot::worker::TaskOutcome::Interrupted,
+                    );
+                    return;
+                }
                 let rich = InputRichMessage::new(vec![
                     RichBlock::SectionHeading {
                         text: Value::String("IMAGE GENERATION CANCELLED".to_string()),
@@ -601,6 +621,9 @@ pub async fn handle_image_generation(
             failure.retry_attempted,
             truncate_chars(&failure.detail, 200)
         );
+        crate::bot::worker::record_task_outcome(crate::bot::worker::TaskOutcome::DeliveryFailed(
+            "generated image could not be delivered",
+        ));
         let rich = InputRichMessage::new(vec![
             RichBlock::SectionHeading {
                 text: Value::String("IMAGE DELIVERY FAILED".to_string()),

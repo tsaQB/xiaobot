@@ -22,16 +22,16 @@ fn test_create_quiz_sanitization_and_validation() {
     // Question truncated to 300
     assert_eq!(args.question.chars().count(), 300);
 
-    // Options truncated to 10
-    assert_eq!(args.options.len(), 10);
+    // Options truncated to the Bot API maximum of 12
+    assert_eq!(args.options.len(), 12);
 
     // Each option text truncated to 100
     for opt in &args.options {
         assert!(opt.chars().count() <= 100);
     }
 
-    // correct_option_id clamped to valid range 0..10
-    assert_eq!(args.correct_option_id, Some(9));
+    // correct_option_id clamped to valid range 0..12
+    assert_eq!(args.correct_option_id, Some(11));
 
     // Explanation truncated to <= 200 chars and <= 2 line breaks
     let exp = args.explanation.as_ref().expect("explanation present");
@@ -258,7 +258,11 @@ async fn test_create_quiz_without_preamble_sends_single_bubble_and_emits_sink() 
     assert!(req_line.contains("POST /sendPoll"));
     assert_eq!(payload["type"], "quiz");
     assert_eq!(payload["question"], "Berapa 1+1?");
-    assert_eq!(payload["correct_option_id"], 1);
+    assert_eq!(payload["correct_option_ids"], serde_json::json!([1]));
+    assert!(
+        payload.get("correct_option_id").is_none(),
+        "Bot API 9.6 removed the singular correct_option_id parameter"
+    );
 
     // Verify session history recorded both the user prompt and the assistant quiz summary
     let messages = crate::ai::storage::load_scoped_messages_async(1234, 0, 10).await;

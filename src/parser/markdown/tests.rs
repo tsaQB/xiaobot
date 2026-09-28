@@ -1343,3 +1343,112 @@ fn test_markdown_parser_converts_task_list_to_checklist_rich_block() {
     assert_eq!(items[2].has_checkbox, Some(true));
     assert_eq!(items[2].is_checked, Some(true));
 }
+
+// ---------------------------------------------------------------------------
+// Audit regressions: adversarial input must never panic, and common Markdown
+// constructs must keep their meaning.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn html_heading_with_length_changing_lowercase_does_not_panic() {
+    // `İ`.to_lowercase() is one byte longer than `İ`; the heading parser used
+    // to slice the original with offsets from the lowercased copy.
+    let blocks = parse_markdown_to_rich_blocks("<h1>İİİİİİ</h1>");
+    let Some(RichBlock::SectionHeading { text, .. }) = blocks.first() else {
+        panic!("expected heading, got {blocks:?}");
+    };
+    assert_eq!(text, &Value::String("İİİİİİ".to_string()));
+
+    let multiline = parse_markdown_to_rich_blocks("<h2>\nİİİİİİİİ judul</h2>\nisi");
+    assert!(multiline
+        .iter()
+        .any(|block| matches!(block, RichBlock::SectionHeading { .. })));
+}
+
+#[test]
+fn html_attribute_lookup_with_length_changing_lowercase_does_not_panic() {
+    let tag = "<a İİİİİİİİİİ href=x>";
+    assert_eq!(extract_html_attribute(tag, "href"), Some("x"));
+    let img = "<img alt=\"İİİİİİİİİİ\" src=\"https://example.com/a.jpg\">";
+    assert_eq!(
+        extract_html_attribute(img, "src"),
+        Some("https://example.com/a.jpg")
+    );
+}
+
+#[test]
+fn italic_span_keeps_nested_bold() {
+    let value = parse_inline("*a **b** c*");
+    let serialized = serde_json::to_string(&value).expect("serialize inline");
+    assert_eq!(
+        serialized,
+        r#"{"text":["a ",{"text":"b","type":"bold"}," c"],"type":"italic"}"#
+    );
+}
+
+#[test]
+fn backslash_escapes_render_literal_markers() {
+    let value = parse_inline(r"ini \*literal\* dan harga \$5");
+    assert_eq!(
+        value,
+        Value::String("ini *literal* dan harga $5".to_string())
+    );
+    // `\(` still opens inline math.
+    let math = serde_json::to_string(&parse_inline(r"rumus \(x^2\)")).expect("serialize");
+    assert!(math.contains("mathematical_expression"));
+}
+
+#[test]
+fn escaped_entities_are_decoded_only_once_inside_nested_spans() {
+    let value = parse_inline("tulis **&amp;lt;b&amp;gt;** literal");
+    let serialized = serde_json::to_string(&value).expect("serialize inline");
+    assert!(
+        serialized.contains("&lt;b&gt;"),
+        "nested span must keep the single-decoded entity: {serialized}"
+    );
+}
+
+#[test]
+fn deeply_layered_markup_is_bounded() {
+    fn escape(s: &str, times: usize) -> String {
+        let mut out = s.to_string();
+        for _ in 0..times {
+            out = out
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+        }
+        out
+    }
+    let mut input = String::from("x");
+    for level in (0..200).rev() {
+        input = format!("{}{}{}", escape("<b>", level), input, escape("</b>", level));
+    }
+    let started = std::time::Instant::now();
+    let _ = parse_inline(&input);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "layered input must not trigger repeated re-decoding"
+    );
+
+    let mut nested = String::new();
+    let delimiters = ["**", "~~", "||", "++", "__"];
+    for index in 0..10_000 {
+        nested.push_str(delimiters[index % delimiters.len()]);
+    }
+    let _ = parse_inline(&nested);
+}
+
+#[test]
+fn exponent_operator_is_not_bold() {
+    let value = parse_inline("a**2 + b**2 = c**2");
+    assert_eq!(value, Value::String("a**2 + b**2 = c**2".to_string()));
+    let streaming = parse_streaming_markdown_to_rich_blocks("Rumus: a**2 + b**2 = c**2 dan kita");
+    let serialized = serde_json::to_string(&streaming).expect("serialize blocks");
+    assert!(serialized.contains("a**2 + b**2 = c**2"), "{serialized}");
+    assert!(!serialized.contains("\"bold\""));
+    // Regular bold still works right next to exponents.
+    let mixed = serde_json::to_string(&parse_inline("**tebal** dan x**2")).expect("serialize");
+    assert!(mixed.contains("\"bold\""));
+    assert!(mixed.contains("x**2"));
+}

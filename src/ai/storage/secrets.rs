@@ -116,12 +116,25 @@ pub(crate) fn remove_secret(secret_ref: &str) {
     remove_secret_in_dir(&secret_store_dir(), secret_ref);
 }
 
+/// Settings stored in the file vault instead of the `settings` table. Any key
+/// that looks like a credential is covered, not just the two original ones:
+/// search API keys used to be written to SQLite in plaintext. Existing
+/// plaintext rows are migrated into the vault the first time they are read.
 fn secret_setting_namespace(key: &str) -> Option<&'static str> {
     match key {
         "BOT_TOKEN" => Some("telegram"),
         "AI_API_KEY" => Some("app-provider"),
+        "BRAVE_API_KEY" | "TAVILY_API_KEY" | "TAVILY_KEY" | "EXA_API_KEY" => Some("search"),
+        _ if is_credential_setting_key(key) => Some("app-secret"),
         _ => None,
     }
+}
+
+fn is_credential_setting_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    ["_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD"]
+        .iter()
+        .any(|suffix| upper.ends_with(suffix))
 }
 
 fn migrate_legacy_secret_setting_on_conn(
@@ -370,6 +383,36 @@ mod tests {
             token
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn search_and_other_credentials_are_routed_to_the_vault() {
+        for key in [
+            "BOT_TOKEN",
+            "AI_API_KEY",
+            "BRAVE_API_KEY",
+            "TAVILY_API_KEY",
+            "TAVILY_KEY",
+            "EXA_API_KEY",
+            "SOME_FUTURE_API_KEY",
+            "WEBHOOK_SECRET",
+        ] {
+            assert!(
+                secret_setting_namespace(key).is_some(),
+                "{key} must never be stored in plaintext"
+            );
+        }
+        for key in [
+            "OWNER_USER_ID",
+            "ALLOWED_CHAT_IDS",
+            "WHATSAPP_ENABLED",
+            "EXA_MCP_URL",
+        ] {
+            assert!(
+                secret_setting_namespace(key).is_none(),
+                "{key} is not a secret"
+            );
+        }
     }
 
     #[test]

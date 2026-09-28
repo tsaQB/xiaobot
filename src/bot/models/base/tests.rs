@@ -339,7 +339,7 @@ fn extract_plain_text_extracts_all_rich_block_types() {
 
 #[test]
 fn input_rich_message_media_id_validation() {
-    // Valid IDs: 1 to 64 chars, ASCII alphanumeric and underscore
+    // Valid IDs: 1 to 64 chars, ASCII alphanumeric, underscore and hyphen (Bot API 10.3)
     assert!(InputRichMessageMedia::validate_id("a").is_ok());
     assert!(InputRichMessageMedia::validate_id("Z").is_ok());
     assert!(InputRichMessageMedia::validate_id("0").is_ok());
@@ -351,7 +351,7 @@ fn input_rich_message_media_id_validation() {
     assert!(InputRichMessageMedia::validate_id("").is_err());
     assert!(InputRichMessageMedia::validate_id(&"x".repeat(65)).is_err());
     assert!(InputRichMessageMedia::validate_id("photo 1").is_err());
-    assert!(InputRichMessageMedia::validate_id("photo-1").is_err());
+    assert!(InputRichMessageMedia::validate_id("photo-1").is_ok());
     assert!(InputRichMessageMedia::validate_id("photo.jpg").is_err());
     assert!(InputRichMessageMedia::validate_id("pic@home").is_err());
     assert!(InputRichMessageMedia::validate_id("foto#1").is_err());

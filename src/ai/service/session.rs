@@ -3,7 +3,6 @@ use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
 use tracing::warn;
 
-use crate::attachments::delete_session_attachments;
 use crate::util::truncate_chars;
 
 use super::generation::GenerationGuard;
@@ -17,6 +16,26 @@ use crate::ai::storage::{
 
 pub type GenerationCancelSender = watch::Sender<bool>;
 
+/// History scope (`thread_id`) of a terminal chat session, within the owner's
+/// `chat_id`. Telegram topics use positive thread ids and the private chat
+/// uses 0, so negative ids never collide. Before this mapping every CLI
+/// session wrote to the Telegram private-chat scope: `/new` and `/switch`
+/// changed nothing the model saw, and `/clear` wiped the Telegram history.
+pub fn cli_session_thread_id(session_id: usize) -> i64 {
+    -i64::try_from(session_id).unwrap_or(i64::MAX)
+}
+
+/// Lock maps are keyed by chat/topic and used to grow for the whole process
+/// lifetime. Once a map passes this size, entries nobody currently holds
+/// (only the map owns the `Arc`) are dropped; they are recreated on demand.
+const LOCK_MAP_EVICTION_THRESHOLD: usize = 256;
+
+fn evict_idle_locks<K>(locks: &mut std::collections::HashMap<K, Arc<Mutex<()>>>) {
+    if locks.len() >= LOCK_MAP_EVICTION_THRESHOLD {
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+    }
+}
+
 pub(super) fn signal_generation_cancel(sender: Option<GenerationCancelSender>) -> bool {
     sender
         .map(|sender| sender.send(true).is_ok())
@@ -29,6 +48,7 @@ impl AIChatService {
             return lock;
         }
         let mut locks = self.session_locks.write().await;
+        evict_idle_locks(&mut locks);
         locks
             .entry(user_id)
             .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -215,9 +235,10 @@ impl AIChatService {
             .write()
             .await
             .insert(user_id, outcome.new_active_id);
-        if outcome.is_last_session_reset() {
-            delete_session_attachments(user_id, session_id).await;
-        }
+        // The removed session's own history scope goes with it (messages,
+        // summary, attachments); other scopes are untouched.
+        self.clear_scoped_history(user_id, cli_session_thread_id(session_id))
+            .await;
         true
     }
 
@@ -264,8 +285,8 @@ impl AIChatService {
                     sessions_map.remove(&user_id);
                 }
                 drop(sessions_map);
-                delete_session_attachments(user_id, active_id).await;
-                self.clear_scoped_history(user_id, 0).await;
+                self.clear_scoped_history(user_id, cli_session_thread_id(active_id))
+                    .await;
                 true
             }
             Some(false) => {
@@ -290,6 +311,7 @@ impl AIChatService {
             return lock;
         }
         let mut locks = self.generation_locks.write().await;
+        evict_idle_locks(&mut locks);
         locks
             .entry(key)
             .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -301,7 +323,9 @@ impl AIChatService {
         chat_id: i64,
         draft_id: i64,
     ) -> (watch::Receiver<bool>, GenerationGuard) {
-        let (sender, receiver) = watch::channel(false);
+        // A generation that starts after shutdown began is cancelled up front
+        // so it reports `Interrupted` instead of racing the shutdown.
+        let (sender, receiver) = watch::channel(self.is_shutting_down());
         self.active_generations
             .write()
             .await
@@ -325,6 +349,20 @@ impl AIChatService {
             .write()
             .await
             .remove(&(chat_id, draft_id));
+    }
+
+    /// Marks the service as shutting down and cancels every in-flight
+    /// generation. Work cancelled this way reports
+    /// [`crate::bot::worker::TaskOutcome::Interrupted`] so its inbox entry is
+    /// replayed after restart instead of being recorded as answered.
+    pub async fn begin_shutdown(&self) {
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.cancel_all_generations().await;
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub async fn cancel_all_generations(&self) {

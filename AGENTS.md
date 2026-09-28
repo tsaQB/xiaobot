@@ -98,7 +98,7 @@ cargo run -- search engine [NAME]
 # Model Context Protocol (MCP) Server Registry & Tools
 cargo run -- mcp
 cargo run -- mcp list
-cargo run -- mcp add <NAME> <URL>
+cargo run -- mcp add <URL>
 cargo run -- mcp rm <NAME>
 cargo run -- mcp tools
 cargo run -- mcp test [query]
@@ -172,7 +172,7 @@ cargo run -- setup
   - `status.rs`: Dashboard and diagnostic system status rendering.
   - `gateway.rs`: Telegram and WhatsApp gateway management (bot token, owner, QR/code pairing, link status).
   - `wizard.rs`: Interactive setup and onboarding quickstart.
-  - `chat.rs`: Terminal chat REPL, smart one-shot queries, and multi-session manager (`/sessions`, `/switch`, `/rm`, `/new`).
+  - `chat.rs`: Terminal chat REPL, smart one-shot queries, and multi-session manager (`/sessions`, `/switch`, `/rm`, `/new`). Each CLI session has its own history scope (`thread_id = cli_session_thread_id(session_id)`, a negative id), separate from the Telegram private chat.
   - `memory.rs`: Tier-1 persistent memory management (`xiao memory`).
   - `context.rs`: Token usage and sliding-window breakdown inspector (`xiao context`).
   - `search.rs`: Web search engine hub and retrieval keys (`xiao search`).
@@ -185,7 +185,8 @@ cargo run -- setup
   - `worker.rs`: Keyed per-scope mailboxes (`ScopeKey`), worker concurrency limits, durable inbox queue replay, and bounded retry with panic isolation.
   - `router.rs`: Incoming update routing, media and document classification, context overflow policies, and AI chat dispatch.
   - `image_flow.rs`: Multi-step conversational image generation pipeline, prompt extraction, and structured fallback cards.
-  - `client.rs` / `client/raw.rs` / `client/raw/render.rs`: Telegram API client supporting Bot API 10.3 rich message drafts, ephemeral contexts, and file downloads. `render.rs` holds the HTML and plain-text fallback renderers.
+  - `client.rs`: The single Telegram Bot API client (every network call, retries, Rich → HTML → plain fallback chain, draft preparation, file downloads). Behavioural tests live in `client/tests.rs` and run against the fake server in `test_support.rs`.
+  - `client/raw.rs` / `client/raw/render.rs`: Transport-independent helpers the client delegates to: per-task delivery context, bounded SSRF-safe media downloads, remote-media-to-link conversion, text chunking, and the HTML/plain-text fallback renderers. (It no longer duplicates the Bot API calls.)
   - `models.rs` / `models/base.rs`: Type-safe Telegram API models, rich message block definitions (`RichBlock`), and validation bounds.
   - `transport_policy.rs`: Retry backoff logic, HTTP 429 rate limit parsing, and Bad Request fallback gates.
   - `url_policy.rs`: Outbound SSRF firewall preventing requests to private, loopback, link-local, and SIIT/NAT64 translated IP ranges.
@@ -193,14 +194,15 @@ cargo run -- setup
   - `service/`: Modular AI orchestration engine:
     - `session.rs`: Session state transitions, active generation tracking, and cancellation signals.
     - `context.rs`: Token budget estimation, sliding-window message context assembly, and conversation trimming.
+    - `prompt.rs`: System prompt assembly; long-term memory and summaries are sanitized, capped and fenced as untrusted data.
     - `generation.rs`: Streaming SSE lifecycle, provider HTTP dispatch, retry backoff, tool execution loops, and the shared `race_with_cancel` cancellation helper.
     - `curator.rs`: Background memory curation: profile fact extraction and older-history summarization.
     - `image.rs`: Image generation providers, prompt translation, and base64/download resolution.
     - `multimodal.rs`: Specialist inputs (Vision, Video, Audio STT) and observation turn formatting.
   - `storage/`: Modular SQLite (WAL mode) persistence layer and secret store:
-    - `secrets.rs`: Atomic filesystem secret vault (`0o600`/`0o700`), encrypted references (`secret://`), and application settings.
+    - `secrets.rs`: Atomic filesystem secret vault (`0o600`/`0o700`), opaque file references (`secret://`, not encryption), and application settings.
     - `inbox.rs`: Durable Telegram inbox queue, state transitions, in-flight processing claims, and crash recovery.
-    - `wa_inbox.rs`: Durable WhatsApp inbox queue with the same at-least-once contract, keyed by the WhatsApp message id string.
+    - `wa_inbox.rs`: Durable WhatsApp inbox queue with the same at-least-once contract, keyed by `chat:sender:message_id`, with batch inserts for the durability hook and cursor-based replay paging.
     - `session.rs`: Chat sessions, scoped conversation turns, thread context queries, and topic summaries.
     - `memory.rs`: Tier-1 persistent user profile facts (key-value memory operations).
     - `provider.rs`: AI provider configurations, model registry, capability probe records, and specialist routes.
@@ -240,24 +242,31 @@ When modifying or adding features, you **must** preserve these invariants:
 - **Implementation**: `bot.set_my_commands(&[])` is executed at startup to clear Telegram slash menus. User requests (including image generation and clear requests) are detected conversationally via regex/heuristics or handled via CLI.
 
 ### 3. Outbound SSRF & Network Security
-- **Rule**: Any remote fetch (e.g., in `fetch_url`, image generation fallback download, or media downloader) must be validated against `bot::url_policy::resolve_download_url` and `is_unsafe_remote_ip`.
+- **Rule**: Any remote fetch of a URL that came from a user, a model, or a web page must go through `bot::url_policy::fetch_public_url` (or, for single-hop downloads without redirects, `resolve_download_url` plus a pinned client). `fetch_public_url` re-validates every redirect hop with `resolve_redirect_hop`, pins the connection to the vetted IP, bypasses ambient proxies, and bounds the body.
+- **Users**: `fetch_url` (`ai::tools::fetch_web_content`), the DuckDuckGo result scraper, and the Telegram media re-upload downloader (`client/raw.rs::download_media_bytes`).
 - **Blocked**: Loopback (`127.0.0.0/8`, `::1`), RFC 1918 private subnets, link-local addresses, SIIT/NAT64-mapped IPv6, and unsafe URI schemes.
 
 ### 4. Secret Isolation
 - **Rule**: Plaintext API keys and bot tokens are **never** committed, written to SQLite in plaintext, or printed in debug logs.
-- **Mechanism**: Secrets are written to disk under `~/.local/share/xiaoai/secrets/` with strict `0o600` file / `0o700` directory permissions. The database only stores a `secret://` URI reference (`api_key_ref`).
+- **Mechanism**: Secrets are written to disk under `~/.local/share/xiaoai/secrets/` with strict `0o600` file / `0o700` directory permissions. The database only stores a `secret://` URI reference (`api_key_ref`). The reference is an opaque file name, not encryption: protection comes from the file permissions (on Windows, from the per-user profile ACL).
+- **Coverage**: `secrets.rs::secret_setting_namespace` routes `BOT_TOKEN`, `AI_API_KEY`, the search keys (`BRAVE_API_KEY`, `TAVILY_API_KEY`, `EXA_API_KEY`) and any setting ending in `_API_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD` to the vault. Legacy plaintext rows are migrated on first read.
 
 ### 5. Durable Intake Queue, Keyed Mailbox Isolation & Native Stop
 - **Queue**: Telegram long-polling writes incoming updates directly to SQLite table `telegram_inbox` as `pending`.
-- **Per-Scope Keyed Mailboxes**: Updates are dispatched into dedicated per-scope channels (`ScopeKey { chat_id, thread_id }`). This guarantees strict FIFO processing within any individual chat or topic while processing different chats concurrently up to a global semaphore limit (8 permits). Mailbox workers gracefully despawn after 30 seconds of inactivity using an atomic critical section to prevent lost messages.
+- **Owner Prefilter**: The dispatcher drops non-owner updates (marking them completed) before they reach a mailbox or a concurrency permit; the router's owner check remains as the second line.
+- **Per-Scope Keyed Mailboxes**: Updates are dispatched into dedicated per-scope channels (`ScopeKey { chat_id, thread_id }`). This guarantees strict FIFO processing within any individual chat or topic while processing different chats concurrently up to a global semaphore limit (`GLOBAL_WORKER_PERMITS` = 8). When a scope mailbox is full (`SCOPE_MAILBOX_CAPACITY`), the dispatcher waits for room (backpressure) instead of dropping the update. Mailbox workers gracefully despawn after `SCOPE_IDLE_TIMEOUT` using an atomic critical section to prevent lost messages.
+- **Task Outcomes**: Handlers report `TaskOutcome` through `bot::worker::record_task_outcome`. `Completed` marks the row done; `DeliveryFailed(reason)` quarantines it as `failed` with the reason (the reply could not be delivered after `deliver_final_answer`'s retries); `Interrupted` (cancelled by shutdown) returns it to `pending` without spending an attempt so it is answered after restart.
+- **Graceful Shutdown**: `AIChatService::begin_shutdown` sets the shutdown flag and cancels generations; queued-but-unstarted updates stay `pending`; the dispatcher closes all mailboxes and waits (bounded by `SHUTDOWN_GRACE`) for scope workers. Signals: Ctrl+C everywhere, SIGTERM/SIGHUP on Unix, console close/logoff/shutdown on Windows (`daemon::wait_for_shutdown_signal`).
 - **Panic Isolation & Bounded Retry**: Each update is executed inside an isolated `tokio::spawn` task with unwinding panic protection (`JoinError::is_panic()`).
   - Upon transient panic, the global concurrency permit is immediately released (`drop(permit)`), a 1.5-second backoff sleep occurs, and the update is retried immediately in-worker up to a maximum of 2 attempts (`attempts <= 2`, seeded and tracked directly in SQLite).
   - If a task panics consecutively or exceeds 2 attempts, it is quarantined as `failed` ("poison pill") to protect the queue from infinite crash loops.
 - **Operational Trade-Off & Duplicate Side-Effect Risk**:
   - Because in-worker retries trigger rapidly (~1.5s) on *any* panic without killing the daemon process, external side effects executed before an unexpected panic (e.g. an outbound Telegram message draft/reply already dispatched or an intermediate turn committed to SQLite before final inbox checkpointing) **will repeat upon retry**.
   - This is an intentional operational trade-off of at-least-once processing semantics: Xiao guarantees zero message loss over exactly-once execution.
-- **Crash Recovery**: On startup, `recover_telegram_processing_async()` resets any in-flight `processing` updates back to `pending` to guarantee at-least-once recovery across process restarts, while quarantining updates with `attempts >= 2`.
-- **Native Stop Priority**: `stopped_message_generation` updates bypass worker mailboxes and execute synchronously to cancel in-flight generation tokens with zero latency.
+- **Crash Recovery**: On startup, `recover_telegram_processing_async()` resets any in-flight `processing` updates back to `pending` to guarantee at-least-once recovery across process restarts, while quarantining updates with `attempts >= 2` (`quarantine_telegram_update_async` works on `pending` rows too). Stop updates from before a restart are acknowledged, not replayed.
+- **Native Stop Priority**: `stopped_message_generation` updates bypass worker mailboxes and execute immediately (in their own task, so a panic cannot take down the poll loop) to cancel in-flight generation tokens with zero latency. When the user stops a private-chat answer, the partial text is sent as a real message, because Bot API drafts disappear after ~30 seconds.
+- **Drafts Are Ephemeral**: `sendRichMessageDraft` is only a temporary preview. Every generation, including failed or interrupted ones, must end with a real `sendRichMessage` (`timeline::finalize_answer_with_media`); drafts never carry uploads or URL media (`TelegramBotClient::prepare_draft_message`).
+- **Retry Safety**: Timeouts are retried only for idempotent methods (`transport_policy::is_idempotent_method`); a timed-out `send*` is reported rather than risking a duplicate message.
 
 ### 6. Specialist Context Isolation
 - **Rule**: Canonical conversational history belongs solely to the `Main` model.
@@ -278,10 +287,15 @@ When modifying or adding features, you **must** preserve these invariants:
 - The file and its `-wal` / `-shm` sidecars are locked to `0o600` on Unix systems.
 
 ### 9. WhatsApp Ordering and Durability
-- Events are delivered with `EventDelivery::Ordered`, so messages within a chat are processed in arrival order.
-- Every authorized message is written to `whatsapp_inbox` **before** processing, then executed through the same `execute_with_scoped_retry` engine Telegram uses (panic isolation, bounded retry, quarantine).
+- **At-least-once intake**: `DurableIntakeHook` (an `InboundDurabilityHook`) writes every authorized message to `whatsapp_inbox` in one transaction **before** the SDK acknowledges it. Without the hook the SDK acks on decrypt (at-most-once).
+- **Fast callback**: The ordered `on_message` callback only classifies the message and enqueues it into a per-chat mailbox (`ChatMailboxes`). Generation runs in per-chat workers, so messages within a chat keep arrival order while different chats run concurrently (8 permits). If the SDK still reports dropped events, a replay sweep processes the durable rows.
+- **Dedup key**: `"{chat_jid}:{sender}:{message_id}"`; stanza ids are only unique per chat and sender. Claims (`pending` → `processing`) are the dedup point for redeliveries.
+- **Media replay**: The encoded protobuf message is stored with the row (`message_b64`), so attachments can be downloaded again after a restart. Older rows without it are answered with an explanation instead of being silently dropped. Payloads are scrubbed once a row is completed.
+- Every job runs through the same `execute_with_scoped_retry` engine Telegram uses (panic isolation, bounded retry, quarantine, `TaskOutcome`).
 - Generations register with `begin_generation` so application-wide cancellation on shutdown actually reaches WhatsApp, and hold a per-chat `generation_lock` so two generations cannot interleave history writes.
-- On startup, `recover_whatsapp_processing_async()` returns in-flight rows to `pending`. Replayed rows carry text only; media payloads are not persisted, so a media message interrupted mid-flight is quarantined rather than silently replayed without its attachment.
+- **Groups**: Owner messages in a group are answered only when they mention the bot, reply to it, start with `/`, or the group is listed in `WHATSAPP_DEDICATED_GROUPS`.
+- **Delivery**: Long replies are split into numbered parts (`(n/m)`) with per-part retries; staged documents are uploaded and sent as WhatsApp documents.
+- **Lifecycle**: `daemon::supervise_whatsapp` restarts a failed session with backoff and alerts the owner on Telegram; a server-side logout deletes the dead session and stops the gateway. On startup, `recover_whatsapp_processing_async()` returns in-flight rows to `pending` and the backlog is replayed page by page.
 
 ---
 
@@ -296,22 +310,23 @@ SQLite database location and files default to:
 ### Database Tables:
 - `settings`: Key-value application configuration.
 - `sessions`, `active_sessions`, `session_counters`: Chat session tracking.
-- `messages`: Canonical conversation history.
+- `messages`: Canonical conversation history, pruned per chat/topic to the newest `XIAO_HISTORY_RETENTION` messages (default 2000, `0` disables). Each exchange is stored in one transaction.
 - `user_memories`: Tier-1 persistent user profile facts (Name, Tech Stack, Preferences).
 - `scoped_summaries`: Tier-2 condensed summaries of older topics per chat/thread.
 - `telegram_inbox`: Durable update queue for Telegram intake.
 - `telegram_state`: Offset and webhook state persistence.
-- `whatsapp_inbox`: Durable message queue for WhatsApp intake, keyed by the WhatsApp message id string.
+- `whatsapp_inbox`: Durable message queue for WhatsApp intake, keyed by `chat:sender:message_id`; completed rows are kept as dedup tombstones (newest 5000 and anything from the last 14 days).
 
 ### Other files:
 - **WhatsApp session**: `<base>/whatsapp.db` plus `-wal` / `-shm` sidecars, locked to `0o600` on Unix.
 
 ### Configuration Resolution Order
 Configuration is resolved by `get_config_path()` in `src/main.rs`, in order:
-1. `.env` in the current working directory
+1. `.env` in the current working directory — only if trusted (on Unix: owned by the `$HOME` owner and not group/world-writable)
 2. `$XDG_CONFIG_HOME` descendants (`xiao/`, `.xiao/`, `xiaoai/`)
 3. `$HOME` or `$USERPROFILE` descendants (`.xiao.env`, `.xiao/`, `.config/xiao/`, and legacy variants)
 4. `%APPDATA%` descendants on Windows
+5. A trusted `.env` in a parent of the working directory
 
 The full effective list lives in `src/main.rs`; treat the code as the source of truth.
 

@@ -45,6 +45,10 @@ fn load_sessions_db(user_id: i64) -> rusqlite::Result<Vec<ChatSession>> {
         "SELECT session_id,name,created_at,revision FROM sessions WHERE user_id=?1 ORDER BY session_id",
     )?;
     let mut rows = stmt.query(params![user_id])?;
+    // Prepared once for all sessions instead of once per session (N+1).
+    let mut msg_stmt = conn.prepare(
+        "SELECT role,content FROM messages WHERE user_id=?1 AND session_id=?2 ORDER BY rowid",
+    )?;
     let mut sessions = Vec::new();
     while let Some(row) = rows.next()? {
         let id: usize = row.get::<_, i64>(0)? as usize;
@@ -55,9 +59,6 @@ fn load_sessions_db(user_id: i64) -> rusqlite::Result<Vec<ChatSession>> {
             created_at: row.get(2)?,
             revision: row.get::<_, i64>(3)? as u64,
         };
-        let mut msg_stmt = conn.prepare(
-            "SELECT role,content FROM messages WHERE user_id=?1 AND session_id=?2 ORDER BY rowid",
-        )?;
         let mut msg_rows = msg_stmt.query(params![user_id, id as i64])?;
         while let Some(msg) = msg_rows.next()? {
             let content: String = msg.get(1)?;
@@ -252,12 +253,6 @@ fn create_session_and_activate_db(
 pub(crate) struct RemoveSessionOutcome {
     pub new_active_id: usize,
     pub replacement: Option<ChatSession>,
-}
-
-impl RemoveSessionOutcome {
-    pub fn is_last_session_reset(&self) -> bool {
-        self.replacement.is_some()
-    }
 }
 
 fn remove_session_transaction_db(
@@ -549,17 +544,6 @@ fn count_scoped_messages_on_conn(
     )
 }
 
-pub fn save_scoped_message(
-    chat_id: i64,
-    thread_id: i64,
-    user_id: i64,
-    role: &str,
-    content: &str,
-) -> rusqlite::Result<()> {
-    let conn = open_session_db()?;
-    save_scoped_message_on_conn(&conn, chat_id, thread_id, user_id, role, content)
-}
-
 fn save_scoped_message_on_conn(
     conn: &Connection,
     chat_id: i64,
@@ -597,15 +581,86 @@ pub async fn count_scoped_messages_async(chat_id: i64, thread_id: i64) -> usize 
     .unwrap_or_default()
 }
 
-pub async fn save_scoped_message_async(
+/// Default number of canonical messages kept per chat/topic. Generation only
+/// reads the most recent turns and older context lives on in the Tier-2
+/// summary, so the table no longer grows without bound.
+pub(crate) const DEFAULT_HISTORY_RETENTION_MESSAGES: usize = 2_000;
+
+/// Retention limit per scope, configurable through `XIAO_HISTORY_RETENTION`.
+/// `0` disables pruning.
+pub(crate) fn history_retention_limit() -> usize {
+    std::env::var("XIAO_HISTORY_RETENTION")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_HISTORY_RETENTION_MESSAGES)
+}
+
+fn prune_scoped_history_on_conn(
+    conn: &Connection,
+    chat_id: i64,
+    thread_id: i64,
+    keep: usize,
+) -> rusqlite::Result<usize> {
+    if keep == 0 || count_scoped_messages_on_conn(conn, chat_id, thread_id)? <= keep {
+        return Ok(0);
+    }
+    conn.execute(
+        "DELETE FROM messages
+         WHERE chat_id = ?1 AND thread_id = ?2 AND rowid NOT IN (
+             SELECT rowid FROM messages
+             WHERE chat_id = ?1 AND thread_id = ?2
+             ORDER BY rowid DESC
+             LIMIT ?3
+         )",
+        params![chat_id, thread_id, keep as i64],
+    )
+}
+
+/// Persists a completed user/assistant exchange atomically: either both
+/// messages are stored or neither is, so a failed second insert can no longer
+/// leave a dangling user turn without its answer.
+pub(crate) fn save_scoped_turn_on_conn(
+    conn: &mut Connection,
     chat_id: i64,
     thread_id: i64,
     user_id: i64,
-    role: String,
-    content: String,
+    user_content: &str,
+    assistant_content: &str,
+    retention: usize,
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    save_scoped_message_on_conn(&tx, chat_id, thread_id, user_id, "user", user_content)?;
+    save_scoped_message_on_conn(
+        &tx,
+        chat_id,
+        thread_id,
+        user_id,
+        "assistant",
+        assistant_content,
+    )?;
+    prune_scoped_history_on_conn(&tx, chat_id, thread_id, retention)?;
+    tx.commit()
+}
+
+pub async fn save_scoped_turn_async(
+    chat_id: i64,
+    thread_id: i64,
+    user_id: i64,
+    user_content: String,
+    assistant_content: String,
 ) -> bool {
-    run_db("save_scoped_message", move || {
-        save_scoped_message(chat_id, thread_id, user_id, &role, &content)
+    let retention = history_retention_limit();
+    run_db("save_scoped_turn", move || {
+        let mut conn = open_session_db()?;
+        save_scoped_turn_on_conn(
+            &mut conn,
+            chat_id,
+            thread_id,
+            user_id,
+            &user_content,
+            &assistant_content,
+            retention,
+        )
     })
     .await
     .is_some()
@@ -886,6 +941,46 @@ mod tests {
         assert_eq!(session_count, 1);
         assert_eq!(active, 3);
         assert_eq!(next_id, 4);
+    }
+
+    #[test]
+    fn scoped_turn_is_atomic_and_pruned_to_retention() {
+        let mut conn = session_test_conn();
+        for turn in 0..10 {
+            save_scoped_turn_on_conn(
+                &mut conn,
+                7,
+                0,
+                7,
+                &format!("\"q{turn}\""),
+                &format!("a{turn}"),
+                6,
+            )
+            .expect("save turn succeeds");
+        }
+        assert_eq!(
+            count_scoped_messages_on_conn(&conn, 7, 0).expect("count succeeds"),
+            6
+        );
+        let kept = load_scoped_messages_on_conn(&conn, 7, 0, 10).expect("load succeeds");
+        assert_eq!(kept.first().map(|m| m.role.as_str()), Some("user"));
+        assert_eq!(
+            kept.last().map(|m| m.content.clone()),
+            Some(Value::String("a9".into()))
+        );
+
+        // A failing second insert rolls the whole turn back.
+        conn.execute_batch(
+            "CREATE TRIGGER reject_assistant BEFORE INSERT ON messages
+             WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .expect("create trigger succeeds");
+        assert!(save_scoped_turn_on_conn(&mut conn, 8, 0, 8, "\"q\"", "a", 0).is_err());
+        assert_eq!(
+            count_scoped_messages_on_conn(&conn, 8, 0).expect("count succeeds"),
+            0,
+            "the user turn must not be left behind without its answer"
+        );
     }
 
     #[test]

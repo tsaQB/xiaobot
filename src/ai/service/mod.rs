@@ -3,6 +3,7 @@ pub mod curator;
 pub mod generation;
 pub mod image;
 pub mod multimodal;
+pub(crate) mod prompt;
 pub mod session;
 
 #[cfg(test)]
@@ -97,6 +98,24 @@ pub(crate) async fn read_bounded_json(response: reqwest::Response) -> Result<Val
     serde_json::from_slice(&bytes).map_err(|error| format!("invalid provider JSON: {error}"))
 }
 
+/// Single-permit gate for background curation. When a curation run is already
+/// in flight, the next one is skipped rather than queued: curation is
+/// best-effort and the following turn will pick up anything missed.
+#[derive(Clone)]
+pub(crate) struct CuratorGate(Arc<tokio::sync::Semaphore>);
+
+impl Default for CuratorGate {
+    fn default() -> Self {
+        Self(Arc::new(tokio::sync::Semaphore::new(1)))
+    }
+}
+
+impl CuratorGate {
+    pub(crate) fn try_enter(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(&self.0).try_acquire_owned().ok()
+    }
+}
+
 #[derive(Clone)]
 pub struct AIChatService {
     pub(crate) client: Client,
@@ -109,6 +128,12 @@ pub struct AIChatService {
     pub(crate) capability_registry: Arc<RwLock<CapabilityRegistry>>,
     pub(crate) model_routing: Arc<RwLock<ModelRoutingConfig>>,
     pub model_metadata: Arc<RwLock<HashMap<String, ModelMetadata>>>,
+    /// Serializes background memory curation so bursts of messages cannot fan
+    /// out into unbounded parallel (and billed) curator calls.
+    pub(crate) curator_gate: CuratorGate,
+    /// Set once the process begins shutting down. Work cancelled because of
+    /// shutdown is left in the durable inbox instead of being marked done.
+    pub(crate) shutting_down: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AIChatService {
@@ -153,6 +178,8 @@ impl AIChatService {
             capability_registry: Arc::new(RwLock::new(capability_registry)),
             model_routing: Arc::new(RwLock::new(model_routing)),
             model_metadata: Arc::new(RwLock::new(HashMap::new())),
+            curator_gate: CuratorGate::default(),
+            shutting_down: Arc::default(),
         }
     }
 }

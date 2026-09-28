@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tracing::{error, info, warn};
 
 use crate::ai::{self, AIChatService};
@@ -12,10 +12,22 @@ use crate::bot::models::{BotCommand, Update};
 use crate::bot::router::ChatRouteScope;
 use crate::bot::worker::{process_durable_update, replay_durable_inbox, spawn_workers};
 use crate::cli::get_or_prompt_token;
+use crate::gateway::whatsapp::client::WhatsAppExit;
 use crate::{
     get_configured_owner_id, get_configured_whatsapp_owner, get_whatsapp_db_path,
-    is_whatsapp_enabled, load_environment,
+    get_whatsapp_dedicated_groups, is_whatsapp_enabled, load_environment,
 };
+
+/// Time allowed for in-flight work to finish once shutdown starts.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+/// Polling backoff after consecutive `getUpdates` failures.
+const POLL_BACKOFF_INITIAL: Duration = Duration::from_secs(2);
+const POLL_BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// Restart backoff for a WhatsApp session that ended unexpectedly.
+const WHATSAPP_RESTART_INITIAL: Duration = Duration::from_secs(5);
+const WHATSAPP_RESTART_MAX: Duration = Duration::from_secs(300);
+/// Consecutive WhatsApp failures before the owner is alerted on Telegram.
+const WHATSAPP_ALERT_AFTER_FAILURES: u32 = 3;
 
 pub(crate) fn parse_chat_ids_from_str(raw: &str) -> HashSet<i64> {
     raw.split(',')
@@ -123,109 +135,108 @@ pub async fn bootstrap_bot(
     }
 }
 
+/// Resolves when the process is asked to stop: Ctrl+C everywhere, plus
+/// SIGTERM/SIGHUP on Unix and console close/logoff/shutdown on Windows.
+/// Shared by the Telegram and the standalone WhatsApp daemon so that both
+/// stop gracefully under systemd/Termux as well as interactively.
+pub async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate())
+            .map_err(|e| warn!("Gagal mendaftarkan SIGTERM handler: {e}"))
+            .ok();
+        let mut sighup = signal(SignalKind::hangup())
+            .map_err(|e| warn!("Gagal mendaftarkan SIGHUP handler: {e}"))
+            .ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                match sigterm.as_mut() {
+                    Some(sig) => { sig.recv().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
+            _ = async {
+                match sighup.as_mut() {
+                    Some(sig) => { sig.recv().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
+        }
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+        let mut ctrl_close = windows::ctrl_close().ok();
+        let mut ctrl_shutdown = windows::ctrl_shutdown().ok();
+        let mut ctrl_logoff = windows::ctrl_logoff().ok();
+        let mut ctrl_break = windows::ctrl_break().ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                match ctrl_close.as_mut() {
+                    Some(sig) => { sig.recv().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
+            _ = async {
+                match ctrl_shutdown.as_mut() {
+                    Some(sig) => { sig.recv().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
+            _ = async {
+                match ctrl_logoff.as_mut() {
+                    Some(sig) => { sig.recv().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
+            _ = async {
+                match ctrl_break.as_mut() {
+                    Some(sig) => { sig.recv().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Exponential polling backoff: 2s, 4s, 8s ... capped at 60s.
+pub(crate) fn poll_backoff(consecutive_failures: u32) -> Duration {
+    let exponent = consecutive_failures.saturating_sub(1).min(5);
+    POLL_BACKOFF_INITIAL
+        .saturating_mul(1u32 << exponent)
+        .min(POLL_BACKOFF_MAX)
+}
+
+async fn wait_until_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    while !*shutdown.borrow() {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 pub async fn poll_loop(
     bot: &TelegramBotClient,
     ai_service: &Arc<AIChatService>,
     user_last_image_prompt: &UserLastImagePrompt,
     route_scope: &Arc<ChatRouteScope>,
     update_tx: &tokio::sync::mpsc::Sender<Update>,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     let mut offset = ai::storage::load_telegram_offset_async().await;
+    let mut consecutive_failures = 0u32;
     info!("Memulai polling pesan dengan durable control/generation queues...");
-
-    #[cfg(unix)]
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .map_err(|e| warn!("Gagal mendaftarkan SIGTERM handler: {e}"))
-        .ok();
-
-    #[cfg(unix)]
-    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .map_err(|e| warn!("Gagal mendaftarkan SIGHUP handler: {e}"))
-        .ok();
-
-    #[cfg(windows)]
-    let mut ctrl_close = tokio::signal::windows::ctrl_close()
-        .map_err(|e| warn!("Gagal mendaftarkan CTRL_CLOSE handler: {e}"))
-        .ok();
-
-    #[cfg(windows)]
-    let mut ctrl_shutdown = tokio::signal::windows::ctrl_shutdown()
-        .map_err(|e| warn!("Gagal mendaftarkan CTRL_SHUTDOWN handler: {e}"))
-        .ok();
-
-    #[cfg(windows)]
-    let mut ctrl_logoff = tokio::signal::windows::ctrl_logoff()
-        .map_err(|e| warn!("Gagal mendaftarkan CTRL_LOGOFF handler: {e}"))
-        .ok();
-
-    #[cfg(windows)]
-    let mut ctrl_break = tokio::signal::windows::ctrl_break()
-        .map_err(|e| warn!("Gagal mendaftarkan CTRL_BREAK handler: {e}"))
-        .ok();
 
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                println!("\nReceived shutdown signal (SIGINT). Shutting down gracefully.");
-                break;
-            }
-            _ = async {
-                #[cfg(unix)]
-                {
-                    tokio::select! {
-                        _ = async {
-                            if let Some(ref mut sig) = sigterm {
-                                sig.recv().await;
-                            } else {
-                                std::future::pending::<()>().await;
-                            }
-                        } => {}
-                        _ = async {
-                            if let Some(ref mut sig) = sighup {
-                                sig.recv().await;
-                            } else {
-                                std::future::pending::<()>().await;
-                            }
-                        } => {}
-                    }
-                }
-                #[cfg(windows)]
-                {
-                    tokio::select! {
-                        _ = async {
-                            if let Some(ref mut sig) = ctrl_close {
-                                sig.recv().await;
-                            } else {
-                                std::future::pending::<()>().await;
-                            }
-                        } => {}
-                        _ = async {
-                            if let Some(ref mut sig) = ctrl_shutdown {
-                                sig.recv().await;
-                            } else {
-                                std::future::pending::<()>().await;
-                            }
-                        } => {}
-                        _ = async {
-                            if let Some(ref mut sig) = ctrl_logoff {
-                                sig.recv().await;
-                            } else {
-                                std::future::pending::<()>().await;
-                            }
-                        } => {}
-                        _ = async {
-                            if let Some(ref mut sig) = ctrl_break {
-                                sig.recv().await;
-                            } else {
-                                std::future::pending::<()>().await;
-                            }
-                        } => {}
-                    }
-                }
-                #[cfg(not(any(unix, windows)))]
-                std::future::pending::<()>().await;
-            } => {
-                println!("\nReceived termination signal. Shutting down gracefully.");
+            _ = wait_until_shutdown(&mut shutdown) => {
                 break;
             }
             updates_res = bot.get_updates(
@@ -240,6 +251,7 @@ pub async fn poll_loop(
             ) => {
                 match updates_res {
                     Ok(resp) if resp.ok => {
+                        consecutive_failures = 0;
                         if let Some(updates) = resp.result {
                             for update in updates {
                                 let update_id = update.update_id;
@@ -271,14 +283,22 @@ pub async fn poll_loop(
                                 if update.stopped_message_generation.is_some() {
                                     // Native Stop bypasses the queue so cancellation cannot be
                                     // blocked by queued generation work.
-                                    process_durable_update(
-                                        bot,
-                                        ai_service,
-                                        user_last_image_prompt,
-                                        route_scope,
-                                        update,
-                                    )
-                                    .await;
+                                    if update
+                                        .stopped_message_generation
+                                        .as_ref()
+                                        .is_some_and(|stop| stop.chat.id == route_scope.owner_user_id)
+                                    {
+                                        process_durable_update(
+                                            bot,
+                                            ai_service,
+                                            user_last_image_prompt,
+                                            route_scope,
+                                            update,
+                                        )
+                                        .await;
+                                    } else {
+                                        let _ = ai::storage::skip_telegram_update_async(update_id).await;
+                                    }
                                 } else if update_tx.send(update).await.is_err() {
                                     error!("Update worker stopped unexpectedly");
                                     return;
@@ -287,13 +307,88 @@ pub async fn poll_loop(
                         }
                     }
                     Ok(resp) => {
-                        warn!("Telegram polling update not ok: {:?}", resp.description);
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                        let delay = poll_backoff(consecutive_failures);
+                        warn!(
+                            "Telegram polling update not ok: {:?}; mencoba lagi dalam {:?}",
+                            resp.description, delay
+                        );
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {}
+                            _ = wait_until_shutdown(&mut shutdown) => break,
+                        }
                     }
                     Err(e) => {
-                        error!("Polling network error: {e}");
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                        let delay = poll_backoff(consecutive_failures);
+                        error!("Polling network error: {e}; mencoba lagi dalam {delay:?}");
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {}
+                            _ = wait_until_shutdown(&mut shutdown) => break,
+                        }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// Keeps the WhatsApp gateway alive: restarts it with backoff when it ends
+/// unexpectedly and alerts the owner on Telegram when the phone unlinks the
+/// device or the gateway keeps failing. Previously a single failure left
+/// WhatsApp offline until the whole process was restarted, silently.
+async fn supervise_whatsapp(
+    config: crate::gateway::whatsapp::WhatsAppConfig,
+    ai_service: Arc<AIChatService>,
+    shutdown: watch::Receiver<bool>,
+    alert: Option<(TelegramBotClient, i64)>,
+) -> WhatsAppExit {
+    let notify = |text: &'static str| {
+        let alert = alert.clone();
+        async move {
+            if let Some((bot, owner)) = alert {
+                if bot
+                    .send_message(owner, text, None, None, None, None)
+                    .await
+                    .is_err()
+                {
+                    warn!("Gagal mengirim notifikasi status WhatsApp ke pemilik");
+                }
+            }
+        }
+    };
+
+    let mut failures = 0u32;
+    loop {
+        let exit = crate::gateway::whatsapp::WhatsAppGateway::start(
+            config.clone(),
+            Arc::clone(&ai_service),
+            shutdown.clone(),
+        )
+        .await;
+        match exit {
+            WhatsAppExit::Shutdown => return exit,
+            WhatsAppExit::LoggedOut => {
+                warn!("WhatsApp gateway berhenti: perangkat telah di-logout dari HP");
+                notify("⚠️ Xiao: sesi WhatsApp dilepas dari HP (logout). Gateway WhatsApp berhenti; jalankan `xiao gateway wa pair` untuk menautkan ulang.").await;
+                return exit;
+            }
+            WhatsAppExit::Failed(reason) => {
+                failures = failures.saturating_add(1);
+                let exponent = failures.saturating_sub(1).min(6);
+                let delay = WHATSAPP_RESTART_INITIAL
+                    .saturating_mul(1u32 << exponent)
+                    .min(WHATSAPP_RESTART_MAX);
+                warn!(
+                    "WhatsApp gateway berhenti ({reason}); restart ke-{failures} dalam {delay:?}"
+                );
+                if failures == WHATSAPP_ALERT_AFTER_FAILURES {
+                    notify("⚠️ Xiao: gateway WhatsApp gagal tersambung beberapa kali berturut-turut. Xiao terus mencoba ulang di latar belakang.").await;
+                }
+                let mut wait = shutdown.clone();
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = wait_until_shutdown(&mut wait) => return WhatsAppExit::Shutdown,
                 }
             }
         }
@@ -313,22 +408,35 @@ pub async fn run_daemon(ai_service: Arc<AIChatService>) {
         std::process::exit(1);
     }
 
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let signal_ai = Arc::clone(&ai_service);
+    let signal_task = tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        println!("\nReceived shutdown signal. Shutting down gracefully.");
+        // Flag first so work cancelled below reports `Interrupted` and stays
+        // in the durable inbox for replay instead of being marked answered.
+        signal_ai.begin_shutdown().await;
+        let _ = shutdown_tx.send(true);
+    });
+
     // Spawn WhatsApp Gateway concurrently if configured or session exists
     let wa_worker = if wa_enabled {
-        let ai_wa = Arc::clone(&ai_service);
-        let owner_num = get_configured_whatsapp_owner();
         let wa_config = crate::gateway::whatsapp::WhatsAppConfig {
             db_path: wa_db_path,
-            owner_number: owner_num,
+            owner_number: get_configured_whatsapp_owner(),
             phone_login: None,
+            dedicated_groups: get_whatsapp_dedicated_groups(),
         };
+        let alert = tg_bootstrap
+            .as_ref()
+            .map(|(bot, scope, _)| (bot.clone(), scope.owner_user_id));
         info!("Memulai WhatsApp Gateway di background daemon...");
-        Some(tokio::spawn(async move {
-            if let Err(e) = crate::gateway::whatsapp::WhatsAppGateway::start(wa_config, ai_wa).await
-            {
-                warn!("WhatsApp daemon worker berhenti dengan error: {e}");
-            }
-        }))
+        Some(tokio::spawn(supervise_whatsapp(
+            wa_config,
+            Arc::clone(&ai_service),
+            shutdown_rx.clone(),
+            alert,
+        )))
     } else {
         None
     };
@@ -341,14 +449,7 @@ pub async fn run_daemon(ai_service: Arc<AIChatService>) {
             Arc::clone(&route_scope),
         );
 
-        replay_durable_inbox(
-            &bot,
-            &ai_service,
-            &user_last_image_prompt,
-            &route_scope,
-            &update_tx,
-        )
-        .await;
+        replay_durable_inbox(&ai_service, &update_tx).await;
 
         poll_loop(
             &bot,
@@ -356,17 +457,17 @@ pub async fn run_daemon(ai_service: Arc<AIChatService>) {
             &user_last_image_prompt,
             &route_scope,
             &update_tx,
+            shutdown_rx.clone(),
         )
         .await;
 
-        ai_service.cancel_all_generations().await;
+        // poll_loop also returns if the dispatcher died; make sure every
+        // component observes shutdown in that case too.
+        ai_service.begin_shutdown().await;
+        signal_task.abort();
         drop(update_tx);
 
-        if let Some(wa_handle) = wa_worker {
-            wa_handle.abort();
-        }
-
-        match tokio::time::timeout(Duration::from_secs(5), update_worker).await {
+        match tokio::time::timeout(SHUTDOWN_GRACE, update_worker).await {
             Ok(Ok(())) => {}
             Ok(Err(err)) => warn!("Update worker terminated with error: {err}"),
             Err(_) => warn!("Update worker did not stop within shutdown grace period"),
@@ -386,18 +487,22 @@ pub async fn run_daemon(ai_service: Arc<AIChatService>) {
             crate::cli::tui::render_hud_box("WHATSAPP DAEMON ACTIVE", &daemon_rows, bar_width);
         println!("{hud}");
         println!("\n  \x1b[38;5;244mService actively running. Press \x1b[1;37m[Ctrl+C]\x1b[0m \x1b[38;5;244mto stop daemon.\x1b[0m\n");
+    }
 
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                println!("\nReceived shutdown signal (SIGINT). Shutting down WhatsApp daemon gracefully.");
+    if let Some(wa_handle) = wa_worker {
+        // In standalone mode this is the daemon's lifetime: it returns on
+        // shutdown or when the device is logged out (nothing left to serve).
+        match wa_handle.await {
+            Ok(WhatsAppExit::LoggedOut) => {
+                error!(
+                    "WhatsApp gateway berhenti permanen karena logout; daemon WhatsApp selesai."
+                );
             }
-        }
-
-        ai_service.cancel_all_generations().await;
-        if let Some(wa_handle) = wa_worker {
-            wa_handle.abort();
+            Ok(_) => {}
+            Err(err) => warn!("WhatsApp supervisor terminated with error: {err}"),
         }
     }
+    ai_service.begin_shutdown().await;
 }
 
 #[cfg(test)]

@@ -131,7 +131,6 @@ pub(crate) async fn resolve_download_url(raw: &str) -> Result<ResolvedDownloadUr
     })
 }
 
-#[allow(dead_code)]
 pub(crate) async fn resolve_redirect_hop(
     current_url: &Url,
     location: &str,
@@ -140,6 +139,105 @@ pub(crate) async fn resolve_redirect_hop(
         .join(location.trim())
         .map_err(|e| format!("invalid redirect location: {e}"))?;
     resolve_download_url(next_url.as_str()).await
+}
+
+/// Maximum redirects followed by [`fetch_public_url`].
+pub(crate) const MAX_PUBLIC_REDIRECTS: usize = 5;
+
+/// Parameters for [`fetch_public_url`].
+pub(crate) struct PublicFetchOptions<'a> {
+    pub timeout: std::time::Duration,
+    pub max_bytes: usize,
+    pub user_agent: &'a str,
+    pub accept: &'a str,
+}
+
+/// Body of a successful [`fetch_public_url`] call.
+pub(crate) struct PublicFetchResponse {
+    pub bytes: Vec<u8>,
+    pub content_type: String,
+    pub final_url: Url,
+}
+
+/// The single SSRF-safe way to GET a URL that came from users, models or web
+/// pages. Every hop (including each redirect target) is DNS-resolved and
+/// checked against the private/loopback/link-local policy, the connection is
+/// pinned to the vetted address (no rebinding between check and connect),
+/// ambient proxies are bypassed, and the body is read with a hard byte cap.
+pub(crate) async fn fetch_public_url(
+    raw: &str,
+    options: &PublicFetchOptions<'_>,
+) -> Result<PublicFetchResponse, String> {
+    let mut resolved = resolve_download_url(raw).await?;
+    let mut redirects = 0usize;
+    let response = loop {
+        let client = reqwest::Client::builder()
+            .timeout(options.timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .resolve(&resolved.host, resolved.address)
+            .user_agent(options.user_agent)
+            .build()
+            .map_err(|_| "failed to build pinned HTTP client".to_string())?;
+        let response = client
+            .get(resolved.url.clone())
+            .header(reqwest::header::ACCEPT, options.accept)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    "external request timed out".to_string()
+                } else {
+                    "external request failed".to_string()
+                }
+            })?;
+        let status = response.status();
+        if matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+            if redirects >= MAX_PUBLIC_REDIRECTS {
+                return Err("too many redirects".to_string());
+            }
+            redirects += 1;
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| "redirect without a valid Location header".to_string())?
+                .to_string();
+            resolved = resolve_redirect_hop(&resolved.url, &location).await?;
+            continue;
+        }
+        if !status.is_success() {
+            return Err(format!("external server returned HTTP {status}"));
+        }
+        break response;
+    };
+
+    if response
+        .content_length()
+        .is_some_and(|length| length > options.max_bytes as u64)
+    {
+        return Err("external response exceeds the size limit".to_string());
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+        let chunk = chunk.map_err(|_| "external response stream failed".to_string())?;
+        if bytes.len().saturating_add(chunk.len()) > options.max_bytes {
+            return Err("external response exceeds the size limit".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(PublicFetchResponse {
+        bytes,
+        content_type,
+        final_url: resolved.url,
+    })
 }
 
 #[cfg(test)]

@@ -121,49 +121,6 @@ fn media_group_keeps_audio_and_documents_in_homogeneous_albums() {
 }
 
 #[test]
-fn permanent_send_paths_do_not_emit_draft_id_zero() {
-    let source = include_str!("../src/bot/client.rs");
-    assert!(
-        !source.contains("\"draft_id\": 0"),
-        "permanent wrapper sendMessage/sendRichMessage payloads must not include draft_id"
-    );
-}
-
-#[test]
-fn raw_transport_permanent_send_paths_do_not_emit_draft_id_zero() {
-    let source = include_str!("../src/bot/client/raw.rs");
-    assert!(
-        !source.contains("\"draft_id\": 0"),
-        "inner transport permanent sends must not retain the invalid draft_id sentinel"
-    );
-}
-
-#[test]
-fn raw_media_downloader_enforces_safe_outbound_url_policy() {
-    let source = include_str!("../src/bot/client/raw.rs");
-    let start = source
-        .find("pub async fn download_media_bytes")
-        .expect("raw downloader must exist");
-    let tail = &source[start..];
-    let end = tail
-        .find("pub async fn send_photo(")
-        .expect("send_photo should follow raw downloader");
-    let body = &tail[..end];
-    assert!(
-        body.contains("resolve_download_url"),
-        "external media fallback must resolve and validate outbound targets before requesting them"
-    );
-    assert!(
-        body.contains("Policy::none()"),
-        "external media fallback must disable redirects so a public URL cannot pivot to a private target"
-    );
-    assert!(
-        body.contains(".no_proxy()"),
-        "external media fallback must not let ambient proxies bypass DNS pinning"
-    );
-}
-
-#[test]
 fn parsed_expandable_blockquote_serializes_with_10_3_discriminator() {
     let blocks = parser::parse_markdown_to_rich_blocks("**> Catatan penting yang dapat dilipat");
     let Some(RichBlock::ExpandableBlockQuotation { .. }) = blocks.first() else {
@@ -188,19 +145,6 @@ fn parsed_rich_inline_spoiler_and_strikethrough_serialize() {
     let serialized = value.to_string();
     assert!(serialized.contains(r#""type":"spoiler""#));
     assert!(serialized.contains(r#""type":"strikethrough""#));
-}
-
-#[test]
-fn raw_client_exposes_explicit_delete_ephemeral_message() {
-    let source = include_str!("../src/bot/client/raw.rs");
-    assert!(
-        source.contains("pub async fn delete_ephemeral_message("),
-        "raw client must provide explicit delete_ephemeral_message API"
-    );
-    assert!(
-        source.contains("\"deleteEphemeralMessage\""),
-        "raw client must target Telegram deleteEphemeralMessage method"
-    );
 }
 
 #[test]
@@ -595,65 +539,6 @@ fn update_wire_format_deserializes_poll_update() {
     assert!(!poll.is_closed);
     assert!(!poll.is_anonymous);
     assert!(!poll.allows_multiple_answers);
-}
-
-#[test]
-fn raw_and_main_client_expose_send_poll_with_delivery_context() {
-    let raw_source = include_str!("../src/bot/client/raw.rs");
-    assert!(
-        raw_source.contains("pub async fn send_poll("),
-        "raw::TelegramBotClient must expose pub async fn send_poll"
-    );
-    assert!(
-        raw_source.contains("\"sendPoll\""),
-        "raw::TelegramBotClient must post to sendPoll method"
-    );
-    assert!(
-        raw_source.contains("Self::apply_delivery_context(&mut payload, true);"),
-        "raw::TelegramBotClient::send_poll must apply delivery context"
-    );
-
-    let client_source = include_str!("../src/bot/client.rs");
-    assert!(
-        client_source.contains("pub async fn send_poll("),
-        "TelegramBotClient must expose pub async fn send_poll"
-    );
-    assert!(
-        client_source.contains("\"sendPoll\""),
-        "TelegramBotClient must post to sendPoll method"
-    );
-    assert!(
-        client_source.contains("Self::apply_delivery_context(&mut payload, true);"),
-        "TelegramBotClient::send_poll must apply delivery context"
-    );
-}
-
-#[test]
-fn quiz_send_poll_payload_wire_format_conforms_to_bot_api() {
-    let options = vec![
-        InputPollOption::new("Option 1"),
-        InputPollOption::new("Option 2"),
-    ];
-    let payload = serde_json::json!({
-        "chat_id": 12345,
-        "question": "What is the answer?",
-        "options": options,
-        "type": "quiz",
-        "is_anonymous": false,
-        "correct_option_id": 0,
-        "explanation": "Because it is.",
-        "reply_parameters": {
-            "message_id": 999
-        }
-    });
-
-    assert_eq!(payload["chat_id"], 12345);
-    assert_eq!(payload["type"], "quiz");
-    assert_eq!(payload["options"][0]["text"], "Option 1");
-    assert_eq!(payload["options"][1]["text"], "Option 2");
-    assert_eq!(payload["correct_option_id"], 0);
-    assert_eq!(payload["explanation"], "Because it is.");
-    assert_eq!(payload["reply_parameters"]["message_id"], 999);
 }
 
 #[test]

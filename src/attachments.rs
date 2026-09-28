@@ -128,10 +128,6 @@ pub async fn delete_scoped_attachments(chat_id: i64, thread_id: i64) {
     let _ = tokio::fs::remove_dir_all(scope_dir(chat_id, thread_id)).await;
 }
 
-pub async fn delete_session_attachments(user_id: i64, _session_id: usize) {
-    delete_scoped_attachments(user_id, 0).await;
-}
-
 pub fn encode_user_content(text: &str, attachments: Vec<AttachmentRef>) -> Value {
     if attachments.is_empty() {
         return Value::String(text.to_string());

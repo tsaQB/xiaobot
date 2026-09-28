@@ -34,6 +34,19 @@ pub(crate) fn get_configured_whatsapp_owner() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// Comma-separated `WHATSAPP_DEDICATED_GROUPS` (group JIDs or numeric ids).
+pub(crate) fn get_whatsapp_dedicated_groups() -> Vec<String> {
+    load_environment();
+    env::var("WHATSAPP_DEDICATED_GROUPS")
+        .ok()
+        .or_else(|| ai::service::load_app_setting("WHATSAPP_DEDICATED_GROUPS"))
+        .unwrap_or_default()
+        .split(',')
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
 pub(crate) fn is_whatsapp_enabled() -> bool {
     load_environment();
     env::var("WHATSAPP_ENABLED")
@@ -53,9 +66,45 @@ pub(crate) fn get_whatsapp_db_path() -> std::path::PathBuf {
     dir.join("whatsapp.db")
 }
 
+/// Whether a `.env` found relative to the working directory may be loaded.
+///
+/// The working directory is not necessarily controlled by the owner (a
+/// cloned repository, a shared folder). On Unix the file must be owned by the
+/// same user as `$HOME` and must not be group/world-writable; otherwise a
+/// planted `.env` could silently replace BOT_TOKEN, API keys or endpoints.
+#[cfg(unix)]
+fn is_trusted_env_file(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if metadata.mode() & 0o022 != 0 {
+        eprintln!(
+            "[WARN] Mengabaikan {} karena dapat ditulis oleh pengguna lain.",
+            path.display()
+        );
+        return false;
+    }
+    let owner_ok = env::var_os("HOME")
+        .and_then(|home| std::fs::metadata(home).ok())
+        .is_none_or(|home| home.uid() == metadata.uid());
+    if !owner_ok {
+        eprintln!(
+            "[WARN] Mengabaikan {} karena bukan milik pengguna ini.",
+            path.display()
+        );
+    }
+    owner_ok
+}
+
+#[cfg(not(unix))]
+fn is_trusted_env_file(_path: &Path) -> bool {
+    true
+}
+
 fn get_config_path() -> std::path::PathBuf {
-    // 1. Current working directory .env
-    if Path::new(".env").exists() {
+    // 1. Current working directory .env (only when it is trusted)
+    if Path::new(".env").exists() && is_trusted_env_file(Path::new(".env")) {
         return Path::new(".env").to_path_buf();
     }
     // 2. XDG_CONFIG_HOME for Linux and Termux
@@ -137,15 +186,23 @@ fn get_config_path() -> std::path::PathBuf {
             }
         }
     }
+    // 5. A trusted `.env` in a parent of the working directory (the previous
+    //    `dotenvy::dotenv()` fallback searched parents without any check).
+    if let Ok(cwd) = env::current_dir() {
+        for dir in cwd.ancestors().skip(1) {
+            let candidate = dir.join(".env");
+            if candidate.exists() && is_trusted_env_file(&candidate) {
+                return candidate;
+            }
+        }
+    }
     Path::new(".env").to_path_buf()
 }
 
 pub(crate) fn load_environment() {
     let cfg_path = get_config_path();
-    if cfg_path.exists() {
+    if cfg_path.exists() && (cfg_path != Path::new(".env") || is_trusted_env_file(&cfg_path)) {
         let _ = dotenvy::from_path(&cfg_path);
-    } else {
-        let _ = dotenvy::dotenv();
     }
 }
 
@@ -184,7 +241,12 @@ fn init_tracing() {
     TRACING_INIT.call_once(|| {
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+        // Logs go to stderr so they never interleave with the CLI spinner or
+        // with answers printed to stdout (`xiao "question" > answer.txt`).
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .try_init();
     });
 }
 

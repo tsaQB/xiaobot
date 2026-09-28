@@ -767,6 +767,25 @@ fn test_create_archive_args_sanitization_and_validation() {
 }
 
 #[test]
+fn archive_entry_paths_cannot_escape_on_any_platform() {
+    assert_eq!(
+        sanitize_archive_entry_path(r"..\..\..\evil.bat"),
+        "evil.bat"
+    );
+    assert_eq!(
+        sanitize_archive_entry_path(r"C:\Windows\System32\drivers\x.sys"),
+        "Windows/System32/drivers/x.sys"
+    );
+    assert_eq!(sanitize_archive_entry_path("/etc/passwd"), "etc/passwd");
+    assert_eq!(sanitize_archive_entry_path("a/./b/../c.txt"), "a/b/c.txt");
+    assert_eq!(sanitize_archive_entry_path("..\\"), "file.txt");
+    assert_eq!(
+        sanitize_archive_entry_path("docs\\readme.md"),
+        "docs/readme.md"
+    );
+}
+
+#[test]
 fn test_error_recovery_never_returns_empty_response() {
     let err_msg = "Connection timeout to search provider";
     let query = "pemandangan lombok";

@@ -3,9 +3,7 @@ use std::env;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use regex::Regex;
-use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, USER_AGENT};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use url::Url;
@@ -418,26 +416,33 @@ pub fn format_no_images_guidance(query: &str) -> String {
     )
 }
 
+/// Normalizes a model-supplied path for an entry inside a generated ZIP.
+///
+/// Parsing is purely textual and identical on every OS. The previous version
+/// relied on `std::path`, which on Linux treats `\` as an ordinary character,
+/// so `..\..\evil.bat` survived intact and could escape the extraction folder
+/// when the archive was later unpacked on Windows.
 pub fn sanitize_archive_entry_path(path: &str) -> String {
-    use std::path::{Component, Path};
-
-    let mut safe_components = Vec::new();
-    for comp in Path::new(path).components() {
-        match comp {
-            Component::Normal(c) => {
-                let part = c.to_string_lossy().trim().to_string();
-                if !part.is_empty() {
-                    safe_components.push(part);
-                }
-            }
-            Component::CurDir
-            | Component::ParentDir
-            | Component::RootDir
-            | Component::Prefix(_) => {
-                // Skip traversal and root indicators
-            }
-        }
-    }
+    let normalized = path.replace('\\', "/");
+    let safe_components: Vec<String> = normalized
+        .split('/')
+        .map(|segment| {
+            segment
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .filter(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                // Windows drive prefixes such as `C:`.
+                && !(segment.len() == 2 && segment.ends_with(':'))
+        })
+        .map(|segment| segment.replace(':', "_"))
+        .collect();
 
     if safe_components.is_empty() {
         "file.txt".to_string()
@@ -769,98 +774,52 @@ pub use search::{
 };
 
 const MAX_FETCH_HTML_BYTES: usize = 2 * 1024 * 1024;
-const MAX_FETCH_REDIRECTS: usize = 5;
+
+/// Fetches an untrusted web page through the shared SSRF-safe fetcher
+/// (DNS pinning, per-hop policy checks, bounded body) and returns the HTML
+/// together with the final URL after redirects.
+pub(crate) async fn fetch_public_html(
+    url: &str,
+    timeout: Duration,
+    max_bytes: usize,
+) -> Result<(String, String), String> {
+    let fetched = crate::bot::url_policy::fetch_public_url(
+        url.trim(),
+        &crate::bot::url_policy::PublicFetchOptions {
+            timeout,
+            max_bytes,
+            user_agent: concat!(
+                "xiao/",
+                env!("CARGO_PKG_VERSION"),
+                " (Telegram Bot Assistant)"
+            ),
+            accept:
+                "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
+        },
+    )
+    .await?;
+    Ok((
+        String::from_utf8_lossy(&fetched.bytes).into_owned(),
+        fetched.final_url.to_string(),
+    ))
+}
 
 pub async fn fetch_web_content(url: &str) -> Result<String, String> {
-    let mut current_url_str = url.trim().to_string();
-    if !current_url_str.starts_with("http://") && !current_url_str.starts_with("https://") {
+    let url = url.trim();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("URL harus diawali dengan http:// atau https://".to_string());
     }
 
-    let mut redirect_count = 0;
-    let resp = loop {
-        let resolved = crate::bot::url_policy::resolve_download_url(&current_url_str).await?;
-
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .resolve(&resolved.host, resolved.address)
-            .build()
-            .map_err(|e| format!("Gagal menginisialisasi client HTTP: {e}"))?;
-
-        let response = client
-            .get(resolved.url.clone())
-            .header(
-                USER_AGENT,
-                concat!(
-                    "xiao/",
-                    env!("CARGO_PKG_VERSION"),
-                    " (Telegram Bot Assistant)"
-                ),
-            )
-            .header(
-                ACCEPT,
-                "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
-            )
-            .header(ACCEPT_LANGUAGE, "id,en-US;q=0.9,en;q=0.8")
-            .send()
-            .await
-            .map_err(|e| format!("Gagal mengunduh halaman web: {e}"))?;
-
-        let status = response.status();
-        if status.is_redirection() {
-            if redirect_count >= MAX_FETCH_REDIRECTS {
-                return Err("Terlalu banyak pengalihan (redirect loop).".to_string());
-            }
-            redirect_count += 1;
-            let location = response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|h| h.to_str().ok())
-                .ok_or_else(|| "Pengalihan tanpa header Location yang valid".to_string())?;
-
-            let next_url = resolved
-                .url
-                .join(location)
-                .map_err(|e| format!("URL pengalihan tidak valid: {e}"))?;
-
-            current_url_str = next_url.to_string();
-            continue;
-        }
-
-        if !status.is_success() {
-            return Err(format!("Halaman web mengembalikan status HTTP {status}"));
-        }
-
-        break response;
-    };
-
-    if resp
-        .content_length()
-        .is_some_and(|length| length > MAX_FETCH_HTML_BYTES as u64)
-    {
-        return Err("Ukuran konten web melebihi batas aman 2 MiB.".to_string());
-    }
-
-    let mut stream = resp.bytes_stream();
-    let mut bytes = Vec::new();
-    while let Some(chunk_res) = stream.next().await {
-        let chunk = chunk_res.map_err(|e| format!("Gagal membaca stream web: {e}"))?;
-        if bytes.len().saturating_add(chunk.len()) > MAX_FETCH_HTML_BYTES {
-            return Err("Ukuran konten web melebihi batas aman 2 MiB.".to_string());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-
-    let html = String::from_utf8_lossy(&bytes);
+    let (html, final_url) = fetch_public_html(url, Duration::from_secs(15), MAX_FETCH_HTML_BYTES)
+        .await
+        .map_err(|error| format!("Gagal mengunduh halaman web: {error}"))?;
     let mut cleaned = clean_html_to_text(&html);
 
     if cleaned.is_empty() {
         return Err("Halaman web tidak menghasilkan konten teks yang dapat dibaca.".to_string());
     }
 
-    let extracted_images = extract_raster_images_from_html(&html, Some(&current_url_str));
+    let extracted_images = extract_raster_images_from_html(&html, Some(&final_url));
     if !extracted_images.is_empty() {
         let max_imgs = extracted_images.into_iter().take(6).collect::<Vec<_>>();
         cleaned.push_str(&format_verified_images_section(&max_imgs));

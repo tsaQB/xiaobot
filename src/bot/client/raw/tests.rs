@@ -3,7 +3,7 @@ use crate::bot::models::{Location, RichBlockCaption};
 
 #[test]
 fn split_text_chunks_preserves_unicode_and_bounds() {
-    let client = TelegramBotClient::new("test-token");
+    let client = TelegramBotClient;
     let input = format!("{}\n{}", "😊世界".repeat(900), "x".repeat(5000));
     let chunks = client.split_text_chunks(&input, 3800);
 
@@ -14,7 +14,7 @@ fn split_text_chunks_preserves_unicode_and_bounds() {
 
 #[test]
 fn oversized_rich_block_fallback_never_splits_html_entities() {
-    let client = TelegramBotClient::new("test-token");
+    let client = TelegramBotClient;
     let blocks = vec![RichBlock::Paragraph {
         text: Value::String("<&😊>".repeat(2000)),
     }];
@@ -34,7 +34,7 @@ fn oversized_rich_block_fallback_never_splits_html_entities() {
 
 #[test]
 fn rich_media_blocks_render_to_plain_and_html_fallback() {
-    let client = TelegramBotClient::new("test-token");
+    let client = TelegramBotClient;
     let blocks = vec![
         RichBlock::Photo {
             photo: serde_json::json!({"type": "photo", "media": "photo_1"}),
@@ -92,7 +92,7 @@ fn rich_media_blocks_render_to_plain_and_html_fallback() {
 
 #[test]
 fn semantic_plain_fallback_is_rendered_from_ast_not_raw_markdown() {
-    let client = TelegramBotClient::new("test-token");
+    let client = TelegramBotClient;
     let source = "### Heading\n\n**bold** and `code`\n\n---\n\n[link](https://example.com)";
     let blocks = crate::parser::parse_markdown_to_rich_blocks(source);
     let plain = client
@@ -110,7 +110,7 @@ fn semantic_plain_fallback_is_rendered_from_ast_not_raw_markdown() {
 
 #[test]
 fn convert_remote_media_to_rich_links_transforms_remote_blocks_without_local_download() {
-    let client = TelegramBotClient::new("test-token");
+    let client = TelegramBotClient;
     let blocks = vec![
         RichBlock::Photo {
             photo: serde_json::json!({"type": "photo", "media": "https://example.com/cat.jpg"}),
@@ -161,7 +161,7 @@ fn convert_remote_media_to_rich_links_transforms_remote_blocks_without_local_dow
 
 #[test]
 fn thinking_block_renders_as_clean_text_without_quote_or_duplicate_header() {
-    let client = TelegramBotClient::new("test-token");
+    let client = TelegramBotClient;
     let blocks = vec![RichBlock::Thinking {
         text: Value::String("🧩 Thinking\n1s •".to_string()),
     }];
@@ -172,101 +172,34 @@ fn thinking_block_renders_as_clean_text_without_quote_or_duplicate_header() {
 }
 
 #[tokio::test]
-async fn download_media_bytes_stops_within_bounded_time_when_budget_expires() {
-    let client = TelegramBotClient::new("test-token");
-    let start = std::time::Instant::now();
-    let res = client
-        .download_media_bytes_with_budget(
-            "https://1.1.1.1/slow-download.bin",
-            1024,
-            Duration::from_millis(15),
-        )
-        .await;
-    let elapsed = start.elapsed();
-    assert!(res.is_none(), "timed-out download must return None");
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "download must abort within bounded time, took {:?}",
-        elapsed
-    );
+async fn download_budget_bounds_the_whole_transfer() {
+    // A transfer that never completes must be abandoned when the budget
+    // expires, without depending on a real network endpoint.
+    let started = std::time::Instant::now();
+    let result: Option<()> = TelegramBotClient::with_download_budget(
+        Duration::from_millis(20),
+        std::future::pending::<Option<()>>(),
+    )
+    .await;
+    assert!(result.is_none(), "an expired budget yields None");
+    assert!(started.elapsed() < Duration::from_secs(2));
 }
 
-#[test]
-fn download_media_bytes_wraps_in_total_30s_timeout_budget() {
-    let source = include_str!("../raw.rs");
-    let start = source
-        .find("pub async fn download_media_bytes")
-        .expect("download_media_bytes must exist");
-    let tail = &source[start..];
-    let end = tail
-        .find("pub async fn send_photo(")
-        .expect("send_photo must follow");
-    let body = &tail[..end];
-    assert!(
-        body.contains("tokio::time::timeout(Duration::from_secs(30)"),
-        "download_media_bytes must wrap redirect loop and streaming in a 30s total budget"
-    );
-    assert!(
-        body.contains(".flatten()"),
-        "elapsed timeout must return None via .ok().flatten()"
-    );
-}
-
-#[test]
-fn edit_message_media_serializes_with_markup_correctly() {
-    let media = InputMedia::photo(
-        "https://example.com/slide1.jpg",
-        Some("Slide 1".to_string()),
-        Some("HTML".to_string()),
-    );
-    let button = crate::bot::models::InlineKeyboardButton::callback("Next", "carousel:id:1:next");
-    let markup = InlineKeyboardMarkup::new(vec![vec![button]]);
-
-    let media_json = match serde_json::to_value(&media) {
-        Ok(v) => v,
-        Err(e) => panic!("serialization failed: {e}"),
-    };
-    let markup_json = match serde_json::to_value(&markup) {
-        Ok(v) => v,
-        Err(e) => panic!("serialization failed: {e}"),
-    };
-
-    let payload = json!({
-        "chat_id": 12345_i64,
-        "message_id": 67890_i64,
-        "media": media_json,
-        "reply_markup": markup_json,
-    });
-
-    assert_eq!(payload["chat_id"], 12345_i64);
-    assert_eq!(payload["message_id"], 67890_i64);
-    assert_eq!(payload["media"]["type"], "photo");
-    assert_eq!(payload["media"]["media"], "https://example.com/slide1.jpg");
-    assert_eq!(payload["media"]["caption"], "Slide 1");
-    assert_eq!(payload["media"]["parse_mode"], "HTML");
-    assert_eq!(
-        payload["reply_markup"]["inline_keyboard"][0][0]["text"],
-        "Next"
-    );
-    assert_eq!(
-        payload["reply_markup"]["inline_keyboard"][0][0]["callback_data"],
-        "carousel:id:1:next"
-    );
-}
-
-#[test]
-fn edit_message_media_source_has_not_modified_error_handling() {
-    let source = include_str!("../raw.rs");
-    assert!(
-        source.contains("pub async fn edit_message_media("),
-        "raw.rs must expose edit_message_media"
-    );
-    assert!(
-        source.contains("\"editMessageMedia\""),
-        "raw.rs must use editMessageMedia endpoint"
-    );
-    assert!(
-        source.contains("message is not modified"),
-        "raw.rs must handle message is not modified cleanly"
-    );
+#[tokio::test]
+async fn media_download_refuses_private_targets_before_any_request() {
+    // SSRF policy: loopback and private targets are rejected up front.
+    for url in [
+        "http://127.0.0.1/file.png",
+        "http://10.0.0.1/file.png",
+        "http://[::1]/file.png",
+        "file:///etc/passwd",
+    ] {
+        assert!(
+            TelegramBotClient
+                .download_media_bytes_with_budget(url, 1024, Duration::from_secs(2))
+                .await
+                .is_none(),
+            "{url} must be refused"
+        );
+    }
 }

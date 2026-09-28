@@ -13,14 +13,61 @@ use super::models::{
     User,
 };
 use super::transport_policy::{
-    fallback_allowed_error, fallback_allowed_response, retry_delay_for_http_status,
-    retry_delay_from_error, retry_delay_from_response, MAX_TELEGRAM_ATTEMPTS,
+    fallback_allowed_error, fallback_allowed_response, is_idempotent_method,
+    retry_delay_for_http_status, retry_delay_for_idempotent_timeout, retry_delay_from_error,
+    retry_delay_from_response, MAX_TELEGRAM_ATTEMPTS,
 };
 
 pub use raw::TelegramDeliveryContext;
 
 const MAX_TELEGRAM_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_TELEGRAM_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+/// Telegram rejects messages longer than 4096 characters. Text longer than
+/// the threshold is split into chunks with headroom for HTML entity growth.
+pub(crate) const TELEGRAM_TEXT_SPLIT_THRESHOLD_CHARS: usize = 4000;
+pub(crate) const TELEGRAM_TEXT_CHUNK_CHARS: usize = 3800;
+/// Longest filename sent in a multipart upload.
+const MAX_UPLOAD_FILENAME_CHARS: usize = 128;
+
+/// Why a user file could not be downloaded from Telegram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileDownloadError {
+    /// Larger than the 20 MB Bot API download limit.
+    TooLarge,
+    /// The file id is invalid or the file is no longer available.
+    NotFound,
+    /// Transient transport failure; retrying may help.
+    Network,
+}
+
+/// Converts one rendered Telegram-HTML chunk back to readable plain text.
+fn html_chunk_to_plain_text(html: &str) -> String {
+    static RE_TAG: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"</?[^>]+>").expect("valid static regex"));
+    let stripped = RE_TAG.replace_all(html, "");
+    html_escape::decode_html_entities(&stripped)
+        .trim()
+        .to_string()
+}
+
+/// Normalizes a filename before it is placed in a multipart
+/// `Content-Disposition` header: strips path components, control characters
+/// and quotes, avoids hidden/empty names, and bounds the length. Names can
+/// come from model-generated documents.
+pub(crate) fn sanitize_upload_filename(raw: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    let cleaned: String = base
+        .chars()
+        .filter(|ch| {
+            !ch.is_control() && !matches!(ch, '"' | '\'' | ';' | '<' | '>' | '|' | '*' | '?' | ':')
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_start_matches('.').trim();
+    if trimmed.is_empty() {
+        return "file.bin".to_string();
+    }
+    crate::util::truncate_chars(trimmed, MAX_UPLOAD_FILENAME_CHARS)
+}
 
 enum HttpResponseOutcome {
     Success(Value),
@@ -31,7 +78,6 @@ enum HttpResponseOutcome {
 #[derive(Clone)]
 pub struct TelegramBotClient {
     inner: raw::TelegramBotClient,
-    token: String,
     base_url: String,
     client: Client,
 }
@@ -49,7 +95,7 @@ impl Deref for TelegramBotClient {
 impl TelegramBotClient {
     pub fn new(token: impl Into<String>) -> Self {
         let token = token.into().trim().to_string();
-        let inner = raw::TelegramBotClient::new(token.clone());
+        let inner = raw::TelegramBotClient;
         let base_url = format!("https://api.telegram.org/bot{token}");
         let client = Client::builder()
             .timeout(Duration::from_secs(45))
@@ -57,23 +103,20 @@ impl TelegramBotClient {
             .unwrap_or_else(|_| Client::new());
         Self {
             inner,
-            token,
             base_url,
             client,
         }
     }
 
-    pub fn with_base_url(token: impl Into<String>, base_url: impl Into<String>) -> Self {
-        let token = token.into().trim().to_string();
+    pub fn with_base_url(_token: impl Into<String>, base_url: impl Into<String>) -> Self {
         let base_url = base_url.into().trim().trim_end_matches('/').to_string();
-        let inner = raw::TelegramBotClient::with_base_url(token.clone(), base_url.clone());
+        let inner = raw::TelegramBotClient;
         let client = Client::builder()
             .timeout(Duration::from_secs(45))
             .build()
             .unwrap_or_else(|_| Client::new());
         Self {
             inner,
-            token,
             base_url,
             client,
         }
@@ -293,7 +336,14 @@ impl TelegramBotClient {
                 Self::reqwest_error_kind(error)
             )
         };
-        let delay = retry_delay_from_error(&normalized, attempt);
+        let delay = retry_delay_from_error(&normalized, attempt).or_else(|| {
+            // A timed-out request may already have been executed by Telegram,
+            // so only methods that are safe to repeat are retried; a timed-out
+            // send is reported instead of risking a duplicate message.
+            (error.is_timeout() && is_idempotent_method(method))
+                .then(|| retry_delay_for_idempotent_timeout(attempt))
+                .flatten()
+        });
         (delay, normalized)
     }
 
@@ -397,27 +447,48 @@ impl TelegramBotClient {
         serde_json::from_value(value).map_err(|error| error.to_string())
     }
 
-    pub async fn get_file_bytes(&self, file_id: &str) -> Option<(Vec<u8>, String)> {
-        let file_res = self.get_file(file_id).await.ok()?;
+    /// Downloads a file sent by the user. The error distinguishes "too big"
+    /// (tell the user the limit) from "gone" and transient network failures,
+    /// which previously all collapsed into the same `None`.
+    pub async fn get_file_bytes(
+        &self,
+        file_id: &str,
+    ) -> Result<(Vec<u8>, String), FileDownloadError> {
+        let file_res = self
+            .get_file(file_id)
+            .await
+            .map_err(|_| FileDownloadError::Network)?;
         if !file_res.ok {
-            return None;
+            return Err(FileDownloadError::NotFound);
         }
-        let info = file_res.result?;
+        let info = file_res.result.ok_or(FileDownloadError::NotFound)?;
         if info
             .file_size
             .and_then(|size| usize::try_from(size).ok())
             .is_some_and(|size| size > MAX_TELEGRAM_DOWNLOAD_BYTES)
         {
-            return None;
+            return Err(FileDownloadError::TooLarge);
         }
-        let file_path = info.file_path?;
+        // Telegram only exposes a path for files up to its 20 MB bot limit.
+        let file_path = info.file_path.ok_or(FileDownloadError::TooLarge)?;
+        // Derived from the API base URL so a self-hosted Bot API server is
+        // used for downloads too, not the public api.telegram.org.
         let url = format!(
-            "https://api.telegram.org/file/bot{}/{}",
-            self.token, file_path
+            "{}/{}",
+            self.base_url.replacen("/bot", "/file/bot", 1),
+            file_path
         );
-        let response = self.client.get(url).send().await.ok()?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| FileDownloadError::Network)?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(FileDownloadError::NotFound);
+        }
         if !response.status().is_success() {
-            return None;
+            return Err(FileDownloadError::Network);
         }
         let mut stream = response.bytes_stream();
         let initial_capacity = info
@@ -427,13 +498,13 @@ impl TelegramBotClient {
             .min(MAX_TELEGRAM_DOWNLOAD_BYTES);
         let mut bytes = Vec::with_capacity(initial_capacity);
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.ok()?;
+            let chunk = chunk.map_err(|_| FileDownloadError::Network)?;
             if bytes.len().saturating_add(chunk.len()) > MAX_TELEGRAM_DOWNLOAD_BYTES {
-                return None;
+                return Err(FileDownloadError::TooLarge);
             }
             bytes.extend_from_slice(&chunk);
         }
-        Some((bytes, file_path))
+        Ok((bytes, file_path))
     }
 
     pub async fn get_updates(
@@ -459,7 +530,12 @@ impl TelegramBotClient {
         chat_id: i64,
         user_id: i64,
     ) -> Result<ApiResponse<ChatMember>, String> {
-        self.inner.get_chat_member(chat_id, user_id).await
+        let payload = json!({
+            "chat_id": chat_id,
+            "user_id": user_id,
+        });
+        let value = self.post_json("getChatMember", payload).await?;
+        serde_json::from_value(value).map_err(|error| error.to_string())
     }
 
     pub async fn send_message(
@@ -471,8 +547,9 @@ impl TelegramBotClient {
         receiver_user_id: Option<i64>,
         reply_to_message_id: Option<i64>,
     ) -> Result<Value, String> {
-        let chunks = if text.chars().count() > 4000 {
-            self.inner.split_text_chunks(text, 3800)
+        let chunks = if text.chars().count() > TELEGRAM_TEXT_SPLIT_THRESHOLD_CHARS {
+            self.inner
+                .split_text_chunks(text, TELEGRAM_TEXT_CHUNK_CHARS)
         } else {
             vec![text.to_string()]
         };
@@ -523,17 +600,21 @@ impl TelegramBotClient {
         explanation_parse_mode: Option<&str>,
         reply_to_message_id: Option<i64>,
     ) -> Result<Value, String> {
+        // Bot API defaults `type` to "regular"; a quiz is only requested
+        // explicitly (it would be rejected without a correct answer anyway).
         let mut payload = json!({
             "chat_id": chat_id,
             "question": question,
             "options": options,
-            "type": poll_type.unwrap_or("quiz"),
+            "type": poll_type.unwrap_or("regular"),
         });
         if let Some(anon) = is_anonymous {
             payload["is_anonymous"] = json!(anon);
         }
         if let Some(correct_id) = correct_option_id {
-            payload["correct_option_id"] = json!(correct_id);
+            // Bot API 9.6 replaced `correct_option_id` with the array
+            // `correct_option_ids` (quizzes may now have several answers).
+            payload["correct_option_ids"] = json!([correct_id]);
         }
         if let Some(exp) = explanation.map(str::trim).filter(|s| !s.is_empty()) {
             payload["explanation"] = json!(exp);
@@ -686,7 +767,7 @@ impl TelegramBotClient {
                         self.apply_form_delivery_context(form, false, None, reply_to_message_id)?;
                     for (attach_name, bytes, mime, file_name) in &attachments {
                         let part = Part::bytes(bytes.clone())
-                            .file_name(file_name.clone())
+                            .file_name(sanitize_upload_filename(file_name))
                             .mime_str(mime)
                             .map_err(|error| error.to_string())?;
                         form = form.part(attach_name.clone(), part);
@@ -822,18 +903,34 @@ impl TelegramBotClient {
         reply_markup: Option<Value>,
         reply_to_message_id: Option<i64>,
     ) -> Result<Value, String> {
-        self.raw()
-            .send_document_bytes(
-                chat_id,
-                filename,
-                bytes,
-                mime_type,
-                caption,
-                parse_mode,
-                reply_markup,
-                reply_to_message_id,
-            )
-            .await
+        // Uses the shared multipart transport: bounded response reading and
+        // the same retry policy as every other Telegram call.
+        let filename = sanitize_upload_filename(filename);
+        let caption = caption.map(str::to_string);
+        let parse_mode = parse_mode.map(str::to_string);
+        let mime_type = mime_type.map(str::to_string);
+        self.post_multipart("sendDocument", || {
+            let mut part = Part::bytes(bytes.clone()).file_name(filename.clone());
+            if let Some(ref mime) = mime_type {
+                part = part
+                    .mime_str(mime)
+                    .map_err(|e| format!("MIME type tidak valid: {e}"))?;
+            }
+            let mut form = Form::new()
+                .text("chat_id", chat_id.to_string())
+                .part("document", part);
+            if let Some(ref cap) = caption {
+                form = form.text("caption", cap.clone());
+            }
+            if let Some(ref pm) = parse_mode {
+                form = form.text("parse_mode", pm.clone());
+            }
+            if let Some(ref rm) = reply_markup {
+                form = form.text("reply_markup", rm.to_string());
+            }
+            self.apply_form_delivery_context(form, true, None, reply_to_message_id)
+        })
+        .await
     }
 
     pub async fn send_document(
@@ -900,7 +997,7 @@ impl TelegramBotClient {
                 let parse_mode = parse_mode.map(str::to_string);
                 self.post_multipart(method, || {
                     let part = Part::bytes(bytes.clone())
-                        .file_name(file_name.clone())
+                        .file_name(sanitize_upload_filename(&file_name))
                         .mime_str(&mime)
                         .map_err(|error| error.to_string())?;
                     let mut form = Form::new()
@@ -1094,10 +1191,25 @@ impl TelegramBotClient {
         media: InputMedia,
         reply_markup: Option<InlineKeyboardMarkup>,
     ) -> Result<Value, String> {
-        // Delegate to raw client transport for editMessageMedia
-        self.raw()
-            .edit_message_media(chat_id, message_id, media, reply_markup)
-            .await
+        let media_json = serde_json::to_value(&media).map_err(|e| e.to_string())?;
+        let mut payload = json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "media": media_json,
+        });
+        if let Some(rm) = reply_markup {
+            payload["reply_markup"] = serde_json::to_value(rm).map_err(|e| e.to_string())?;
+        }
+
+        match self.post_json("editMessageMedia", payload).await {
+            Ok(res) => Ok(res),
+            Err(e) if e.to_ascii_lowercase().contains("message is not modified") => Ok(json!({
+                "ok": true,
+                "result": true,
+                "description": "message is not modified"
+            })),
+            Err(e) => Err(e),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1120,7 +1232,7 @@ impl TelegramBotClient {
         let mime = mime.to_string();
         self.post_multipart("editEphemeralMessageMedia", || {
             let part = Part::bytes(bytes.clone())
-                .file_name(file_name.clone())
+                .file_name(sanitize_upload_filename(&file_name))
                 .mime_str(&mime)
                 .map_err(|error| error.to_string())?;
             let mut form = Form::new()
@@ -1316,7 +1428,7 @@ impl TelegramBotClient {
             )?;
             for doc in &all_attachments {
                 let part = Part::bytes(doc.bytes.clone())
-                    .file_name(doc.filename.clone())
+                    .file_name(sanitize_upload_filename(&doc.filename))
                     .mime_str(&doc.mime_type)
                     .map_err(|error| error.to_string())?;
                 form = form.part(doc.attach_key.clone(), part);
@@ -1391,6 +1503,10 @@ impl TelegramBotClient {
         can_stop: bool,
         keep_on_stop: bool,
     ) -> Result<Value, String> {
+        // Bot API 10.3: "Direct upload of new files and explicit upload of
+        // files by a URL isn't supported" in drafts. Media in the streamed
+        // partial answer is shown as links until the final message is sent.
+        let rich_message = &self.prepare_draft_message(rich_message);
         rich_message.validate()?;
         let rich_json = serde_json::to_value(rich_message).map_err(|e| e.to_string())?;
         let mut payload = json!({
@@ -1415,15 +1531,36 @@ impl TelegramBotClient {
         if fallback_text.trim().is_empty() {
             fallback_text = "Thinking...".to_string();
         }
+        // The fallback is plain text: sending it with parse_mode=HTML made
+        // any `<` or `&` in the answer fail with "can't parse entities".
         self.send_message_draft(
             chat_id,
             draft_id,
             &fallback_text,
-            Some("HTML"),
+            None,
             can_stop,
             keep_on_stop,
         )
         .await
+    }
+
+    /// Makes a rich message safe to stream as a draft: remote media become
+    /// links and any other media (uploads, `attach://` references, albums)
+    /// is replaced by a short placeholder, because drafts accept neither.
+    pub(crate) fn prepare_draft_message(
+        &self,
+        rich_message: &InputRichMessage,
+    ) -> InputRichMessage {
+        let mut draft = self.inner.convert_remote_media_to_rich_links(rich_message);
+        for block in &mut draft.blocks {
+            if block.is_media() {
+                *block = crate::bot::models::RichBlock::Paragraph {
+                    text: Value::String("📎 Lampiran disiapkan…".to_string()),
+                };
+            }
+        }
+        draft.media = None;
+        draft
     }
 
     pub async fn send_message_draft(
@@ -1587,7 +1724,7 @@ impl TelegramBotClient {
                         )?;
                         for (attach_key, bytes, mime, fname) in &attachments {
                             let part = Part::bytes(bytes.clone())
-                                .file_name(fname.clone())
+                                .file_name(sanitize_upload_filename(fname))
                                 .mime_str(mime)
                                 .map_err(|e| e.to_string())?;
                             form = form.part(attach_key.clone(), part);
@@ -1692,17 +1829,17 @@ impl TelegramBotClient {
 
         let html_chunks = self
             .inner
-            .render_blocks_to_html_chunks(&rich_message.blocks, 3800);
+            .render_blocks_to_html_chunks(&rich_message.blocks, TELEGRAM_TEXT_CHUNK_CHARS);
         let total = html_chunks.len();
         let mut html_last = json!({ "ok": true });
-        let mut html_failed = false;
-        for (idx, chunk) in html_chunks.into_iter().enumerate() {
+        let mut delivered_html_chunks = 0usize;
+        for (idx, chunk) in html_chunks.iter().enumerate() {
             let is_last = idx + 1 == total;
             let is_first = idx == 0;
             match self
                 .send_message(
                     chat_id,
-                    &chunk,
+                    chunk,
                     Some("HTML"),
                     if is_last { reply_markup.clone() } else { None },
                     receiver_user_id,
@@ -1710,27 +1847,43 @@ impl TelegramBotClient {
                 )
                 .await
             {
-                Ok(response) => html_last = response,
+                Ok(response) => {
+                    html_last = response;
+                    delivered_html_chunks += 1;
+                }
                 Err(error) => {
                     tracing::info!(
-                        "HTML fallback failed ({error}); degrading to semantic plain text."
+                        "HTML fallback failed at part {} of {total} ({error}); degrading the rest to semantic plain text.",
+                        idx + 1
                     );
-                    html_failed = true;
                     break;
                 }
             }
         }
-        if !html_failed {
+        if delivered_html_chunks == total {
             return Ok(html_last);
         }
 
-        let plain = rich_message.extract_plain_text();
-        let plain_chunks = self.inner.split_text_chunks(&plain, 3800);
+        // Only the undelivered remainder is re-sent as plain text. Re-sending
+        // the whole message after a mid-way failure duplicated the parts the
+        // user had already received.
+        let plain = if delivered_html_chunks == 0 {
+            rich_message.extract_plain_text()
+        } else {
+            html_chunks[delivered_html_chunks..]
+                .iter()
+                .map(|chunk| html_chunk_to_plain_text(chunk))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+        let plain_chunks = self
+            .inner
+            .split_text_chunks(&plain, TELEGRAM_TEXT_CHUNK_CHARS);
         let total = plain_chunks.len();
-        let mut last = json!({ "ok": true });
+        let mut last = html_last;
         for (idx, chunk) in plain_chunks.into_iter().enumerate() {
             let is_last = idx + 1 == total;
-            let is_first = idx == 0;
+            let is_first = idx == 0 && delivered_html_chunks == 0;
             last = self
                 .send_message(
                     chat_id,
@@ -1792,3 +1945,7 @@ impl TelegramBotClient {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "client/tests.rs"]
+mod tests;

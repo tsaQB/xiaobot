@@ -9,8 +9,10 @@ pub mod wa_inbox;
 pub use inbox::{
     enqueue_telegram_update_async, load_telegram_offset_async, mark_telegram_processed_async,
     mark_telegram_processing_async, mark_telegram_processing_claim_async,
-    mark_telegram_processing_failed_async, mark_telegram_processing_retry_async,
-    pending_telegram_updates_after_async, recover_telegram_processing_async, TelegramInboxRecord,
+    mark_telegram_processing_failed_async, mark_telegram_processing_released_async,
+    mark_telegram_processing_retry_async, pending_telegram_updates_after_async,
+    quarantine_telegram_update_async, recover_telegram_processing_async,
+    skip_telegram_update_async, TelegramInboxRecord,
 };
 #[allow(unused_imports)]
 pub use memory::{
@@ -34,9 +36,8 @@ pub use secrets::{load_app_setting, save_app_setting};
 pub use session::{
     clear_scoped_messages, clear_scoped_messages_async, count_scoped_messages,
     count_scoped_messages_async, get_scoped_summary, get_scoped_summary_async,
-    load_scoped_messages, load_scoped_messages_async, save_scoped_message,
-    save_scoped_message_async, save_scoped_summary, save_scoped_summary_async, ChatMessage,
-    ChatSession,
+    load_scoped_messages, load_scoped_messages_async, save_scoped_summary,
+    save_scoped_summary_async, save_scoped_turn_async, ChatMessage, ChatSession,
 };
 #[allow(unused_imports)]
 pub(crate) use session::{
@@ -49,10 +50,11 @@ pub(crate) use session::{
 
 #[allow(unused_imports)]
 pub use wa_inbox::{
-    enqueue_whatsapp_message_async, mark_whatsapp_processed_async,
+    enqueue_whatsapp_messages_async, mark_whatsapp_processed_async,
     mark_whatsapp_processing_claim_async, mark_whatsapp_processing_failed_async,
-    mark_whatsapp_processing_retry_async, pending_whatsapp_messages_async,
-    recover_whatsapp_processing_async, WhatsAppInboxRecord,
+    mark_whatsapp_processing_released_async, mark_whatsapp_processing_retry_async,
+    pending_whatsapp_messages_async, recover_whatsapp_processing_async, WhatsAppInboxEntry,
+    WhatsAppInboxRecord,
 };
 
 #[cfg(test)]
@@ -131,8 +133,39 @@ pub(crate) fn harden_file_mode(path: &std::path::Path) {
     }
 }
 
+/// Windows has no mode bits. Files under the per-user profile inherit an ACL
+/// that grants access only to the user, SYSTEM and Administrators, which is
+/// the equivalent protection; nothing further is applied here.
 #[cfg(not(unix))]
 pub(crate) fn harden_file_mode(_path: &std::path::Path) {}
+
+/// Creates `path` with owner-only permissions if it does not exist yet, so a
+/// library that later opens it never gets a window where the file carries the
+/// default (often world-readable) mode.
+pub(crate) fn ensure_private_file(path: &std::path::Path) {
+    if path.exists() {
+        harden_file_mode(path);
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            warn!("Failed to create XiaoAI data directory: {err}");
+        }
+        harden_dir_mode(parent);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Err(err) = options.open(path) {
+        if err.kind() != std::io::ErrorKind::AlreadyExists {
+            warn!("Failed to pre-create private data file: {err}");
+        }
+    }
+}
 
 pub(crate) fn session_db_path() -> std::path::PathBuf {
     xiao_data_dir().join("xiaoai.db")

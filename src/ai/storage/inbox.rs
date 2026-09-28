@@ -171,6 +171,57 @@ fn mark_telegram_processing_failed_on_conn(
     )? == 1)
 }
 
+/// Quarantines an update that is still `pending` (not yet claimed). Startup
+/// quarantine previously went through the `processing`-only transition and
+/// therefore never changed anything, leaving poison updates pending forever.
+fn quarantine_telegram_update_on_conn(
+    conn: &Connection,
+    update_id: i64,
+    reason: &str,
+) -> rusqlite::Result<bool> {
+    Ok(conn.execute(
+        "UPDATE telegram_inbox
+         SET status='failed',last_error=?2
+         WHERE update_id=?1 AND status IN ('pending','processing')",
+        params![update_id, reason],
+    )? == 1)
+}
+
+pub async fn quarantine_telegram_update_async(update_id: i64, reason: &str) -> bool {
+    let reason = reason.to_string();
+    run_db("quarantine_telegram_update", move || {
+        let conn = open_session_db()?;
+        quarantine_telegram_update_on_conn(&conn, update_id, &reason)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Marks an update that never needs processing (non-owner traffic, stale
+/// control updates) as completed straight from `pending`.
+fn skip_telegram_update_on_conn(conn: &Connection, update_id: i64) -> rusqlite::Result<bool> {
+    let scrubbed = serde_json::json!({
+        "update_id": update_id,
+        "payload": "redacted_after_completion"
+    })
+    .to_string();
+    Ok(conn.execute(
+        "UPDATE telegram_inbox
+         SET status='completed',payload_json=?2,last_error=NULL
+         WHERE update_id=?1 AND status IN ('pending','processing')",
+        params![update_id, scrubbed],
+    )? == 1)
+}
+
+pub async fn skip_telegram_update_async(update_id: i64) -> bool {
+    run_db("skip_telegram_update", move || {
+        let conn = open_session_db()?;
+        skip_telegram_update_on_conn(&conn, update_id)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 fn mark_telegram_processing_failed_db(update_id: i64, reason: &str) -> rusqlite::Result<bool> {
     let conn = open_session_db()?;
     mark_telegram_processing_failed_on_conn(&conn, update_id, reason)
@@ -246,6 +297,33 @@ pub async fn mark_telegram_processing_retry_async(update_id: i64, reason: &str) 
     let reason = reason.to_string();
     run_db("mark_telegram_processing_retry", move || {
         mark_telegram_processing_retry_db(update_id, &reason)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Returns an in-flight update to `pending` without charging the attempt, for
+/// work that was interrupted by a shutdown rather than by a failure. Keeping
+/// the attempt counter unchanged prevents repeated restarts from quarantining
+/// a perfectly good message.
+fn mark_telegram_processing_released_on_conn(
+    conn: &Connection,
+    update_id: i64,
+    reason: &str,
+) -> rusqlite::Result<bool> {
+    Ok(conn.execute(
+        "UPDATE telegram_inbox
+         SET status='pending',attempts=MAX(attempts-1,0),last_error=?2
+         WHERE update_id=?1 AND status='processing'",
+        params![update_id, reason],
+    )? == 1)
+}
+
+pub async fn mark_telegram_processing_released_async(update_id: i64, reason: &str) -> bool {
+    let reason = reason.to_string();
+    run_db("mark_telegram_processing_released", move || {
+        let conn = open_session_db()?;
+        mark_telegram_processing_released_on_conn(&conn, update_id, &reason)
     })
     .await
     .unwrap_or(false)

@@ -89,7 +89,6 @@ struct TimelineState {
     partial_answer: String,
     last_sync_time: Option<Instant>,
     stopped: bool,
-    is_failed: bool,
     placeholder_message_id: Option<i64>,
     last_synced_status: Option<String>,
     ticker_epoch: u64,
@@ -102,7 +101,6 @@ impl TimelineState {
             partial_answer: String::new(),
             last_sync_time: None,
             stopped: false,
-            is_failed: false,
             placeholder_message_id: None,
             last_synced_status: None,
             ticker_epoch: 0,
@@ -544,15 +542,14 @@ impl ExecutionTimeline {
         attached_files: Vec<crate::bot::models::StagedDocument>,
     ) -> Result<serde_json::Value, String> {
         let _sync_guard = self.inner.sync_lock.lock().await;
-        let (placeholder_msg_id, is_failed) = {
+        // A failed timeline still gets its final answer: private drafts are
+        // ephemeral (~30 s), so skipping finalization used to make provider
+        // errors and interrupted answers vanish from the chat entirely.
+        let placeholder_msg_id = {
             let mut state = self.lock_state();
             state.stopped = true;
-            (state.placeholder_message_id.take(), state.is_failed)
+            state.placeholder_message_id.take()
         };
-
-        if is_failed {
-            return Ok(serde_json::json!({"ok": true, "failed": true}));
-        }
 
         let reply_to_msg_id = self.inner.reply_to_message_id;
         let reply_markup: Option<serde_json::Value> = None;
@@ -701,11 +698,24 @@ impl GenerationProgressSink for ExecutionTimeline {
     }
 
     fn on_failure(&self, error: &str, force_sync: bool) {
+        // `force_sync` failures (provider unreachable, API error, interrupted
+        // stream) are followed by a final answer from the router, which
+        // replaces the placeholder with the partial text plus the warning.
+        // Only cancellations (`force_sync == false`) end without a final
+        // answer, so only they consume the group placeholder here.
+        if force_sync {
+            // No extra draft sync here: the final message follows immediately,
+            // and a late draft update could reappear under it as a ghost draft.
+            let mut state = self.lock_state();
+            state.fail_current();
+            state.stopped = true;
+            return;
+        }
+
         let (placeholder_msg_id, is_group) = {
             let mut state = self.lock_state();
             state.fail_current();
             state.stopped = true;
-            state.is_failed = true;
             (
                 state.placeholder_message_id.take(),
                 matches!(self.inner.mode, TimelineMode::GroupProgressive),
@@ -745,8 +755,6 @@ impl GenerationProgressSink for ExecutionTimeline {
                 })
                 .await;
             });
-        } else if force_sync {
-            self.trigger_sync(true);
         }
     }
 
@@ -913,15 +921,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalize_answer_skips_when_failed() {
-        let bot = TelegramBotClient::new("dummy");
-        let tl = ExecutionTimeline::for_chat(bot, -1001234567, 12345, 2, 10, false, Some(999));
-        tl.on_failure("Network timeout", false);
-        let rich = InputRichMessage::new(vec![]);
-        let res = tl.finalize_answer(&rich).await;
-        assert!(res.is_ok());
-        let val = res.expect("finalize_answer succeeds");
-        assert_eq!(val.get("failed").and_then(Value::as_bool), Some(true));
+    async fn failed_private_generation_still_persists_its_final_answer() {
+        // Private drafts are ephemeral, so a provider failure or interrupted
+        // stream must still end in a real message the owner can read later.
+        let fake = crate::bot::test_support::FakeTelegram::always_ok().await;
+        let tl = ExecutionTimeline::for_chat(fake.client.clone(), 12345, 12345, 7, 10, true, None);
+        tl.on_failure("Provider stream interrupted", true);
+        let rich = InputRichMessage::new(vec![RichBlock::Paragraph {
+            text: Value::String("Jawaban sebagian\n\n⚠️ Stream terputus".to_string()),
+        }]);
+        tl.finalize_answer(&rich)
+            .await
+            .expect("final answer is sent after a failure");
+        let methods = fake.methods();
+        assert!(
+            methods.iter().any(|method| method == "sendRichMessage"),
+            "expected a persistent sendRichMessage, got {methods:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_group_generation_replaces_placeholder_with_final_answer() {
+        let fake = crate::bot::test_support::FakeTelegram::always_ok().await;
+        let tl = ExecutionTimeline::for_chat(
+            fake.client.clone(),
+            -1001234567,
+            12345,
+            8,
+            10,
+            false,
+            Some(999),
+        );
+        tl.inner.lock_state().placeholder_message_id = Some(55);
+        tl.on_failure("API status 500", true);
+        let rich = InputRichMessage::new(vec![RichBlock::Paragraph {
+            text: Value::String("⚠️ Provider tidak merespons.".to_string()),
+        }]);
+        tl.finalize_answer(&rich)
+            .await
+            .expect("final answer delivered");
+        let requests = fake.requests();
+        let edit = requests
+            .iter()
+            .find(|request| request.method == "editMessageText")
+            .expect("placeholder is edited into the final answer");
+        assert_eq!(edit.json["message_id"], 55);
     }
 
     #[test]

@@ -17,6 +17,107 @@ static RE_ITALIC_UNDERSCORE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RE_STRIKE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"~~(.+?)~~").expect("valid regex"));
+static RE_CODE_SEGMENT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)```[a-zA-Z0-9_-]*\n?(.*?)```|`([^`\n]+)`").expect("valid regex")
+});
+static RE_MEDIA_TAG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)<(img|audio|video|tg-photo|tg-video|tg-audio|tg-document|document)\b[^>]*>")
+        .expect("valid regex")
+});
+static RE_GALLERY_OPEN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<(tg-collage|tg-slideshow)\b[^>]*>").expect("valid regex"));
+static RE_MEDIA_CLOSE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)</(?:audio|video|tg-photo|tg-video|tg-audio|tg-document|document|tg-collage|tg-slideshow|tg-map)\s*>",
+    )
+    .expect("valid regex")
+});
+static RE_MAP_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<tg-map\b[^>]*>").expect("valid regex"));
+static RE_ATTACHED_DOC: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[(?:document|dokumen):\s*([^\]]+)\]\(attach://[^)\s]+\)").expect("valid regex")
+});
+static RE_MD_IMAGE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"!\[([^\]]*)\]\((https?://[^)\s]+)\)").expect("valid regex"));
+static RE_MD_LINK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\((https?://[^)\s]+)\)").expect("valid regex"));
+
+/// Converts Telegram-oriented media markup produced by tools (`<img>`,
+/// `<audio>`, `<tg-map>`, `<tg-collage>`, `[document: x](attach://y)`) and
+/// Markdown links into plain text WhatsApp can show. Documents staged with
+/// `attach://` are delivered as separate WhatsApp files, so only their name
+/// is kept inline.
+pub fn render_media_markup_for_whatsapp(text: &str) -> String {
+    use crate::parser::markdown::extract_html_attribute;
+
+    let docs = RE_ATTACHED_DOC.replace_all(text, "📎 $1");
+    let maps = RE_MAP_TAG.replace_all(&docs, |caps: &regex::Captures| {
+        let tag = &caps[0];
+        let lat = extract_html_attribute(tag, "lat").unwrap_or_default();
+        let lon = extract_html_attribute(tag, "lon").unwrap_or_default();
+        let title = extract_html_attribute(tag, "title").unwrap_or("Lokasi");
+        if lat.is_empty() || lon.is_empty() {
+            String::new()
+        } else {
+            format!("\n📍 {title}: https://maps.google.com/?q={lat},{lon}\n")
+        }
+    });
+    let galleries = RE_GALLERY_OPEN.replace_all(&maps, |caps: &regex::Captures| {
+        extract_html_attribute(&caps[0], "caption")
+            .map(|caption| format!("\n🖼️ {}\n", caption.replace("&quot;", "\"")))
+            .unwrap_or_else(|| "\n".to_string())
+    });
+    let media = RE_MEDIA_TAG.replace_all(&galleries, |caps: &regex::Captures| {
+        let tag = &caps[0];
+        let kind = caps[1].to_ascii_lowercase();
+        let Some(url) = extract_html_attribute(tag, "src")
+            .or_else(|| extract_html_attribute(tag, "url"))
+            .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+        else {
+            return String::new();
+        };
+        let label = extract_html_attribute(tag, "caption")
+            .or_else(|| extract_html_attribute(tag, "title"))
+            .map(|label| label.replace("&quot;", "\""));
+        let icon = if kind.contains("audio") {
+            "🎵"
+        } else if kind.contains("video") {
+            "🎬"
+        } else if kind.contains("document") {
+            "📎"
+        } else {
+            "🖼️"
+        };
+        match label {
+            Some(label) if !label.trim().is_empty() => format!("\n{icon} {label}: {url}\n"),
+            _ => format!("\n{icon} {url}\n"),
+        }
+    });
+    let closed = RE_MEDIA_CLOSE.replace_all(&media, "");
+    let images = RE_MD_IMAGE.replace_all(&closed, |caps: &regex::Captures| {
+        let alt = caps[1].trim();
+        if alt.is_empty() {
+            format!("🖼️ {}", &caps[2])
+        } else {
+            format!("🖼️ {alt}: {}", &caps[2])
+        }
+    });
+    let links = RE_MD_LINK.replace_all(&images, |caps: &regex::Captures| {
+        let label = caps[1].trim();
+        let url = &caps[2];
+        if let Some(name) = label
+            .strip_prefix("document:")
+            .or_else(|| label.strip_prefix("dokumen:"))
+        {
+            format!("📎 {}: {url}", name.trim())
+        } else if label == url {
+            url.to_string()
+        } else {
+            format!("{label} ({url})")
+        }
+    });
+    links.into_owned()
+}
 
 /// Mengonversi teks Markdown umum (CommonMark) menjadi format WhatsApp Markdown.
 ///
@@ -31,10 +132,8 @@ pub fn format_for_whatsapp(input: &str) -> String {
     // 1. Ekstrak blok kode (fenced) dan inline code terlebih dahulu agar konten di dalamnya terlindungi
     let mut segments = Vec::new();
     let mut last_idx = 0;
-    let code_pattern =
-        Regex::new(r"(?s)```[a-zA-Z0-9_-]*\n?(.*?)```|`([^`\n]+)`").expect("valid regex");
 
-    for mat in code_pattern.find_iter(input) {
+    for mat in RE_CODE_SEGMENT.find_iter(input) {
         if mat.start() > last_idx {
             segments.push((false, &input[last_idx..mat.start()]));
         }
@@ -51,8 +150,11 @@ pub fn format_for_whatsapp(input: &str) -> String {
         if is_code {
             output.push_str(text);
         } else {
+            // Tag media gaya Telegram (hasil tool) tidak dapat dirender WhatsApp;
+            // ubah menjadi tautan/label yang terbaca sebelum format Markdown.
+            let c0 = render_media_markup_for_whatsapp(text);
             // Gunakan Cow dari hasil replace_all untuk menghindari alokasi String yang tidak perlu (Shallow Modules fix)
-            let c1 = RE_HEADER.replace_all(text, "\x01$1\x01");
+            let c1 = RE_HEADER.replace_all(&c0, "\x01$1\x01");
             let c2 = RE_BULLET.replace_all(&c1, "• $1");
             let c3 = RE_STRIKE.replace_all(&c2, "~$1~");
             let c4 = RE_BOLD_ITALIC.replace_all(&c3, |caps: &regex::Captures| {
@@ -99,18 +201,25 @@ pub fn chunk_whatsapp_message(text: &str, max_len: usize) -> Vec<String> {
 
     let mut chunks = Vec::new();
     let mut current = String::new();
+    // Character counts are tracked incrementally; recounting `current` for
+    // every piece made long replies cost O(n * max_len).
+    let mut current_chars = 0usize;
 
     for line in text.lines() {
         for piece in split_oversized_line(line, max_len) {
-            let projected = current.chars().count() + piece.chars().count() + 1;
+            let piece_chars = piece.chars().count();
+            let projected = current_chars + piece_chars + 1;
             if projected > max_len && !current.is_empty() {
                 chunks.push(current.trim_end().to_string());
                 current = String::new();
+                current_chars = 0;
             }
             if !current.is_empty() {
                 current.push('\n');
+                current_chars += 1;
             }
             current.push_str(&piece);
+            current_chars += piece_chars;
         }
     }
 
@@ -134,11 +243,14 @@ fn split_oversized_line(line: &str, max_len: usize) -> Vec<String> {
 
     let mut pieces = Vec::new();
     let mut buffer = String::new();
+    let mut buffer_chars = 0usize;
     for ch in line.chars() {
-        if buffer.chars().count() >= max_len {
+        if buffer_chars >= max_len {
             pieces.push(std::mem::take(&mut buffer));
+            buffer_chars = 0;
         }
         buffer.push(ch);
+        buffer_chars += 1;
     }
     if !buffer.is_empty() {
         pieces.push(buffer);
@@ -178,6 +290,39 @@ mod tests {
         let res = format_for_whatsapp(input);
         assert!(res.contains("```rust\nlet x = **tidak_diubah**;\n```"));
         assert!(res.contains("`inline *code*`"));
+    }
+
+    #[test]
+    fn telegram_media_markup_becomes_readable_whatsapp_text() {
+        let input = "Ini fotonya:\n<img src=\"https://ex.com/a.jpg\" caption=\"Gunung\"/>\n\
+            <tg-map lat=\"-8.41\" lon=\"116.45\" zoom=\"13\" title=\"Rinjani\"/>\n\
+            [document: laporan.pdf](attach://doc_1)\n[Sumber](https://ex.com/src)";
+        let output = format_for_whatsapp(input);
+        assert!(
+            output.contains("🖼️ Gunung: https://ex.com/a.jpg"),
+            "{output}"
+        );
+        assert!(output.contains("📍 Rinjani: https://maps.google.com/?q=-8.41,116.45"));
+        assert!(output.contains("📎 laporan.pdf"));
+        assert!(!output.contains("attach://"));
+        assert!(output.contains("Sumber (https://ex.com/src)"));
+        assert!(!output.contains('<'));
+    }
+
+    #[test]
+    fn media_markup_inside_code_is_left_untouched() {
+        let output = format_for_whatsapp("```html\n<img src=\"https://ex.com/a.jpg\"/>\n```");
+        assert!(output.contains("<img src=\"https://ex.com/a.jpg\"/>"));
+    }
+
+    #[test]
+    fn chunking_a_very_long_line_is_linear() {
+        let long = "a".repeat(2_000_000);
+        let started = std::time::Instant::now();
+        let chunks = chunk_whatsapp_message(&long, 3500);
+        assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 3500));
+        assert_eq!(chunks.iter().map(|c| c.len()).sum::<usize>(), long.len());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

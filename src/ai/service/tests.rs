@@ -735,6 +735,8 @@ fn isolated_service(provider: ProviderConfig) -> AIChatService {
         capability_registry: Default::default(),
         model_routing: Default::default(),
         model_metadata: Default::default(),
+        curator_gate: Default::default(),
+        shutting_down: Default::default(),
     }
 }
 

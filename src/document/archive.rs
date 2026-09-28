@@ -4,6 +4,22 @@ use zip::ZipArchive;
 pub const MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES: usize = 30 * 1024 * 1024;
 pub const MAX_ARCHIVE_SINGLE_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_ARCHIVE_OUTPUT_CHARS: usize = 1_500_000;
+/// Maximum entries listed per archive. A ZIP central directory can describe
+/// hundreds of thousands of empty entries within the 20 MB download limit;
+/// listing stops here instead of building an unbounded inventory.
+pub const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+
+fn entry_limit_reached(items_len: usize, budget: &mut ArchiveExtractionBudget) -> bool {
+    if items_len < MAX_ARCHIVE_ENTRIES {
+        return false;
+    }
+    if budget.budget_exhausted.is_none() {
+        budget.budget_exhausted = Some(format!(
+            "Arsip berisi lebih dari {MAX_ARCHIVE_ENTRIES} entri; sisanya tidak ditampilkan."
+        ));
+    }
+    true
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveKind {
@@ -369,6 +385,9 @@ fn extract_zip(
     let mut budget = ArchiveExtractionBudget::default();
 
     for index in 0..archive.len() {
+        if entry_limit_reached(items.len(), &mut budget) {
+            break;
+        }
         let mut file = archive
             .by_index(index)
             .map_err(|err| format!("Gagal membaca entri ZIP index {index}: {err}"))?;
@@ -453,6 +472,9 @@ fn extract_tar(
         .map_err(|err| format!("TAR invalid: {err}"))?;
 
     for entry_res in entries {
+        if entry_limit_reached(items.len(), &mut budget) {
+            break;
+        }
         let mut entry = entry_res.map_err(|err| format!("Entri TAR invalid: {err}"))?;
         let entry_type = entry.header().entry_type();
 
@@ -507,6 +529,9 @@ fn extract_7z(data: &[u8]) -> Result<(Vec<ExtractedArchiveItem>, ArchiveExtracti
 
     reader
         .for_each_entries(|entry, entry_reader| {
+            if entry_limit_reached(items.len(), &mut budget) {
+                return Ok(false);
+            }
             // Skip symlinks (POSIX attribute 0o120000 or Windows 0x400)
             let is_symlink = entry.has_windows_attributes
                 && (((entry.windows_attributes >> 16) & 0o170000 == 0o120000)

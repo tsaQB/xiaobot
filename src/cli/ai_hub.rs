@@ -482,6 +482,25 @@ pub(crate) async fn run_cli_provider_remove(ai_service: &AIChatService) {
             );
             return;
         }
+        // Removing a provider also drops its stored API key; confirm first.
+        let confirm_options = vec![
+            format!("Yes, remove '{}'", target.name),
+            "Cancel".to_string(),
+        ];
+        let confirmed = terminal_interactive_select(
+            &format!(
+                "Remove provider '{}' ({}) and its stored API key?",
+                target.name, target.endpoint
+            ),
+            &confirm_options,
+            1,
+            false,
+            None,
+        );
+        if confirmed != Some(0) {
+            println!("\n\x1b[38;5;244mRemoval cancelled.\x1b[0m\n");
+            return;
+        }
         let removed = store.providers.remove(idx);
         if store.active_id.as_deref() == Some(removed.id.as_str()) {
             store.active_id = store.providers.first().map(|p| p.id.clone());

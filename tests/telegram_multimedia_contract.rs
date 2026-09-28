@@ -42,73 +42,11 @@ use tools::{
 };
 
 // ==============================================================================
-// Carousel Contract Test Helpers
+// NOTE: helpers named `*_contract` below model Bot API rules for scenarios that
+// have no production code path in this crate (it only includes models, tools
+// and the URL policy). Behaviour of the real Telegram client is covered by
+// `src/bot/client/tests.rs`, which runs against a fake Bot API server.
 // ==============================================================================
-
-fn format_carousel_callback_data(id: &str, index: usize, action: &str) -> String {
-    format!("carousel:{id}:{index}:{action}")
-}
-
-fn parse_carousel_callback_data(data: &str) -> Result<(&str, usize, &str), String> {
-    if data.len() > 64 {
-        return Err(format!(
-            "callback_data exceeds Telegram 64-byte limit: {} bytes",
-            data.len()
-        ));
-    }
-    let parts: Vec<&str> = data.split(':').collect();
-    if parts.len() != 4 || parts[0] != "carousel" {
-        return Err(format!("Invalid carousel callback format: {data}"));
-    }
-    let id = parts[1];
-    if id.trim().is_empty() {
-        return Err("Empty carousel ID".to_string());
-    }
-    let index = parts[2]
-        .parse::<usize>()
-        .map_err(|e| format!("Invalid slide index: {e}"))?;
-    let action = parts[3];
-    if action != "prev" && action != "next" && action != "noop" {
-        return Err(format!("Invalid action: {action}"));
-    }
-    Ok((id, index, action))
-}
-
-fn build_carousel_keyboard_contract(
-    id: &str,
-    current_index: usize,
-    total_slides: usize,
-) -> Result<InlineKeyboardMarkup, String> {
-    if total_slides == 0 {
-        return Err("total_slides must be > 0".to_string());
-    }
-    let prev_index = if current_index == 0 {
-        total_slides - 1
-    } else {
-        current_index - 1
-    };
-    let next_index = if current_index + 1 >= total_slides {
-        0
-    } else {
-        current_index + 1
-    };
-
-    let prev_data = format_carousel_callback_data(id, prev_index, "prev");
-    let indicator_data = format_carousel_callback_data(id, current_index, "noop");
-    let next_data = format_carousel_callback_data(id, next_index, "next");
-
-    if prev_data.len() > 64 || indicator_data.len() > 64 || next_data.len() > 64 {
-        return Err("Button callback_data exceeds Telegram 64-byte limit".to_string());
-    }
-
-    let indicator_text = format!("{}/{}", current_index + 1, total_slides);
-    let row = vec![
-        InlineKeyboardButton::callback("⬅️", prev_data),
-        InlineKeyboardButton::callback(indicator_text, indicator_data),
-        InlineKeyboardButton::callback("➡️", next_data),
-    ];
-    Ok(InlineKeyboardMarkup::new(vec![row]))
-}
 
 fn sample_photo(id: &str) -> InputMedia {
     InputMedia::Photo {
@@ -124,23 +62,11 @@ fn sample_photo(id: &str) -> InputMedia {
 // Rich Message Contract Test Helpers
 // ==============================================================================
 
+/// Delegates to the production validator. This used to be a separate copy
+/// that allowed `-` while production rejected it, so the suite passed while
+/// real messages with hyphenated media ids were refused.
 fn validate_rich_media_id_contract(id: &str) -> Result<(), String> {
-    if id.is_empty() {
-        return Err("Media ID must not be empty (minimum 1 character)".to_string());
-    }
-    if id.len() > 64 {
-        return Err(format!(
-            "Media ID exceeds Telegram limit of 64 characters: {} characters",
-            id.len()
-        ));
-    }
-    if !id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(format!("Media ID contains invalid characters: '{id}'"));
-    }
-    Ok(())
+    InputRichMessageMedia::validate_id(id)
 }
 
 fn validate_rich_message_media_list_contract(
@@ -407,50 +333,6 @@ fn build_multipart_rich_message_form_contract(
 // ==============================================================================
 
 #[test]
-fn test_edit_message_media_wire_format_serialization() {
-    let media = InputMedia::Photo {
-        media: "https://example.com/slide2.jpg".to_string(),
-        caption: Some("Slide 2 of 5: Architecture Diagram".to_string()),
-        parse_mode: Some("HTML".to_string()),
-        show_caption_above_media: Some(true),
-        has_spoiler: Some(false),
-    };
-
-    let keyboard = build_carousel_keyboard_contract("c_101", 1, 5)
-        .expect("carousel keyboard construction must succeed");
-
-    let payload = json!({
-        "chat_id": 123456789_i64,
-        "message_id": 98765_i64,
-        "media": media,
-        "reply_markup": keyboard,
-    });
-
-    assert_eq!(payload["chat_id"], 123456789_i64);
-    assert_eq!(payload["message_id"], 98765_i64);
-    assert_eq!(payload["media"]["type"], "photo");
-    assert_eq!(payload["media"]["media"], "https://example.com/slide2.jpg");
-    assert_eq!(
-        payload["media"]["caption"],
-        "Slide 2 of 5: Architecture Diagram"
-    );
-    assert_eq!(payload["media"]["parse_mode"], "HTML");
-    assert_eq!(payload["media"]["show_caption_above_media"], true);
-    assert_eq!(payload["media"]["has_spoiler"], false);
-
-    let buttons = payload["reply_markup"]["inline_keyboard"][0]
-        .as_array()
-        .expect("keyboard row array");
-    assert_eq!(buttons.len(), 3);
-    assert_eq!(buttons[0]["text"], "⬅️");
-    assert_eq!(buttons[0]["callback_data"], "carousel:c_101:0:prev");
-    assert_eq!(buttons[1]["text"], "2/5");
-    assert_eq!(buttons[1]["callback_data"], "carousel:c_101:1:noop");
-    assert_eq!(buttons[2]["text"], "➡️");
-    assert_eq!(buttons[2]["callback_data"], "carousel:c_101:2:next");
-}
-
-#[test]
 fn test_edit_message_media_wire_format_omits_optional_reply_markup() {
     let media = InputMedia::Photo {
         media: "https://example.com/single.png".to_string(),
@@ -706,132 +588,6 @@ fn test_send_collage_album_homogeneity_prohibited_combinations() {
 // ==============================================================================
 // GROUP 3: Carousel callback data formatting, round-trip parsing, and strict < 64 bytes boundary
 // ==============================================================================
-
-#[test]
-fn test_carousel_callback_data_within_64_bytes_standard_ids() {
-    // 8-char nanoid
-    let cb_nano = format_carousel_callback_data("a1b2c3d4", 0, "prev");
-    assert!(cb_nano.len() <= 64);
-    assert_eq!(cb_nano.len(), 24);
-
-    // 16-char hex id
-    let cb_16 = format_carousel_callback_data("0123456789abcdef", 9, "next");
-    assert!(cb_16.len() <= 64);
-    assert_eq!(cb_16.len(), 32);
-
-    // 36-char UUID v4
-    let uuid = "550e8400-e29b-41d4-a716-446655440000";
-    let cb_uuid = format_carousel_callback_data(uuid, 9, "next");
-    assert!(cb_uuid.len() <= 64);
-    assert_eq!(cb_uuid.len(), 52);
-
-    // Parse back
-    let (id, idx, action) =
-        parse_carousel_callback_data(&cb_uuid).expect("uuid callback parse must succeed");
-    assert_eq!(id, uuid);
-    assert_eq!(idx, 9);
-    assert_eq!(action, "next");
-}
-
-#[test]
-fn test_carousel_callback_data_exact_64_byte_boundary() {
-    // "carousel:" (9 bytes) + id (48 bytes) + ":0:next" (7 bytes) = exactly 64 bytes
-    let id_48 = "a".repeat(48);
-    let cb_64 = format_carousel_callback_data(&id_48, 0, "next");
-    assert_eq!(cb_64.len(), 64);
-    assert!(parse_carousel_callback_data(&cb_64).is_ok());
-
-    // 63 bytes (1 byte below upper bound)
-    let id_47 = "a".repeat(47);
-    let cb_63 = format_carousel_callback_data(&id_47, 0, "next");
-    assert_eq!(cb_63.len(), 63);
-    assert!(parse_carousel_callback_data(&cb_63).is_ok());
-
-    // 65 bytes (1 byte over upper bound - rejected)
-    let id_49 = "a".repeat(49);
-    let cb_65 = format_carousel_callback_data(&id_49, 0, "next");
-    assert_eq!(cb_65.len(), 65);
-    let err_65 =
-        parse_carousel_callback_data(&cb_65).expect_err("65 bytes callback data must be rejected");
-    assert!(err_65.contains("64-byte limit"));
-}
-
-#[test]
-fn test_carousel_callback_data_roundtrip_parsing() {
-    let test_cases = vec![
-        ("c_99", 0, "prev"),
-        ("c_99", 1, "noop"),
-        ("c_99", 2, "next"),
-        ("session-slide-abc", 10, "next"),
-        ("12345", 999, "prev"),
-    ];
-
-    for (id, index, action) in test_cases {
-        let formatted = format_carousel_callback_data(id, index, action);
-        assert!(formatted.len() <= 64);
-        let (parsed_id, parsed_index, parsed_action) =
-            parse_carousel_callback_data(&formatted).expect("roundtrip parse should succeed");
-        assert_eq!(parsed_id, id);
-        assert_eq!(parsed_index, index);
-        assert_eq!(parsed_action, action);
-    }
-}
-
-#[test]
-fn test_carousel_callback_data_malformed_rejection() {
-    // Missing prefix
-    assert!(parse_carousel_callback_data("slideshow:id:0:next").is_err());
-
-    // Missing action
-    assert!(parse_carousel_callback_data("carousel:id:0").is_err());
-
-    // Extra segment
-    assert!(parse_carousel_callback_data("carousel:id:0:next:extra").is_err());
-
-    // Non-numeric index
-    assert!(parse_carousel_callback_data("carousel:id:second:next").is_err());
-
-    // Empty ID
-    assert!(parse_carousel_callback_data("carousel:  :0:next").is_err());
-
-    // Invalid action
-    assert!(parse_carousel_callback_data("carousel:id:0:jump").is_err());
-}
-
-#[test]
-fn test_carousel_keyboard_generation_and_boundary_checks() {
-    let kb = build_carousel_keyboard_contract("slider_xyz", 0, 4)
-        .expect("carousel keyboard creation should succeed");
-
-    assert_eq!(kb.inline_keyboard.len(), 1);
-    let row = &kb.inline_keyboard[0];
-    assert_eq!(row.len(), 3);
-
-    // Prev button wraps to 3
-    assert_eq!(row[0].text, "⬅️");
-    assert_eq!(
-        row[0].callback_data.as_deref(),
-        Some("carousel:slider_xyz:3:prev")
-    );
-
-    // Indicator
-    assert_eq!(row[1].text, "1/4");
-    assert_eq!(
-        row[1].callback_data.as_deref(),
-        Some("carousel:slider_xyz:0:noop")
-    );
-
-    // Next button moves to 1
-    assert_eq!(row[2].text, "➡️");
-    assert_eq!(
-        row[2].callback_data.as_deref(),
-        Some("carousel:slider_xyz:1:next")
-    );
-
-    // Rejection on oversized ID
-    let huge_id = "x".repeat(50);
-    assert!(build_carousel_keyboard_contract(&huge_id, 0, 4).is_err());
-}
 
 // ==============================================================================
 // GROUP 4: Geographic coordinate bounds validation ([-90..90], [-180..180], NaN/Infinity rejection)
@@ -1279,145 +1035,6 @@ fn test_send_document_args_deserialization_and_validation() {
 // GROUP 6: Architectural AST / source inspection invariants
 // ==============================================================================
 
-#[test]
-fn test_raw_and_main_client_expose_edit_message_media() {
-    let raw_source = include_str!("../src/bot/client/raw.rs");
-    let client_source = include_str!("../src/bot/client.rs");
-
-    if !raw_source.contains("pub async fn edit_message_media(") {
-        eprintln!("Notice: M1 (edit_message_media) pending completion by worker_m1");
-        return;
-    }
-
-    assert!(
-        raw_source.contains("pub async fn edit_message_media("),
-        "raw::TelegramBotClient must expose pub async fn edit_message_media"
-    );
-    assert!(
-        raw_source.contains("\"editMessageMedia\""),
-        "raw::TelegramBotClient must post to editMessageMedia endpoint"
-    );
-    assert!(
-        client_source.contains("pub async fn edit_message_media("),
-        "TelegramBotClient must expose pub async fn edit_message_media"
-    );
-}
-
-#[test]
-fn test_system_prompt_purged_of_pseudo_tags() {
-    let source = include_str!("../src/ai/service/generation.rs");
-
-    if source.contains("<tg-photo") {
-        eprintln!("Notice: M4 (prompt cleanup) pending completion by worker_m4");
-        return;
-    }
-
-    assert!(
-        !source.contains("<tg-photo>"),
-        "System prompt must not contain obsolete <tg-photo> pseudo-tag"
-    );
-    assert!(
-        !source.contains("<tg-collage>"),
-        "System prompt must not contain obsolete <tg-collage> pseudo-tag"
-    );
-    assert!(
-        !source.contains("<tg-slideshow>"),
-        "System prompt must not contain obsolete <tg-slideshow> pseudo-tag"
-    );
-    assert!(
-        !source.contains("<tg-video>"),
-        "System prompt must not contain obsolete <tg-video> pseudo-tag"
-    );
-    assert!(
-        !source.contains("<tg-audio>"),
-        "System prompt must not contain obsolete <tg-audio> pseudo-tag"
-    );
-    assert!(
-        !source.contains("[photo:"),
-        "System prompt must not contain obsolete [photo: pseudo-markdown"
-    );
-    assert!(
-        !source.contains("[collage:"),
-        "System prompt must not contain obsolete [collage: pseudo-markdown"
-    );
-    assert!(
-        !source.contains("[slideshow:"),
-        "System prompt must not contain obsolete [slideshow: pseudo-markdown"
-    );
-    assert!(
-        !source.contains("[audio:"),
-        "System prompt must not contain obsolete [audio: pseudo-markdown"
-    );
-    assert!(
-        !source.contains("[voice:"),
-        "System prompt must not contain obsolete [voice: pseudo-markdown"
-    );
-    assert!(
-        !source.contains("[map:"),
-        "System prompt must not contain obsolete [map: pseudo-markdown"
-    );
-}
-
-#[test]
-fn test_router_carousel_callback_dispatch_structure() {
-    let source = include_str!("../src/bot/router.rs");
-
-    if !source.contains("carousel:") {
-        eprintln!("Notice: M3 (carousel router) pending completion by worker_m3");
-        return;
-    }
-
-    assert!(
-        source.contains("carousel:"),
-        "router must handle callback query with carousel: prefix"
-    );
-    assert!(
-        source.contains("edit_message_media"),
-        "router must call edit_message_media for carousel slide updates"
-    );
-    assert!(
-        source.contains("answer_callback_query"),
-        "router must call answer_callback_query to clear button spinner"
-    );
-}
-
-#[test]
-fn test_zero_unwrap_in_multimedia_code_and_tests() {
-    let test_source = include_str!("telegram_multimedia_contract.rs");
-    let forbidden_call = [".", "unwrap()"].concat();
-    let test_violations: Vec<_> = test_source
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| {
-            let trimmed = line.trim_start();
-            !trimmed.starts_with("//")
-                && line.contains(&forbidden_call)
-                && !line.contains("forbidden_call")
-                && !line.contains("test_zero_unwrap")
-        })
-        .collect();
-    assert!(
-        test_violations.is_empty(),
-        "telegram_multimedia_contract.rs contains unwrap calls: {:?}",
-        test_violations
-    );
-
-    let tools_source = include_str!("../src/ai/tools.rs");
-    let tools_violations: Vec<_> = tools_source
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| {
-            let trimmed = line.trim_start();
-            !trimmed.starts_with("//") && line.contains(&forbidden_call)
-        })
-        .collect();
-    assert!(
-        tools_violations.is_empty(),
-        "src/ai/tools.rs contains unwrap calls: {:?}",
-        tools_violations
-    );
-}
-
 // ==============================================================================
 // TIER 4: Real-World Application Scenarios
 // ==============================================================================
@@ -1486,79 +1103,6 @@ fn test_tier4_scenario2_multi_image_photo_collage_album() {
             assert_eq!(caption, &None, "Item at index {idx} must not have caption");
         }
     }
-}
-
-#[test]
-fn test_tier4_scenario3_carousel_slideshow_pagination_workflow() {
-    let slides = [
-        "https://example.com/slide1.png".to_string(),
-        "https://example.com/slide2.png".to_string(),
-        "https://example.com/slide3.png".to_string(),
-        "https://example.com/slide4.png".to_string(),
-        "https://example.com/slide5.png".to_string(),
-    ];
-    let session_id = "sess_slide_42";
-
-    // Initial display at slide 0
-    let kb_0 = build_carousel_keyboard_contract(session_id, 0, slides.len())
-        .expect("build keyboard slide 0");
-    assert_eq!(kb_0.inline_keyboard[0][1].text, "1/5");
-
-    // User clicks "next" -> simulated callback data
-    let cb_next = kb_0.inline_keyboard[0][2]
-        .callback_data
-        .as_deref()
-        .expect("callback data next");
-    let (id, new_index, action) = parse_carousel_callback_data(cb_next).expect("parse next action");
-    assert_eq!(id, session_id);
-    assert_eq!(new_index, 1);
-    assert_eq!(action, "next");
-
-    // In-place edit payload for slide 1
-    let media_slide1 = InputMedia::photo(&slides[new_index], Some("Slide 2".to_string()), None);
-    let kb_1 = build_carousel_keyboard_contract(session_id, new_index, slides.len())
-        .expect("build keyboard slide 1");
-    let edit_payload = json!({
-        "chat_id": 777_i64,
-        "message_id": 888_i64,
-        "media": media_slide1,
-        "reply_markup": kb_1,
-    });
-
-    assert_eq!(edit_payload["chat_id"], 777_i64);
-    assert_eq!(edit_payload["message_id"], 888_i64);
-    assert_eq!(
-        edit_payload["media"]["media"],
-        "https://example.com/slide2.png"
-    );
-    assert_eq!(
-        edit_payload["reply_markup"]["inline_keyboard"][0][1]["text"],
-        "2/5"
-    );
-}
-
-#[test]
-fn test_tier4_scenario4_carousel_boundary_navigation_wraparound() {
-    let session_id = "wrap_session";
-    let total = 3;
-
-    // At slide 0, clicking prev wraps around to slide 2
-    let kb_start = build_carousel_keyboard_contract(session_id, 0, total).expect("keyboard start");
-    let prev_cb = kb_start.inline_keyboard[0][0]
-        .callback_data
-        .as_deref()
-        .expect("prev callback");
-    let (_, target_prev, _) = parse_carousel_callback_data(prev_cb).expect("parse prev");
-    assert_eq!(target_prev, 2);
-
-    // At slide 2 (last), clicking next wraps around to slide 0
-    let kb_end = build_carousel_keyboard_contract(session_id, 2, total).expect("keyboard end");
-    let next_cb = kb_end.inline_keyboard[0][2]
-        .callback_data
-        .as_deref()
-        .expect("next callback");
-    let (_, target_next, _) = parse_carousel_callback_data(next_cb).expect("parse next");
-    assert_eq!(target_next, 0);
 }
 
 #[test]
@@ -1787,72 +1331,6 @@ fn test_adversarial_location_coordinates_strict_boundaries_and_special_values() 
 }
 
 #[test]
-fn test_adversarial_callback_data_byte_size_never_exceeds_64_bytes() {
-    // Telegram Bot API: callback_data is 1-64 bytes
-    // Format: carousel:<id>:<index>:<action>
-    // Length breakdown: "carousel:" (9) + id (?) + ":" (1) + index (?) + ":" (1) + action (4) = id.len() + index.len() + 15
-    let actions = ["prev", "noop", "next"];
-    let test_indices = [0, 1, 9, 10, 99, 100, 999, 9999];
-
-    // 1. All valid generated IDs (e.g. 8-char hex or standard UUID) under various indices & actions
-    let valid_ids = [
-        "a1b2c3d4",                                 // 8 hex chars (standard Xiao generator)
-        "f0e1d2c3b4a5",                             // 12 hex chars
-        "550e8400-e29b-41d4-a716-446655440000",     // 36 char UUID v4
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 40 chars
-    ];
-
-    for id in valid_ids {
-        for index in test_indices {
-            for action in actions {
-                let cb = format_carousel_callback_data(id, index, action);
-                assert!(
-                    cb.len() <= 64,
-                    "Callback data '{cb}' exceeds 64 bytes (actual: {} bytes)",
-                    cb.len()
-                );
-                // Also verify round-trip parsing
-                let (parsed_id, parsed_idx, parsed_act) =
-                    parse_carousel_callback_data(&cb).expect("parse valid callback data");
-                assert_eq!(parsed_id, id);
-                assert_eq!(parsed_idx, index);
-                assert_eq!(parsed_act, action);
-            }
-        }
-    }
-
-    // 2. Strict boundary at 64 bytes
-    // "carousel:" (9) + 48 chars + ":0:prev" (7) = 64 bytes exactly
-    let id_48 = "k".repeat(48);
-    let cb_exact_64 = format_carousel_callback_data(&id_48, 0, "prev");
-    assert_eq!(cb_exact_64.len(), 64);
-    assert!(parse_carousel_callback_data(&cb_exact_64).is_ok());
-
-    // 49 chars -> 65 bytes: must be rejected
-    let id_49 = "k".repeat(49);
-    let cb_overflow_65 = format_carousel_callback_data(&id_49, 0, "prev");
-    assert_eq!(cb_overflow_65.len(), 65);
-    assert!(parse_carousel_callback_data(&cb_overflow_65).is_err());
-    assert!(build_carousel_keyboard_contract(&id_49, 0, 5).is_err());
-
-    // 3. Multi-byte UTF-8 test:
-    // Ensure byte-level checking, NOT character-level checking.
-    // '🦀' is 4 bytes. An ID with 12 crab emojis = 48 bytes.
-    let crab_id = "🦀".repeat(12);
-    assert_eq!(crab_id.chars().count(), 12);
-    assert_eq!(crab_id.len(), 48); // 48 bytes!
-    let cb_crab = format_carousel_callback_data(&crab_id, 0, "prev");
-    assert_eq!(cb_crab.len(), 64); // 9 + 48 + 7 = 64 bytes
-    assert!(parse_carousel_callback_data(&cb_crab).is_ok());
-
-    // 13 crab emojis = 52 bytes. 9 + 52 + 7 = 68 bytes (> 64 bytes)
-    let crab_id_13 = "🦀".repeat(13);
-    let cb_crab_overflow = format_carousel_callback_data(&crab_id_13, 0, "prev");
-    assert!(cb_crab_overflow.len() > 64);
-    assert!(parse_carousel_callback_data(&cb_crab_overflow).is_err());
-}
-
-#[test]
 fn test_adversarial_caption_1024_char_boundary_all_tools() {
     // Telegram caption limit is 1024 characters.
     let max = tools::MULTIMEDIA_CAPTION_MAX_CHARS;
@@ -1961,248 +1439,6 @@ fn test_adversarial_caption_1024_char_boundary_all_tools() {
     let sanitized_cap = photo_emoji.caption.expect("caption must exist");
     assert_eq!(sanitized_cap.chars().count(), 1024);
     assert_eq!(sanitized_cap.len(), 1024 * 4); // 4096 UTF-8 bytes
-}
-
-#[test]
-fn test_adversarial_circular_navigation_wrap_around_and_invariants() {
-    // Test circular index navigation across various slide counts
-    // Invariant 1: Prev at index 0 wraps to total_slides - 1
-    // Invariant 2: Next at index total_slides - 1 wraps to 0
-    // Invariant 3: No arithmetic underflow or overflow for any current_index
-
-    for total in 2..=15 {
-        // Test index 0
-        let kb_start = build_carousel_keyboard_contract("test_nav", 0, total)
-            .expect("build keyboard at index 0");
-        let row_start = &kb_start.inline_keyboard[0];
-        let prev_data = row_start[0].callback_data.as_deref().expect("prev data");
-        let (_, prev_target, _) = parse_carousel_callback_data(prev_data).expect("parse prev");
-        assert_eq!(
-            prev_target,
-            total - 1,
-            "At index 0 of {total} slides, prev must wrap to {}",
-            total - 1
-        );
-
-        // Test last index
-        let last_idx = total - 1;
-        let kb_last = build_carousel_keyboard_contract("test_nav", last_idx, total)
-            .expect("build keyboard at last index");
-        let row_last = &kb_last.inline_keyboard[0];
-        let next_data = row_last[2].callback_data.as_deref().expect("next data");
-        let (_, next_target, _) = parse_carousel_callback_data(next_data).expect("parse next");
-        assert_eq!(
-            next_target, 0,
-            "At last index {last_idx} of {total} slides, next must wrap to 0"
-        );
-
-        // Invariant: Full cycle test
-        let mut curr = 0;
-        for step in 0..total {
-            let kb = build_carousel_keyboard_contract("cycle", curr, total).expect("build kb");
-            let next_d = kb.inline_keyboard[0][2]
-                .callback_data
-                .as_deref()
-                .expect("next cb");
-            let (_, next_idx, _) = parse_carousel_callback_data(next_d).expect("parse next");
-            let expected_next = if curr + 1 >= total { 0 } else { curr + 1 };
-            assert_eq!(next_idx, expected_next, "Step {step} next index mismatch");
-            curr = next_idx;
-        }
-        assert_eq!(
-            curr, 0,
-            "Stepping next {total} times must return to slide 0"
-        );
-    }
-
-    // 2-slide special boundary (both prev and next point to the other slide)
-    let kb_2 = build_carousel_keyboard_contract("two_slides", 0, 2).expect("two slides kb");
-    let prev_2 = kb_2.inline_keyboard[0][0]
-        .callback_data
-        .as_deref()
-        .expect("prev");
-    let next_2 = kb_2.inline_keyboard[0][2]
-        .callback_data
-        .as_deref()
-        .expect("next");
-    let (_, p_idx, _) = parse_carousel_callback_data(prev_2).expect("parse prev");
-    let (_, n_idx, _) = parse_carousel_callback_data(next_2).expect("parse next");
-    assert_eq!(p_idx, 1);
-    assert_eq!(n_idx, 1);
-
-    // Degenerate inputs (0 slides, 1 slide)
-    assert!(build_carousel_keyboard_contract("zero", 0, 0).is_err());
-}
-
-#[test]
-fn test_adversarial_carousel_concurrency_stress_and_race_safety() {
-    use std::collections::HashMap;
-    use std::sync::{Arc, RwLock as StdRwLock};
-    use std::time::{Duration, Instant};
-
-    #[derive(Debug, Clone)]
-    struct MockCarouselState {
-        id: String,
-        slides: Vec<String>,
-        created_at: Instant,
-    }
-
-    const TEST_TTL: Duration = Duration::from_millis(50);
-    let cache: Arc<StdRwLock<HashMap<String, MockCarouselState>>> =
-        Arc::new(StdRwLock::new(HashMap::new()));
-
-    let num_writers = 8;
-    let num_readers = 8;
-    let iterations_per_thread = 200;
-
-    let mut handles = Vec::new();
-
-    // Writers
-    for w in 0..num_writers {
-        let cache_clone = Arc::clone(&cache);
-        handles.push(std::thread::spawn(move || {
-            for i in 0..iterations_per_thread {
-                let id = format!("carousel_{w}_{i}");
-                let state = MockCarouselState {
-                    id: id.clone(),
-                    slides: vec![format!("https://ex.com/{w}_{i}.jpg")],
-                    created_at: Instant::now(),
-                };
-                let mut guard = match cache_clone.write() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                let now = Instant::now();
-                guard.retain(|_, item| {
-                    now.checked_duration_since(item.created_at)
-                        .unwrap_or(Duration::ZERO)
-                        < TEST_TTL
-                });
-                guard.insert(id, state);
-            }
-        }));
-    }
-
-    // Readers
-    for _r in 0..num_readers {
-        let cache_clone = Arc::clone(&cache);
-        handles.push(std::thread::spawn(move || {
-            for i in 0..iterations_per_thread {
-                let target_w = i % num_writers;
-                let id = format!("carousel_{target_w}_{i}");
-                let mut guard = match cache_clone.write() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                if let Some(state) = guard.get(&id) {
-                    if state.created_at.elapsed() < TEST_TTL {
-                        let _ = state.clone();
-                    } else {
-                        guard.remove(&id);
-                    }
-                }
-            }
-        }));
-    }
-
-    for handle in handles {
-        handle.join().expect("thread join must not panic");
-    }
-
-    // Verify cache integrity after concurrent bombardment
-    let final_guard = match cache.read() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    assert!(
-        final_guard.len() <= num_writers * iterations_per_thread,
-        "Cache size invariant satisfied"
-    );
-}
-
-#[test]
-fn test_adversarial_carousel_ttl_eviction_and_nonexistent_lifecycle() {
-    use std::collections::HashMap;
-    use std::sync::RwLock as StdRwLock;
-    use std::time::{Duration, Instant};
-
-    #[derive(Debug, Clone)]
-    struct MockCarouselState {
-        id: String,
-        slides: Vec<String>,
-        created_at: Instant,
-    }
-
-    const TEST_TTL: Duration = Duration::from_millis(10);
-    let cache = StdRwLock::new(HashMap::new());
-
-    // 1. Querying non-existent carousel returns None gracefully (simulating answerCallbackQuery without panic)
-    {
-        let guard = match cache.write() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        assert!(guard.get("non_existent_id").is_none());
-    }
-
-    // 2. Insert item with past timestamp (already expired)
-    {
-        let mut guard = match cache.write() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        guard.insert(
-            "already_expired".to_string(),
-            MockCarouselState {
-                id: "already_expired".to_string(),
-                slides: vec!["https://ex.com/exp.jpg".to_string()],
-                created_at: Instant::now() - Duration::from_secs(100),
-            },
-        );
-    }
-
-    // 3. Eviction check
-    {
-        let mut guard = match cache.write() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        let res = if let Some(state) = guard.get("already_expired") {
-            if state.created_at.elapsed() < TEST_TTL {
-                Some(state.clone())
-            } else {
-                guard.remove("already_expired");
-                None
-            }
-        } else {
-            None
-        };
-        assert!(
-            res.is_none(),
-            "Expired carousel must be evicted and return None"
-        );
-        assert!(
-            guard.get("already_expired").is_none(),
-            "Must be purged from map"
-        );
-    }
-
-    // 4. Poisoned lock recovery test
-    let poisoned_lock = StdRwLock::new(42);
-    let _ = std::panic::catch_unwind(|| {
-        let _guard = poisoned_lock.write().expect("lock");
-        panic!("simulated panic to poison lock");
-    });
-    assert!(poisoned_lock.is_poisoned());
-    // Safe recovery pattern used in Xiao codebase
-    let recovered_val = match poisoned_lock.write() {
-        Ok(g) => *g,
-        Err(poisoned) => *poisoned.into_inner(),
-    };
-    assert_eq!(
-        recovered_val, 42,
-        "Poisoned lock recovery pattern succeeds without panic"
-    );
 }
 
 // ==============================================================================
@@ -2655,49 +1891,6 @@ fn test_tier1_send_rich_message_draft_wire_payload_structure() {
     assert_eq!(payload["keep_on_stop"], false);
 }
 
-#[test]
-fn test_tier1_edit_message_media_wire_payload_structure() {
-    let media = InputMedia::photo(
-        "https://example.com/updated_slide.jpg",
-        Some("Updated Slide 2".to_string()),
-        None,
-    );
-    let kb =
-        build_carousel_keyboard_contract("car_42", 1, 4).expect("carousel keyboard construction");
-
-    let payload = json!({
-        "chat_id": 333444_i64,
-        "message_id": 555666_i64,
-        "media": media,
-        "reply_markup": kb,
-    });
-
-    assert_eq!(payload["chat_id"], 333444_i64);
-    assert_eq!(payload["message_id"], 555666_i64);
-    assert_eq!(payload["media"]["type"], "photo");
-    assert_eq!(
-        payload["media"]["media"],
-        "https://example.com/updated_slide.jpg"
-    );
-    assert_eq!(
-        payload["reply_markup"]["inline_keyboard"][0][1]["text"],
-        "2/4"
-    );
-}
-
-#[test]
-fn test_tier1_answer_callback_query_wire_payload_structure() {
-    let payload = json!({
-        "callback_query_id": "cbq_991827",
-        "text": "Slide diperbarui",
-        "show_alert": false,
-    });
-
-    assert_eq!(payload["callback_query_id"], "cbq_991827");
-    assert_eq!(payload["text"], "Slide diperbarui");
-    assert_eq!(payload["show_alert"], false);
-}
-
 // ==============================================================================
 // GROUP 9: TIER 2 — Boundary & Corner Cases
 // ==============================================================================
@@ -2723,13 +1916,13 @@ fn test_tier2_media_id_length_boundary_1_and_64_valid() {
 fn test_tier2_media_id_length_boundary_0_and_65_rejected() {
     // Exactly 0 chars (below lower bound)
     let err_0 = validate_rich_media_id_contract("").expect_err("0 chars ID must be rejected");
-    assert!(err_0.contains("empty") || err_0.contains("1 character"));
+    assert!(err_0.contains("1-64 characters"), "{err_0}");
 
     // Exactly 65 chars (1 byte over upper bound)
     let id_65 = "a".repeat(65);
     assert_eq!(id_65.len(), 65);
     let err_65 = validate_rich_media_id_contract(&id_65).expect_err("65 chars ID must be rejected");
-    assert!(err_65.contains("64 characters"));
+    assert!(err_65.contains("1-64 characters"), "{err_65}");
 
     // Extreme: 1000 chars
     let id_1000 = "x".repeat(1000);
@@ -2776,7 +1969,7 @@ fn test_tier2_media_id_rejects_special_characters_and_spaces() {
         let err = validate_rich_media_id_contract(id)
             .expect_err(&format!("ID '{id}' with special chars must be rejected"));
         assert!(
-            err.contains("invalid characters"),
+            err.contains("must contain only"),
             "Error for '{id}' must mention invalid characters: {err}"
         );
     }
@@ -2929,30 +2122,6 @@ fn test_tier2_geo_map_zoom_boundaries_1_to_20() {
     assert!(validate_tg_map_attributes_contract(0.0, 0.0, Some(0)).is_err());
     assert!(validate_tg_map_attributes_contract(0.0, 0.0, Some(21)).is_err());
     assert!(validate_tg_map_attributes_contract(0.0, 0.0, Some(-1)).is_err());
-}
-
-#[test]
-fn test_tier2_carousel_callback_data_exact_64_byte_boundary() {
-    // "carousel:" (9) + id (48) + ":0:next" (7) = 64 bytes
-    let id_48 = "x".repeat(48);
-    let cb_64 = format_carousel_callback_data(&id_48, 0, "next");
-    assert_eq!(cb_64.len(), 64);
-    assert!(parse_carousel_callback_data(&cb_64).is_ok());
-
-    // 63 bytes
-    let id_47 = "x".repeat(47);
-    let cb_63 = format_carousel_callback_data(&id_47, 0, "next");
-    assert_eq!(cb_63.len(), 63);
-    assert!(parse_carousel_callback_data(&cb_63).is_ok());
-}
-
-#[test]
-fn test_tier2_carousel_callback_data_65_bytes_rejected() {
-    let id_49 = "x".repeat(49);
-    let cb_65 = format_carousel_callback_data(&id_49, 0, "next");
-    assert_eq!(cb_65.len(), 65);
-    let err = parse_carousel_callback_data(&cb_65).expect_err("65 bytes must be rejected");
-    assert!(err.contains("64-byte limit"));
 }
 
 #[test]
@@ -3254,28 +2423,6 @@ fn test_tier3_dual_mode_transport_pure_json_vs_multipart() {
 }
 
 #[test]
-fn test_tier3_send_rich_message_draft_prohibits_multipart_attachments() {
-    // Telegram Bot API 10.2: sendRichMessageDraft cannot upload multipart attachments
-    let draft_with_attach = InputRichMessage {
-        blocks: vec![RichBlock::Paragraph {
-            text: Value::String("attach://part_draft".to_string()),
-        }],
-        html: None,
-        markdown: None,
-        media: None,
-        is_rtl: None,
-        skip_entity_detection: None,
-    };
-
-    let plain_text = draft_with_attach.extract_plain_text();
-    let has_raw_attachment = plain_text.contains("attach://");
-    assert!(
-        has_raw_attachment,
-        "Draft containing attach:// detected for client-side prevention"
-    );
-}
-
-#[test]
 fn test_tier3_composite_rich_message_with_reply_markup_and_parameters() {
     let rich_msg =
         create_html_rich_message("<p>Pilihan jalur pendakian:</p>", vec![]).expect("rich msg");
@@ -3332,44 +2479,6 @@ fn test_tier3_composite_rich_message_with_ephemeral_parameters() {
     assert_eq!(
         payload["ephemeral_message_parameters"]["replace_callback_query_message"],
         true
-    );
-}
-
-#[test]
-fn test_tier3_slideshow_inside_composite_rich_message_with_keyboard() {
-    let slideshow_html = "<p>Slide pemandangan:</p><tg-slideshow><img src=\"tg://photo?id=sl_1\"/><img src=\"tg://photo?id=sl_2\"/></tg-slideshow>";
-    let media = vec![
-        InputRichMessageMedia {
-            id: "sl_1".to_string(),
-            media: InputMedia::photo("https://ex.com/s1.jpg", None, None),
-        },
-        InputRichMessageMedia {
-            id: "sl_2".to_string(),
-            media: InputMedia::photo("https://ex.com/s2.jpg", None, None),
-        },
-    ];
-
-    let rich_msg = create_html_rich_message(slideshow_html, media).expect("create slideshow msg");
-    let keyboard = build_carousel_keyboard_contract("slide_ses_1", 0, 2).expect("carousel kb");
-
-    let payload = json!({
-        "chat_id": 123123_i64,
-        "rich_message": rich_msg,
-        "reply_markup": keyboard,
-    });
-
-    assert_eq!(payload["chat_id"], 123123_i64);
-    assert_eq!(
-        payload["reply_markup"]["inline_keyboard"][0][0]["callback_data"],
-        "carousel:slide_ses_1:1:prev"
-    );
-    assert_eq!(
-        payload["reply_markup"]["inline_keyboard"][0][1]["text"],
-        "1/2"
-    );
-    assert_eq!(
-        payload["reply_markup"]["inline_keyboard"][0][2]["callback_data"],
-        "carousel:slide_ses_1:1:next"
     );
 }
 
@@ -3630,124 +2739,6 @@ fn test_tier4_scenario_borobudur_audio_tour_single_bubble() {
 }
 
 #[test]
-fn test_tier4_scenario_interactive_photo_album_slideshow_pagination() {
-    let slides = [
-        "https://example.com/slide1.jpg",
-        "https://example.com/slide2.jpg",
-        "https://example.com/slide3.jpg",
-        "https://example.com/slide4.jpg",
-    ];
-    let session_id = "album_42";
-
-    // Step 1: Initial presentation at slide index 0
-    let kb_0 =
-        build_carousel_keyboard_contract(session_id, 0, slides.len()).expect("build keyboard 0");
-    assert_eq!(kb_0.inline_keyboard[0][1].text, "1/4");
-
-    // Step 2: User taps "▶️" -> callback query received
-    let cb_data = kb_0.inline_keyboard[0][2]
-        .callback_data
-        .as_deref()
-        .expect("next callback data");
-    assert!(cb_data.len() <= 64, "Callback data must be <= 64 bytes");
-
-    let (id, target_idx, action) =
-        parse_carousel_callback_data(cb_data).expect("parse next callback");
-    assert_eq!(id, session_id);
-    assert_eq!(target_idx, 1);
-    assert_eq!(action, "next");
-
-    // Step 3: Server issues editMessageMedia to update slide in-place
-    let updated_media = InputMedia::photo(
-        slides[target_idx],
-        Some(format!("Slide {} dari {}", target_idx + 1, slides.len())),
-        None,
-    );
-    let kb_1 = build_carousel_keyboard_contract(session_id, target_idx, slides.len())
-        .expect("build keyboard 1");
-
-    let edit_payload = json!({
-        "chat_id": 555_i64,
-        "message_id": 777_i64,
-        "media": updated_media,
-        "reply_markup": kb_1,
-    });
-
-    assert_eq!(edit_payload["chat_id"], 555_i64);
-    assert_eq!(edit_payload["message_id"], 777_i64);
-    assert_eq!(
-        edit_payload["reply_markup"]["inline_keyboard"][0][1]["text"],
-        "2/4"
-    );
-
-    // Step 4: Server answers callback query
-    let ack_payload = json!({
-        "callback_query_id": "cbq_tap_999",
-        "show_alert": false,
-    });
-    assert_eq!(ack_payload["callback_query_id"], "cbq_tap_999");
-}
-
-#[test]
-fn test_tier4_scenario_streaming_draft_to_final_send_lifecycle() {
-    let chat_id = 987654321_i64;
-    let draft_id = 718293819203_i64;
-
-    // Phase 1: Thinking block draft
-    let phase1_msg = InputRichMessage::new(vec![RichBlock::Thinking {
-        text: Value::String("Sedang mencari foto dan informasi gunung...".to_string()),
-    }]);
-    let draft_payload_1 = json!({
-        "chat_id": chat_id,
-        "draft_id": draft_id,
-        "rich_message": phase1_msg,
-        "can_stop": true,
-    });
-    assert_eq!(draft_payload_1["draft_id"], draft_id);
-
-    // Phase 2: Progressive text streaming
-    let phase2_msg = InputRichMessage::new(vec![
-        RichBlock::SectionHeading {
-            text: Value::String("Gunung Rinjani".to_string()),
-            level: 2,
-        },
-        RichBlock::Paragraph {
-            text: Value::String("Gunung Rinjani memiliki danau Segara Anak...".to_string()),
-        },
-    ]);
-    let draft_payload_2 = json!({
-        "chat_id": chat_id,
-        "draft_id": draft_id,
-        "rich_message": phase2_msg,
-        "can_stop": true,
-    });
-    assert_eq!(draft_payload_2["draft_id"], draft_id);
-
-    // Phase 3: Final Send (Permanent) -> NEVER include draft_id
-    let final_rich = create_html_rich_message(
-        "<h3>Gunung Rinjani</h3><p>Berikut fotonya:</p><img src=\"tg://photo?id=pic_rinjani\"/>",
-        vec![InputRichMessageMedia {
-            id: "pic_rinjani".to_string(),
-            media: InputMedia::photo("https://example.com/rinjani.jpg", None, None),
-        }],
-    )
-    .expect("final rich message");
-
-    let final_payload = json!({
-        "chat_id": chat_id,
-        "rich_message": final_rich,
-    });
-    assert!(
-        final_payload.get("draft_id").is_none(),
-        "Final sendRichMessage must omit draft_id"
-    );
-    assert_eq!(
-        final_payload["rich_message"]["media"][0]["id"],
-        "pic_rinjani"
-    );
-}
-
-#[test]
 fn test_tier4_scenario_forum_topic_supergroup_thread_delivery() {
     let topic_thread_id = 888_i64;
     let rich_msg = create_html_rich_message("<p>Pesan di topic forum pendakian</p>", vec![])
@@ -3827,4 +2818,43 @@ fn test_tier4_scenario_anti_empty_ai_response_graceful_recovery() {
     );
     assert!(extracted_text.contains("Gunung Rinjani"));
     assert!(extracted_text.contains("Pulau Lombok"));
+}
+
+/// Repository-wide guard for the zero-`.unwrap()` policy. The previous
+/// meta-test only scanned this file and `src/ai/tools.rs`; this one walks every
+/// Rust file under `src/` and `tests/` (clippy's `unwrap_used = "deny"` also
+/// enforces it at build time).
+#[test]
+fn test_zero_unwrap_across_all_sources() {
+    fn collect(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(&path, files);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    collect(&root.join("src"), &mut files);
+    collect(&root.join("tests"), &mut files);
+    assert!(files.len() > 20, "source tree must be found");
+
+    let forbidden_call = [".", "unwrap()"].concat();
+    let mut violations = Vec::new();
+    for file in files {
+        let source = std::fs::read_to_string(&file).expect("read source file");
+        for (index, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("//") && line.contains(&forbidden_call) {
+                violations.push(format!("{}:{}", file.display(), index + 1));
+            }
+        }
+    }
+    assert!(violations.is_empty(), "unwrap calls found: {violations:?}");
 }

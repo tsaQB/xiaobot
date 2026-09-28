@@ -36,6 +36,7 @@ const MAX_SCANNED_PDF_PAGES: usize = 6;
 const MAX_RENDERED_PDF_BYTES: usize = 12 * 1024 * 1024;
 const MAX_ZIP_XML_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PDF_STREAM_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PDF_TEXT_PAGES: usize = 500;
 const MAX_XLSX_WORKSHEETS: usize = 64;
 const MAX_XLSX_XML_BYTES_TOTAL: usize = 24 * 1024 * 1024;
 const PDF_PAGE_RENDER_TIMEOUT: Duration = Duration::from_secs(12);
@@ -154,7 +155,14 @@ pub async fn extract_document(
                     lopdf::LoadOptions::with_max_decompressed_size(MAX_PDF_STREAM_BYTES),
                 )
                 .map_err(|err| format!("PDF tidak dapat dibaca: {err}"))?;
-                let pages: Vec<u32> = document.get_pages().keys().copied().collect();
+                // Text is extracted from at most MAX_PDF_TEXT_PAGES pages; a crafted
+                // PDF can declare an enormous page tree.
+                let pages: Vec<u32> = document
+                    .get_pages()
+                    .keys()
+                    .copied()
+                    .take(MAX_PDF_TEXT_PAGES)
+                    .collect();
                 let text = document
                     .extract_text_with_limit(&pages, MAX_PDF_STREAM_BYTES)
                     .map_err(|err| format!("Teks PDF tidak dapat diekstrak: {err}"))?;
@@ -579,11 +587,12 @@ pub fn create_in_memory_multi_file_zip(entries: &[ArchiveFileEntry]) -> Result<V
         return Err("Daftar file arsip tidak boleh kosong".to_string());
     }
 
+    // Saturating: an absurd entry list must not overflow (release builds wrap).
     let estimated_size = entries
         .iter()
-        .map(|entry| entry.content.len() / 2 + 128)
-        .sum::<usize>()
-        + 512;
+        .map(|entry| (entry.content.len() / 2).saturating_add(128))
+        .fold(512usize, usize::saturating_add)
+        .min(64 * 1024 * 1024);
     let mut cursor = std::io::Cursor::new(Vec::with_capacity(estimated_size));
     {
         let mut writer = zip::ZipWriter::new(&mut cursor);

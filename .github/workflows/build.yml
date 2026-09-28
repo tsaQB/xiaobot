@@ -36,12 +36,11 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
-      - name: Guard against message content in logs
-        run: |
-          if rg -n 'info!|warn!|error!' src/gateway/ | rg -i 'trimmed|text|content|phone'; then
-            echo "Log tingkat info tidak boleh memuat isi pesan atau nomor telepon"
-            exit 1
-          fi
+      # The "no message content / phone numbers in gateway logs" guard now runs
+      # as the unit test `gateway::tests::gateway_logs_do_not_interpolate_private_values`
+      # (part of `cargo test` below). It parses whole macro invocations,
+      # including multi-line ones, and inspects only interpolated arguments,
+      # so it no longer false-positives on the word "text" in a log sentence.
 
       - name: Guard against oversized source files
         run: |
