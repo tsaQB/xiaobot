@@ -16,30 +16,60 @@ use std::sync::Arc;
 use ai::AIChatService;
 use cli::*;
 
-pub(crate) fn get_configured_owner_id() -> Option<i64> {
+/// A setting from the environment (including `.env`), or from the values
+/// saved by the CLI when the environment leaves it unset or empty. The
+/// environment wins so deployments stay declarative; the CLI warns when it
+/// saves a value the environment overrides ([`warn_if_environment_overrides`]).
+pub(crate) fn configured_setting(key: &str) -> Option<String> {
     load_environment();
-    env::var("OWNER_USER_ID")
+    let non_empty = |value: String| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    };
+    env::var(key)
         .ok()
-        .or_else(|| ai::service::load_app_setting("OWNER_USER_ID"))
-        .and_then(|value| value.trim().parse::<i64>().ok())
+        .and_then(non_empty)
+        .or_else(|| ai::service::load_app_setting(key).and_then(non_empty))
+}
+
+/// After the CLI saved `saved` under one of `keys`, tells the user when the
+/// environment (usually a `.env` file) sets the same setting to something
+/// else, because that value keeps winning. Values are never printed: some
+/// of these settings are secrets.
+pub(crate) fn warn_if_environment_overrides(keys: &[&str], saved: &str) {
+    let overriding = keys.iter().find(|key| {
+        env::var(key).is_ok_and(|value| {
+            let value = value.trim();
+            !value.is_empty() && !value.contains("YOUR_") && value != saved.trim()
+        })
+    });
+    let Some(key) = overriding else {
+        return;
+    };
+    let config_path = get_config_path();
+    let source = if config_path.exists() {
+        format!("file {}", config_path.display())
+    } else {
+        "environment proses".to_string()
+    };
+    println!(
+        "  \x1b[33m⚠ {key} juga diatur di {source} dengan nilai lain, dan nilai itu yang dipakai. Hapus atau ubah baris {key} di sana agar perubahan ini berlaku.\x1b[0m"
+    );
+}
+
+pub(crate) fn get_configured_owner_id() -> Option<i64> {
+    configured_setting("OWNER_USER_ID")
+        .and_then(|value| value.parse::<i64>().ok())
         .filter(|value| *value > 0)
 }
 
 pub(crate) fn get_configured_whatsapp_owner() -> Option<String> {
-    load_environment();
-    env::var("WHATSAPP_OWNER_NUMBER")
-        .ok()
-        .or_else(|| ai::service::load_app_setting("WHATSAPP_OWNER_NUMBER"))
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    configured_setting("WHATSAPP_OWNER_NUMBER")
 }
 
 /// Comma-separated `WHATSAPP_DEDICATED_GROUPS` (group JIDs or numeric ids).
 pub(crate) fn get_whatsapp_dedicated_groups() -> Vec<String> {
-    load_environment();
-    env::var("WHATSAPP_DEDICATED_GROUPS")
-        .ok()
-        .or_else(|| ai::service::load_app_setting("WHATSAPP_DEDICATED_GROUPS"))
+    configured_setting("WHATSAPP_DEDICATED_GROUPS")
         .unwrap_or_default()
         .split(',')
         .map(|value| value.trim().to_string())
@@ -48,12 +78,9 @@ pub(crate) fn get_whatsapp_dedicated_groups() -> Vec<String> {
 }
 
 pub(crate) fn is_whatsapp_enabled() -> bool {
-    load_environment();
-    env::var("WHATSAPP_ENABLED")
-        .ok()
-        .or_else(|| ai::service::load_app_setting("WHATSAPP_ENABLED"))
+    configured_setting("WHATSAPP_ENABLED")
         .map(|v| {
-            let s = v.trim().to_lowercase();
+            let s = v.to_lowercase();
             s == "true" || s == "1" || s == "yes"
         })
         .unwrap_or(false)
@@ -206,12 +233,15 @@ pub(crate) fn load_environment() {
     }
 }
 
+/// Saves a setting from the CLI, warning when the environment overrides it.
 pub(crate) fn save_env_kv(key: &str, value: &str) -> io::Result<()> {
-    ai::service::save_app_setting(key, value)
+    ai::service::save_app_setting(key, value)?;
+    warn_if_environment_overrides(&[key], value);
+    Ok(())
 }
 
 pub(crate) fn save_token_to_env(token: &str) -> io::Result<()> {
-    ai::service::save_app_setting("BOT_TOKEN", token)
+    save_env_kv("BOT_TOKEN", token)
 }
 
 pub(crate) fn get_configured_token() -> Option<String> {
@@ -257,6 +287,20 @@ async fn main() {
     use std::io::IsTerminal;
     let args: Vec<String> = env::args().collect();
     let subcommand = args.get(1).map(|s| s.as_str());
+
+    // `xiao <command> help` works for every command: the hubs print their
+    // own reference, these print the main one instead of, for example,
+    // sending "help" to the model or starting the daemon.
+    let asks_help = args.len() == 3 && matches!(args[2].as_str(), "help" | "-h" | "--help");
+    if asks_help
+        && matches!(
+            subcommand,
+            Some("chat" | "status" | "setup" | "start" | "menu")
+        )
+    {
+        print_cli_help();
+        return;
+    }
 
     let ai_service = Arc::new(AIChatService::new());
 
@@ -319,7 +363,12 @@ async fn main() {
         }
         Some("mcp") => {
             let action_arg = args.get(2).map(|s| s.as_str());
-            let target_arg = args.get(3).map(|s| s.as_str());
+            // A test or search query may be several words.
+            let query = (args.len() > 3).then(|| args[3..].join(" "));
+            let target_arg = match action_arg {
+                Some("test" | "probe" | "check" | "search") => query.as_deref(),
+                _ => args.get(3).map(|s| s.as_str()),
+            };
             let extra_arg = args.get(4).map(|s| s.as_str());
             run_cli_mcp_hub(&ai_service, action_arg, target_arg, extra_arg).await;
             return;
@@ -422,5 +471,31 @@ mod tests {
         } else {
             env::remove_var("XDG_CONFIG_HOME");
         }
+    }
+
+    #[test]
+    fn empty_environment_values_do_not_hide_saved_settings() {
+        let _lock = ENV_TEST_LOCK.lock().expect("ENV_TEST_LOCK poisoned");
+        let key = format!("XIAO_TEST_SETTING_{:x}", rand::random::<u64>());
+
+        env::set_var(&key, "   ");
+        assert_eq!(configured_setting(&key), None);
+
+        ai::service::save_app_setting(&key, "dari-cli").expect("save setting");
+        assert_eq!(
+            configured_setting(&key).as_deref(),
+            Some("dari-cli"),
+            "an empty .env line (KEY=) must not hide the saved value"
+        );
+
+        env::set_var(&key, "dari-env");
+        assert_eq!(
+            configured_setting(&key).as_deref(),
+            Some("dari-env"),
+            "a real environment value still wins"
+        );
+
+        env::remove_var(&key);
+        let _ = ai::service::save_app_setting(&key, "");
     }
 }

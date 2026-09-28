@@ -82,10 +82,32 @@ pub fn mask_api_key(key: &str) -> String {
     }
 }
 
+/// Every setting name a search key is read under: the current name first,
+/// then the legacy one the engine chain still accepts.
+fn search_key_names(key_name: &str) -> Vec<&str> {
+    match key_name {
+        "TAVILY_API_KEY" => vec!["TAVILY_API_KEY", "TAVILY_KEY"],
+        "EXA_API_KEY" => vec!["EXA_API_KEY", "EXA_KEY"],
+        other => vec![other],
+    }
+}
+
+/// Saves a search key (an empty value removes it). Legacy names are cleared
+/// so an old value cannot keep answering after a change or removal, and the
+/// user is warned when the environment still sets the key.
+fn store_search_key(key_name: &str, value: &str) -> std::io::Result<()> {
+    let names = search_key_names(key_name);
+    for (index, name) in names.iter().enumerate() {
+        crate::ai::service::save_app_setting(name, if index == 0 { value } else { "" })?;
+    }
+    crate::warn_if_environment_overrides(&names, value);
+    Ok(())
+}
+
 fn handle_search_key(key_name: &str, provider_label: &str, target: Option<&str>) {
     match target {
         Some("rm") | Some("remove") | Some("clear") => {
-            if crate::ai::service::save_app_setting(key_name, "").is_ok() {
+            if store_search_key(key_name, "").is_ok() {
                 println!("\n\x1b[1;32m✔ {provider_label} key successfully removed.\x1b[0m\n");
             } else {
                 println!("\n\x1b[31m✖ Failed to remove {provider_label} key.\x1b[0m\n");
@@ -94,7 +116,7 @@ fn handle_search_key(key_name: &str, provider_label: &str, target: Option<&str>)
         }
         Some(new_key) if !new_key.trim().is_empty() => {
             let trimmed = new_key.trim();
-            if crate::ai::service::save_app_setting(key_name, trimmed).is_ok() {
+            if store_search_key(key_name, trimmed).is_ok() {
                 println!(
                     "\n\x1b[1;32m✔ {provider_label} key successfully saved:\x1b[0m {}\n",
                     mask_api_key(trimmed)
@@ -126,7 +148,7 @@ fn handle_search_key(key_name: &str, provider_label: &str, target: Option<&str>)
                 if io::stdin().read_line(&mut input).is_ok() {
                     let trimmed = input.trim();
                     if trimmed == "rm" || trimmed == "remove" || trimmed == "clear" {
-                        if crate::ai::service::save_app_setting(key_name, "").is_ok() {
+                        if store_search_key(key_name, "").is_ok() {
                             println!(
                                 "\n\x1b[1;32m✔ {provider_label} key successfully removed.\x1b[0m\n"
                             );
@@ -135,7 +157,7 @@ fn handle_search_key(key_name: &str, provider_label: &str, target: Option<&str>)
                             std::process::exit(1);
                         }
                     } else if !trimmed.is_empty() {
-                        if crate::ai::service::save_app_setting(key_name, trimmed).is_ok() {
+                        if store_search_key(key_name, trimmed).is_ok() {
                             println!(
                                 "\n\x1b[1;32m✔ {provider_label} key successfully saved:\x1b[0m {}\n",
                                 mask_api_key(trimmed)
@@ -234,12 +256,12 @@ async fn run_cli_configure_search_keys_submenu() {
         }
 
         if trimmed.eq_ignore_ascii_case("rm") || trimmed.eq_ignore_ascii_case("remove") {
-            if crate::ai::service::save_app_setting(key_name, "").is_ok() {
+            if store_search_key(key_name, "").is_ok() {
                 println!("\x1b[1;32m✔ {label} key removed.\x1b[0m\n");
             } else {
                 println!("\x1b[31m✖ Failed to remove {label} key.\x1b[0m\n");
             }
-        } else if crate::ai::service::save_app_setting(key_name, trimmed).is_ok() {
+        } else if store_search_key(key_name, trimmed).is_ok() {
             println!(
                 "\x1b[1;32m✔ {label} key saved:\x1b[0m {}\n",
                 mask_api_key(trimmed)

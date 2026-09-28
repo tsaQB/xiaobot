@@ -76,7 +76,7 @@ async fn apply_mcp_endpoint(raw_url: Option<&str>, usage: &str) -> bool {
 
     match crate::bot::url_policy::resolve_download_url(&raw_url).await {
         Ok(_) => {
-            if crate::ai::service::save_app_setting("EXA_MCP_URL", &raw_url).is_ok() {
+            if crate::save_env_kv("EXA_MCP_URL", &raw_url).is_ok() {
                 println!(
                     "\n\x1b[1;32m✔ MCP server successfully connected:\x1b[0m {}\n",
                     raw_url
@@ -241,7 +241,7 @@ async fn run_interactive_mcp_menu() {
             }
             5 => {
                 let default_url = "https://mcp.exa.ai/";
-                if crate::ai::service::save_app_setting("EXA_MCP_URL", default_url).is_ok() {
+                if crate::save_env_kv("EXA_MCP_URL", default_url).is_ok() {
                     println!(
                         "\n\x1b[1;32m✔ MCP endpoint successfully reset to default:\x1b[0m {}\n",
                         default_url
@@ -317,7 +317,7 @@ pub(crate) async fn run_cli_mcp_hub(
             // XiaoBot mengelola satu endpoint MCP aktif, bukan daftar server.
             // Karena itu 'rm' bermakna mengembalikan endpoint ke bawaan.
             println!("\n  Mengembalikan endpoint MCP ke bawaan.");
-            if crate::ai::service::save_app_setting("EXA_MCP_URL", DEFAULT_MCP_URL).is_ok() {
+            if crate::save_env_kv("EXA_MCP_URL", DEFAULT_MCP_URL).is_ok() {
                 println!("  Endpoint aktif sekarang: {DEFAULT_MCP_URL}\n");
             } else {
                 println!("\n\x1b[31m✖ Gagal menyimpan konfigurasi MCP.\x1b[0m\n");
@@ -332,7 +332,7 @@ pub(crate) async fn run_cli_mcp_hub(
             probe_mcp_server(&current_mcp_url, query).await;
         }
         McpCliAction::Reset => {
-            if crate::ai::service::save_app_setting("EXA_MCP_URL", DEFAULT_MCP_URL).is_ok() {
+            if crate::save_env_kv("EXA_MCP_URL", DEFAULT_MCP_URL).is_ok() {
                 println!(
                     "\n\x1b[1;32m✔ MCP endpoint successfully reset to default:\x1b[0m {}\n",
                     DEFAULT_MCP_URL

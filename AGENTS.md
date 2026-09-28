@@ -318,6 +318,7 @@ When modifying or adding features, you **must** preserve these invariants:
 ### 8. WhatsApp Credential Handling
 - `whatsapp.db` holds Signal session keys and is treated the same as the secret vault.
 - The file and its `-wal` / `-shm` sidecars are locked to `0o600` on Unix systems.
+- Only one process may use the session: `WhatsAppGateway::start` and `xiao gateway wa unlink` hold an exclusive `whatsapp.lock` (`WhatsAppGateway::lock_session`, `File::try_lock`), so CLI pairing never runs alongside the daemon, and `wa pair` refuses an already linked session.
 
 ### 9. WhatsApp Ordering and Durability
 - **At-least-once intake**: `DurableIntakeHook` (an `InboundDurabilityHook`) writes every authorized message to `whatsapp_inbox` in one transaction **before** the SDK acknowledges it. Without the hook the SDK acks on decrypt (at-most-once).
@@ -363,6 +364,8 @@ Configuration is resolved by `get_config_path()` in `src/main.rs`, in order:
 5. A trusted `.env` in a parent of the working directory
 
 The full effective list lives in `src/main.rs`; treat the code as the source of truth.
+
+Individual settings are read with `configured_setting` (and `ai::tools::search`'s `setting` for search keys and the MCP URL): the environment (including `.env`) wins, an empty value counts as unset, and otherwise the value saved by the CLI is used. CLI writes go through `save_env_kv`, which calls `warn_if_environment_overrides` so a saved value that the environment overrides is reported instead of silently ignored.
 
 ---
 

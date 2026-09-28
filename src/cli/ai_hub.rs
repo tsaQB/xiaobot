@@ -31,7 +31,7 @@ pub fn parse_ai_cli_action<'a>(
     target: Option<&'a str>,
 ) -> AiCliAction<'a> {
     match action {
-        None => AiCliAction::Menu,
+        None | Some("menu") => AiCliAction::Menu,
         Some("use") => AiCliAction::Use(target),
         Some("list") => AiCliAction::List,
         Some("add") => AiCliAction::Add,
@@ -547,14 +547,20 @@ pub(crate) async fn run_cli_model_picker(ai_service: &AIChatService, initial_fil
     }
 
     let active_prov_id = store.active_id.clone().unwrap_or_default();
-    let current_model = env::var("AI_MODEL").unwrap_or_default();
+    // The saved provider's model is the one in use; `AI_MODEL` only seeds the
+    // first provider and may no longer match it.
+    let current_model = store
+        .providers
+        .iter()
+        .find(|p| p.id == active_prov_id)
+        .map(|p| p.active_model.clone())
+        .unwrap_or_default();
 
     let mut catalog: Vec<(String, String, String, bool)> = Vec::new();
     for prov in &store.providers {
         let is_prov_active = prov.id == active_prov_id;
         for m in &prov.models {
-            let is_model_active =
-                is_prov_active && (m == &prov.active_model || m == &current_model);
+            let is_model_active = is_prov_active && m == &prov.active_model;
             catalog.push((
                 prov.id.clone(),
                 prov.name.clone(),
@@ -1917,6 +1923,11 @@ mod tests {
     #[test]
     fn test_parse_ai_cli_action() {
         assert_eq!(parse_ai_cli_action(None, None), AiCliAction::Menu);
+        assert_eq!(
+            parse_ai_cli_action(Some("menu"), None),
+            AiCliAction::Menu,
+            "listed in `xiao ai help`"
+        );
         assert_eq!(
             parse_ai_cli_action(Some("use"), Some("gpt-4o")),
             AiCliAction::Use(Some("gpt-4o"))

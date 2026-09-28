@@ -48,36 +48,32 @@ async fn read_json_bounded(resp: reqwest::Response) -> Result<Value, String> {
     serde_json::from_slice(&bytes).map_err(|e| format!("JSON tidak valid: {e}"))
 }
 
+/// The first of `keys` set in the environment, else the first saved by the
+/// CLI. An empty value (such as `BRAVE_API_KEY=` in a copied `.env.example`)
+/// counts as unset, so it does not hide a key saved with `xiao search`.
+fn setting(keys: &[&str]) -> Option<String> {
+    let non_empty = |value: String| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    };
+    keys.iter()
+        .find_map(|key| env::var(key).ok().and_then(non_empty))
+        .or_else(|| {
+            keys.iter()
+                .find_map(|key| crate::ai::service::load_app_setting(key).and_then(non_empty))
+        })
+}
+
 pub fn get_brave_key() -> Option<String> {
-    env::var("BRAVE_API_KEY")
-        .ok()
-        .or_else(|| crate::ai::service::load_app_setting("BRAVE_API_KEY"))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    setting(&["BRAVE_API_KEY"])
 }
 
 pub fn get_tavily_key() -> Option<String> {
-    env::var("TAVILY_API_KEY")
-        .or_else(|_| env::var("TAVILY_KEY"))
-        .ok()
-        .or_else(|| {
-            crate::ai::service::load_app_setting("TAVILY_API_KEY")
-                .or_else(|| crate::ai::service::load_app_setting("TAVILY_KEY"))
-        })
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    setting(&["TAVILY_API_KEY", "TAVILY_KEY"])
 }
 
 pub fn get_exa_key() -> Option<String> {
-    env::var("EXA_API_KEY")
-        .or_else(|_| env::var("EXA_KEY"))
-        .ok()
-        .or_else(|| {
-            crate::ai::service::load_app_setting("EXA_API_KEY")
-                .or_else(|| crate::ai::service::load_app_setting("EXA_KEY"))
-        })
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    setting(&["EXA_API_KEY", "EXA_KEY"])
 }
 
 pub fn get_search_engine_status() -> (String, String) {
@@ -100,11 +96,7 @@ pub fn get_search_engine_status() -> (String, String) {
 }
 
 pub fn get_configured_mcp_url() -> String {
-    env::var("EXA_MCP_URL")
-        .ok()
-        .or_else(|| crate::ai::service::load_app_setting("EXA_MCP_URL"))
-        .filter(|url| !url.trim().is_empty())
-        .unwrap_or_else(|| "https://mcp.exa.ai/".to_string())
+    setting(&["EXA_MCP_URL"]).unwrap_or_else(|| "https://mcp.exa.ai/".to_string())
 }
 
 pub async fn execute_web_search(query: &str) -> String {

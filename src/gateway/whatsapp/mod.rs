@@ -25,7 +25,36 @@ pub enum WhatsAppStatus {
 
 pub struct WhatsAppGateway;
 
+/// Exclusive use of the WhatsApp session by this process, released on drop.
+/// Two clients with the same device keys make the server drop one of them,
+/// and both would answer the owner, so pairing, unlinking and the daemon
+/// never run on the same session at once.
+pub struct SessionLock {
+    _file: std::fs::File,
+}
+
 impl WhatsAppGateway {
+    /// Takes the session lock (`whatsapp.lock` next to the session database).
+    pub fn lock_session(db_path: &Path) -> Result<SessionLock, String> {
+        let lock_path = db_path.with_extension("lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| format!("Kunci sesi WhatsApp tidak dapat dibuat: {error}"))?;
+        match file.try_lock() {
+            Ok(()) => Ok(SessionLock { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(
+                "Sesi WhatsApp sedang dipakai proses xiao lain (misalnya daemon `xiao start` atau pairing di terminal lain). Hentikan proses itu dulu."
+                    .to_string(),
+            ),
+            Err(std::fs::TryLockError::Error(error)) => {
+                Err(format!("Kunci sesi WhatsApp tidak dapat dipasang: {error}"))
+            }
+        }
+    }
+
     /// Memeriksa status keberadaan sesi login WhatsApp pada path database lokal.
     ///
     /// Menghindari false-positive dengan memverifikasi bahwa tabel `device`
@@ -94,6 +123,38 @@ impl WhatsAppGateway {
         ai_service: std::sync::Arc<crate::ai::AIChatService>,
         shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> client::WhatsAppExit {
+        let _lock = match Self::lock_session(&config.db_path) {
+            Ok(lock) => lock,
+            Err(error) => return client::WhatsAppExit::Failed(error),
+        };
         client::WhatsAppClientRunner::run(config, ai_service, shutdown).await
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn only_one_holder_of_the_session_at_a_time() {
+        let dir = std::env::temp_dir().join(format!(
+            "xiaoai-wa-lock-{}-{:x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let db_path = dir.join("whatsapp.db");
+
+        let first = WhatsAppGateway::lock_session(&db_path).expect("first lock");
+        let busy = WhatsAppGateway::lock_session(&db_path)
+            .err()
+            .expect("a second holder is refused");
+        assert!(busy.contains("sedang dipakai"), "{busy}");
+        drop(first);
+        assert!(
+            WhatsAppGateway::lock_session(&db_path).is_ok(),
+            "the lock is released on drop"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

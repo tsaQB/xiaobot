@@ -1,5 +1,3 @@
-use std::env;
-
 use crate::ai::service::{
     load_provider_store, CapabilityKind, CapabilityState, ModelRole, ModelRoute, ProviderConfig,
 };
@@ -28,10 +26,8 @@ pub(crate) async fn run_cli_status(ai_service: &AIChatService) {
     let bar_width = get_terminal_bar_width();
     print_mini_header("System Health & Telemetry Status");
 
-    let token = env::var("BOT_TOKEN")
-        .ok()
-        .or_else(|| crate::ai::service::load_app_setting("BOT_TOKEN"))
-        .unwrap_or_default();
+    // The same lookup the daemon uses (placeholders and empty values skipped).
+    let token = crate::get_configured_token().unwrap_or_default();
     let owner_id = get_configured_owner_id();
 
     // 1. Gateway Status

@@ -300,39 +300,50 @@ pub(crate) async fn run_cli_chat(ai_service: &AIChatService, initial_prompt: Opt
                 }
                 ChatCliCommand::Unknown(cmd_str) => {
                     let lower_cmd = cmd_str.to_lowercase();
-                    if lower_cmd.trim() == "/switch" && io::stdout().is_terminal() {
+                    if lower_cmd.trim() == "/switch" {
+                        // The choice is read from the same line reader as the
+                        // chat: an arrow-key picker would compete with the
+                        // reader thread for keystrokes, and the leftovers
+                        // would reach the model as the next prompt.
                         let sessions = ai_service.get_sessions(user_id).await;
                         let active_id =
                             ai_service.get_active_session_id(user_id).await.unwrap_or(0);
-                        let mut items: Vec<String> = Vec::with_capacity(sessions.len() + 1);
+                        println!("\n\x1b[1;37mSelect conversation session to activate:\x1b[0m");
                         for s in &sessions {
                             let marker = if s.id == active_id { " [ACTIVE]" } else { "" };
-                            items.push(format!(
-                                "#{:<2} — {:<24} ({} msgs){}",
+                            println!(
+                                "  #{:<2} — {:<24} ({} msgs){}",
                                 s.id,
                                 s.name,
                                 session_message_count(user_id, s.id).await,
                                 marker
-                            ));
+                            );
                         }
-                        items.push("Cancel / Back".to_string());
-                        let sel = crate::cli::tui::terminal_interactive_select(
-                            "Select conversation session to activate:",
-                            &items,
-                            0,
-                            false,
-                            None,
-                        );
-                        if let Some(idx) = sel {
-                            if idx < sessions.len() {
-                                let target_id = sessions[idx].id;
-                                if ai_service.switch_session_by_id(user_id, target_id).await {
+                        print!("  \x1b[38;5;244mSession id (Enter to cancel):\x1b[0m ");
+                        let _ = io::stdout().flush();
+                        let choice = tokio::select! {
+                            line = lines.recv() => line.flatten(),
+                            _ = tokio::signal::ctrl_c() => None,
+                        };
+                        let target = choice
+                            .as_deref()
+                            .map(str::trim)
+                            .map(|choice| choice.trim_start_matches('#'))
+                            .and_then(|choice| choice.parse::<usize>().ok())
+                            .and_then(|id| sessions.iter().find(|s| s.id == id));
+                        match target {
+                            Some(session) => {
+                                if ai_service.switch_session_by_id(user_id, session.id).await {
                                     println!(
                                         "\x1b[1;32m✔ Switched to session #{}: {}\x1b[0m\n",
-                                        target_id, sessions[idx].name
+                                        session.id, session.name
                                     );
                                 }
                             }
+                            None if choice.as_deref().is_some_and(|c| !c.trim().is_empty()) => {
+                                println!("\x1b[33mNo session with that id.\x1b[0m\n");
+                            }
+                            None => println!(),
                         }
                     } else if lower_cmd.starts_with("/switch") {
                         println!(

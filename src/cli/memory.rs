@@ -221,6 +221,14 @@ pub(crate) async fn run_cli_memory(
                     }
                 }
                 MemoryCliAction::Remove(Some(key)) => {
+                    let known = crate::ai::storage::get_user_memories_async(owner_id)
+                        .await
+                        .iter()
+                        .any(|(stored, _)| stored == key);
+                    if !known {
+                        println!("\n\x1b[33m✖ No memory named '{key}'. Run 'xiao memory list' to see the stored keys.\x1b[0m\n");
+                        std::process::exit(1);
+                    }
                     if crate::ai::storage::delete_user_memory_async(owner_id, key.to_string()).await
                     {
                         println!("\n\x1b[1;32m✔ Memory '{key}' successfully removed for Owner ({owner_id}).\x1b[0m\n");

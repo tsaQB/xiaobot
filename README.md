@@ -291,7 +291,7 @@ Xiao loads the first `.env` file it finds, in this order (`src/main.rs::get_conf
 4. On Windows, in `%APPDATA%`: `xiao\.env`, `XiaoAI\.env`, `xiaoai\.env`, `.xiao.env`
 5. A trusted `.env` in a parent directory of the working directory
 
-Variables already set in the process environment (for example by systemd) take precedence over the file. Settings saved through the CLI (`xiao setup`, `xiao gateway`, `xiao ai`, `xiao search`) are stored in the data directory and are used when the environment does not set them.
+Variables already set in the process environment (for example by systemd) take precedence over the file. Settings saved through the CLI (`xiao setup`, `xiao gateway`, `xiao ai`, `xiao search`, `xiao mcp`) are stored in the data directory and are used when the environment does not set them; an empty line such as `BRAVE_API_KEY=` counts as not set. When the environment or `.env` still overrides a value the CLI just saved, the CLI says so and names the file. `.env.example` therefore leaves the owner, WhatsApp and MCP settings commented out.
 
 Create `.env` based on the template:
 ```bash
@@ -375,8 +375,8 @@ xiao <subcommand> [arguments]
 | `gateway token [val]` | Interactively or directly bind Telegram Bot Token. |
 | `gateway owner [id]` | Set authorized owner user ID (alias: `gateway id [id]`). |
 | `gateway wa` | Open the interactive WhatsApp gateway configuration menu. |
-| `gateway wa pair` | Link WhatsApp by scanning a QR code (alias: `gateway wa qr`). |
-| `gateway wa code <NUM>` | Link WhatsApp using a phone pairing code. |
+| `gateway wa pair` | Link WhatsApp by scanning a QR code (alias: `gateway wa qr`). Refused when a session is already linked or another `xiao` process (such as `xiao start`) is using it. |
+| `gateway wa code <NUM>` | Link WhatsApp using a phone pairing code. Spaces, `+` and dashes in the number are ignored. |
 | `gateway wa owner <NUM>` | Set the authorized owner phone number (E.164 without the plus sign). |
 | `gateway wa status` | Inspect WhatsApp link status, owner, and session path (alias: `check`). |
 | `gateway wa unlink` | Delete the stored WhatsApp session (alias: `logout`). |
@@ -395,7 +395,7 @@ Inside the REPL, manage independent chat sessions seamlessly:
 ```text
 Xiao Interactive Chat REPL Commands:
   /sessions         List all conversation sessions with IDs and turn counts
-  /switch <id>      Switch to a different conversation session
+  /switch [id]      Switch session (without an id, lists them and asks for one)
   /new [name]       Create and switch to a new isolated session
   /rm <id>          Remove a conversation session
   /clear            Reset conversation history in active session

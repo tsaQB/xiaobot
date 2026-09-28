@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{watch, RwLock};
@@ -15,7 +14,7 @@ use crate::cli::get_or_prompt_token;
 use crate::gateway::whatsapp::client::WhatsAppExit;
 use crate::{
     get_configured_owner_id, get_configured_whatsapp_owner, get_whatsapp_db_path,
-    get_whatsapp_dedicated_groups, is_whatsapp_enabled, load_environment,
+    get_whatsapp_dedicated_groups, is_whatsapp_enabled,
 };
 
 /// Time allowed for in-flight work to finish once shutdown starts.
@@ -36,12 +35,7 @@ pub(crate) fn parse_chat_ids_from_str(raw: &str) -> HashSet<i64> {
 }
 
 pub(crate) fn parse_chat_ids_from_config(key: &str) -> HashSet<i64> {
-    load_environment();
-    let raw = env::var(key)
-        .ok()
-        .or_else(|| ai::service::load_app_setting(key))
-        .unwrap_or_default();
-    parse_chat_ids_from_str(&raw)
+    parse_chat_ids_from_str(&crate::configured_setting(key).unwrap_or_default())
 }
 
 pub(crate) fn get_allowed_chat_ids() -> HashSet<i64> {

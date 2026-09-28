@@ -14,7 +14,8 @@ pub enum GatewayCliAction<'a> {
     Check,
     BindToken(Option<&'a str>),
     SetOwner(Option<&'a str>),
-    WhatsApp(Option<&'a str>, Option<&'a str>),
+    /// A WhatsApp action and everything after it (a number may contain spaces).
+    WhatsApp(Option<&'a str>, Option<String>),
     Help,
     Unknown(&'a str),
 }
@@ -22,14 +23,14 @@ pub enum GatewayCliAction<'a> {
 pub fn parse_gateway_cli_args<'a>(args: &'a [String]) -> GatewayCliAction<'a> {
     let action = args.first().map(|s| s.as_str());
     let target = args.get(1).map(|s| s.as_str());
-    let extra = args.get(2).map(|s| s.as_str());
+    let rest = (args.len() > 2).then(|| args[2..].join(" "));
 
     match action {
         None | Some("menu") => GatewayCliAction::Menu,
         Some("check") | Some("test") | Some("status") => GatewayCliAction::Check,
         Some("token") | Some("bind") => GatewayCliAction::BindToken(target),
         Some("owner") | Some("id") => GatewayCliAction::SetOwner(target),
-        Some("wa") | Some("whatsapp") => GatewayCliAction::WhatsApp(target, extra),
+        Some("wa") | Some("whatsapp") => GatewayCliAction::WhatsApp(target, rest),
         Some("help") | Some("--help") | Some("-h") => GatewayCliAction::Help,
         Some(unknown) => GatewayCliAction::Unknown(unknown),
     }
@@ -332,7 +333,11 @@ async fn run_cli_gateway_whatsapp_submenu() {
             }
             3 => {
                 let new_state = if enabled { "false" } else { "true" };
-                let _ = save_env_kv("WHATSAPP_ENABLED", new_state);
+                if let Err(error) = save_env_kv("WHATSAPP_ENABLED", new_state) {
+                    println!("\n  \x1b[31m✖ Gagal menyimpan: {error}\x1b[0m\n");
+                    crate::cli::tui::print_press_enter();
+                    continue;
+                }
                 println!(
                     "\n  \x1b[1;32m✔ WhatsApp Gateway diubah menjadi: {}\x1b[0m\n",
                     if new_state == "true" {
@@ -356,6 +361,13 @@ async fn run_cli_gateway_whatsapp_submenu() {
 /// not do: the linked device stays listed on the phone until it is removed
 /// there, and a running daemon keeps its in-memory session until restarted.
 fn unlink_whatsapp_session(db_path: &std::path::Path) {
+    let _lock = match crate::gateway::whatsapp::WhatsAppGateway::lock_session(db_path) {
+        Ok(lock) => lock,
+        Err(error) => {
+            println!("\n  \x1b[31m✖ {error}\x1b[0m\n");
+            return;
+        }
+    };
     match crate::gateway::whatsapp::WhatsAppGateway::logout(db_path) {
         Err(e) => {
             println!("\n  \x1b[31m✖ Gagal menghapus sesi lokal: {e}\x1b[0m");
@@ -370,8 +382,38 @@ fn unlink_whatsapp_session(db_path: &std::path::Path) {
     }
 }
 
+/// Digits of a phone number as typed (`+62 812-3456` → `628123456`).
+fn phone_digits(raw: &str) -> String {
+    raw.chars().filter(char::is_ascii_digit).collect()
+}
+
+/// Saves the WhatsApp owner number, reporting what happened.
+fn save_whatsapp_owner(raw: &str) {
+    let digits = phone_digits(raw);
+    if digits.is_empty() {
+        println!("\n  \x1b[33mNomor tidak valid atau kosong. Contoh: 6281234567890\x1b[0m\n");
+        return;
+    }
+    match save_env_kv("WHATSAPP_OWNER_NUMBER", &digits) {
+        Ok(()) => {
+            println!("\n  \x1b[1;32m✔ WhatsApp Owner Number berhasil disimpan: {digits}\x1b[0m\n")
+        }
+        Err(error) => {
+            println!("\n  \x1b[31m✖ Gagal menyimpan nomor pemilik: {error}\x1b[0m\n");
+            std::process::exit(1);
+        }
+    }
+}
+
 async fn run_cli_whatsapp_pair(phone_login: Option<String>) {
     let db_path = get_whatsapp_db_path();
+    if crate::gateway::whatsapp::WhatsAppGateway::check_status(&db_path)
+        == crate::gateway::whatsapp::WhatsAppStatus::Linked
+    {
+        println!("\n  \x1b[33m⚠ WhatsApp sudah tertaut.\x1b[0m");
+        println!("  \x1b[38;5;244mJalankan `xiao start` untuk memakainya, atau `xiao gateway wa unlink` lalu pairing ulang untuk menautkan akun lain.\x1b[0m\n");
+        return;
+    }
     let owner_number = get_configured_whatsapp_owner();
     let config = crate::gateway::whatsapp::WhatsAppConfig {
         db_path,
@@ -412,13 +454,7 @@ async fn run_cli_whatsapp_set_owner() {
     let _ = io::stdout().flush();
     let mut input = String::new();
     if io::stdin().read_line(&mut input).is_ok() {
-        let clean: String = input.chars().filter(|c| c.is_ascii_digit()).collect();
-        if !clean.is_empty() {
-            let _ = save_env_kv("WHATSAPP_OWNER_NUMBER", &clean);
-            println!("\n  \x1b[1;32m✔ WhatsApp Owner Number berhasil disimpan: {clean}\x1b[0m\n");
-        } else {
-            println!("\n  \x1b[33mNomor tidak valid atau kosong.\x1b[0m\n");
-        }
+        save_whatsapp_owner(&input);
     }
 }
 
@@ -445,17 +481,17 @@ pub(crate) async fn run_cli_gateway_hub(action: GatewayCliAction<'_>) {
                 run_cli_whatsapp_pair(None).await;
             }
             Some("code") => {
-                run_cli_whatsapp_pair(param.map(|s| s.to_string())).await;
-            }
-            Some("owner") => {
-                if let Some(num) = param {
-                    let clean: String = num.chars().filter(|c| c.is_ascii_digit()).collect();
-                    let _ = save_env_kv("WHATSAPP_OWNER_NUMBER", &clean);
-                    println!("  \x1b[1;32m✔ WhatsApp Owner Number set to: {clean}\x1b[0m\n");
-                } else {
-                    run_cli_whatsapp_set_owner().await;
+                let digits = param.as_deref().map(phone_digits).unwrap_or_default();
+                if digits.is_empty() {
+                    println!("\x1b[33mUsage: xiao gateway wa code <NUMBER> (contoh: 6281234567890)\x1b[0m\n");
+                    std::process::exit(1);
                 }
+                run_cli_whatsapp_pair(Some(digits)).await;
             }
+            Some("owner") => match param.as_deref() {
+                Some(number) => save_whatsapp_owner(number),
+                None => run_cli_whatsapp_set_owner().await,
+            },
             Some("status") | Some("check") => {
                 let db_path = get_whatsapp_db_path();
                 let status = crate::gateway::whatsapp::WhatsAppGateway::check_status(&db_path);
@@ -683,8 +719,24 @@ mod tests {
                 "code".to_string(),
                 "6281234567890".to_string()
             ]),
-            GatewayCliAction::WhatsApp(Some("code"), Some("6281234567890"))
+            GatewayCliAction::WhatsApp(Some("code"), Some("6281234567890".to_string()))
         );
+        assert_eq!(
+            parse_gateway_cli_args(&[
+                "wa".to_string(),
+                "owner".to_string(),
+                "+62".to_string(),
+                "812-3456".to_string()
+            ]),
+            GatewayCliAction::WhatsApp(Some("owner"), Some("+62 812-3456".to_string())),
+            "a number typed with spaces arrives whole"
+        );
+    }
+
+    #[test]
+    fn phone_numbers_keep_only_digits() {
+        assert_eq!(phone_digits("+62 812-3456"), "628123456");
+        assert_eq!(phone_digits("tanpa angka"), "");
     }
 
     #[tokio::test]
