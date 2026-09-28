@@ -4,6 +4,9 @@ use crate::ai::AIChatService;
 use crate::cli::tui::{get_terminal_bar_width, terminal_interactive_select, visible_width};
 use crate::load_environment;
 
+/// Endpoint MCP bawaan yang dipakai bila pengguna belum menyetel apa pun.
+pub const DEFAULT_MCP_URL: &str = "https://mcp.exa.ai/";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum McpCliAction<'a> {
     Status,
@@ -256,11 +259,10 @@ pub(crate) async fn run_cli_mcp_hub(
             println!("  \x1b[38;5;245mTransport Protocol  :\x1b[0m \x1b[38;5;252mJSON-RPC 2.0 (HTTP/SSE)\x1b[0m\n");
 
             println!("\x1b[38;5;244mSubcommands:\x1b[0m");
-            println!("  xiao mcp list              - List all registered MCP server endpoints");
-            println!(
-                "  xiao mcp add <name> <URL>  - Connect a new remote MCP server (SSRF protected)"
-            );
-            println!("  xiao mcp rm <name>         - Reset custom MCP server to default");
+            println!("  xiao mcp list              - Show the active MCP endpoint");
+            println!("  xiao mcp url <URL>         - Set the active MCP endpoint (SSRF protected)");
+            println!("  xiao mcp add <URL>         - Alias for 'url'");
+            println!("  xiao mcp rm                - Restore the default MCP endpoint");
             println!(
                 "  xiao mcp tools             - List registered function calling tools & schemas"
             );
@@ -361,16 +363,15 @@ pub(crate) async fn run_cli_mcp_hub(
                 }
             }
         }
-        McpCliAction::Remove(name_opt) => {
-            if let Some(name) = name_opt {
-                if name == "exa-search" || name == "exa" {
-                    println!("\n\x1b[33mDefault server '{name}' cannot be removed. Use 'xiao mcp reset' to reset.\x1b[0m\n");
-                } else {
-                    println!("\n\x1b[33mNo dedicated server '{name}' to remove. XiaoBot manages a unified active MCP endpoint (currently: {current_mcp_url}). Use 'xiao mcp reset' to restore the default endpoint.\x1b[0m\n");
-                }
+        McpCliAction::Remove(_) => {
+            // XiaoBot mengelola satu endpoint MCP aktif, bukan daftar server.
+            // Karena itu 'rm' bermakna mengembalikan endpoint ke bawaan.
+            println!("\n  Mengembalikan endpoint MCP ke bawaan.");
+            if crate::ai::service::save_app_setting("EXA_MCP_URL", DEFAULT_MCP_URL).is_ok() {
+                println!("  Endpoint aktif sekarang: {DEFAULT_MCP_URL}\n");
             } else {
-                println!("\n\x1b[31m✖ Error: <name> parameter is required.\x1b[0m");
-                println!("  Usage: xiao mcp rm <name> (or run 'xiao mcp reset' to restore default endpoint)\n");
+                println!("\n\x1b[31m✖ Gagal menyimpan konfigurasi MCP.\x1b[0m\n");
+                std::process::exit(1);
             }
         }
         McpCliAction::Tools => {
@@ -381,11 +382,10 @@ pub(crate) async fn run_cli_mcp_hub(
             probe_mcp_server(&current_mcp_url, query).await;
         }
         McpCliAction::Reset => {
-            let default_url = "https://mcp.exa.ai/";
-            if crate::ai::service::save_app_setting("EXA_MCP_URL", default_url).is_ok() {
+            if crate::ai::service::save_app_setting("EXA_MCP_URL", DEFAULT_MCP_URL).is_ok() {
                 println!(
                     "\n\x1b[1;32m✔ MCP endpoint successfully reset to default:\x1b[0m {}\n",
-                    default_url
+                    DEFAULT_MCP_URL
                 );
             } else {
                 println!("\n\x1b[31m✖ Failed to reset MCP configuration.\x1b[0m\n");
@@ -401,9 +401,10 @@ pub(crate) async fn run_cli_mcp_hub(
 
             println!("  \x1b[1;38;2;6;182;212m▸ \x1b[1;37mACTIONS\x1b[0m");
             println!("    \x1b[1;38;5;45mstatus\x1b[0m, \x1b[38;5;244m(none)\x1b[0m             \x1b[38;5;250mDisplay MCP server status & telemetry dashboard\x1b[0m");
-            println!("    \x1b[1;38;5;45mlist\x1b[0m                      \x1b[38;5;250mList all registered MCP server endpoints\x1b[0m");
-            println!("    \x1b[1;38;5;45madd\x1b[0m \x1b[38;5;245m<name> <URL>\x1b[0m          \x1b[38;5;250mConnect new remote MCP server (SSRF guarded)\x1b[0m");
-            println!("    \x1b[1;38;5;45mrm\x1b[0m, \x1b[1;38;5;45mremove\x1b[0m \x1b[38;5;245m<name>\x1b[0m         \x1b[38;5;250mReset custom MCP endpoint to default\x1b[0m");
+            println!("    \x1b[1;38;5;45mlist\x1b[0m                      \x1b[38;5;250mShow the active MCP endpoint\x1b[0m");
+            println!("    \x1b[1;38;5;45murl\x1b[0m, \x1b[1;38;5;45mset\x1b[0m \x1b[38;5;245m<URL>\x1b[0m            \x1b[38;5;250mSet the active MCP endpoint (SSRF guarded)\x1b[0m");
+            println!("    \x1b[1;38;5;45madd\x1b[0m \x1b[38;5;245m<URL>\x1b[0m                  \x1b[38;5;250mAlias for 'url'\x1b[0m");
+            println!("    \x1b[1;38;5;45mrm\x1b[0m, \x1b[1;38;5;45mremove\x1b[0m                \x1b[38;5;250mRestore the default MCP endpoint\x1b[0m");
             println!("    \x1b[1;38;5;45mtools\x1b[0m                     \x1b[38;5;250mList registered tool schemas exposed to AI\x1b[0m");
             println!("    \x1b[1;38;5;45mtest\x1b[0m, \x1b[1;38;5;45mprobe\x1b[0m \x1b[38;5;245m[query]\x1b[0m        \x1b[38;5;250mDirect JSON-RPC probe to MCP server\x1b[0m");
             println!("    \x1b[1;38;5;45mreset\x1b[0m                     \x1b[38;5;250mReset MCP endpoint to default (https://mcp.exa.ai/)\x1b[0m");
@@ -416,7 +417,7 @@ pub(crate) async fn run_cli_mcp_hub(
 
             println!("  \x1b[1;37mQuick Examples:\x1b[0m");
             println!("    \x1b[1;38;5;45mxiao mcp list\x1b[0m                              \x1b[38;5;242m# Inspect connected servers\x1b[0m");
-            println!("    \x1b[1;38;5;45mxiao mcp add custom https://mcp.exa.ai/\x1b[0m    \x1b[38;5;242m# Add remote server\x1b[0m");
+            println!("    \x1b[1;38;5;45mxiao mcp url https://mcp.exa.ai/\x1b[0m           \x1b[38;5;242m# Set active endpoint\x1b[0m");
             println!("    \x1b[1;38;5;45mxiao mcp tools\x1b[0m                             \x1b[38;5;242m# View exposed tools\x1b[0m");
             println!("    \x1b[1;38;5;45mxiao mcp test\x1b[0m                              \x1b[38;5;242m# Probe server latency\x1b[0m\n");
 
