@@ -3,6 +3,7 @@ pub mod memory;
 pub mod provider;
 pub mod secrets;
 pub mod session;
+pub mod wa_inbox;
 
 #[allow(unused_imports)]
 pub use inbox::{
@@ -44,6 +45,14 @@ pub(crate) use session::{
     load_sessions_db_async, remove_session_transaction_db_async,
     replace_session_messages_if_revision_db_async, switch_active_session_db_async,
     RemoveSessionOutcome,
+};
+
+#[allow(unused_imports)]
+pub use wa_inbox::{
+    enqueue_whatsapp_message_async, mark_whatsapp_processed_async,
+    mark_whatsapp_processing_claim_async, mark_whatsapp_processing_failed_async,
+    mark_whatsapp_processing_retry_async, pending_whatsapp_messages_async,
+    recover_whatsapp_processing_async, WhatsAppInboxRecord,
 };
 
 #[cfg(test)]
@@ -190,6 +199,16 @@ fn ensure_database_initialized(conn: &Connection, path: &Path) -> rusqlite::Resu
             received_at TEXT NOT NULL,
             last_error TEXT
         );
+        CREATE TABLE IF NOT EXISTS whatsapp_inbox (
+            message_key TEXT PRIMARY KEY,
+            chat_id     INTEGER NOT NULL,
+            sender_id   INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            status      TEXT NOT NULL,
+            attempts    INTEGER NOT NULL DEFAULT 0,
+            received_at TEXT NOT NULL,
+            last_error  TEXT
+        );
         CREATE TABLE IF NOT EXISTS user_memories (
             user_id INTEGER NOT NULL,
             key TEXT NOT NULL,
@@ -206,7 +225,8 @@ fn ensure_database_initialized(conn: &Connection, path: &Path) -> rusqlite::Resu
         );
         CREATE INDEX IF NOT EXISTS idx_messages_user_session ON messages(user_id, session_id);
         CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id);
-        CREATE INDEX IF NOT EXISTS idx_telegram_inbox_status_update_id ON telegram_inbox(status, update_id);",
+        CREATE INDEX IF NOT EXISTS idx_telegram_inbox_status_update_id ON telegram_inbox(status, update_id);
+        CREATE INDEX IF NOT EXISTS idx_whatsapp_inbox_status ON whatsapp_inbox(status, received_at);",
     )?;
     ensure_column(
         conn,

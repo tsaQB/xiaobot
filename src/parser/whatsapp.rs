@@ -83,10 +83,17 @@ pub fn format_for_whatsapp(input: &str) -> String {
     output
 }
 
-/// Memecah pesan yang melebihi batas karakter layar WhatsApp (default: 3.500 karakter)
-/// secara cerdas berdasarkan batas baris/paragraf agar tidak terpotong di tengah kalimat.
+/// Memecah pesan agar muat pada batas karakter WhatsApp.
+///
+/// Pemecahan diutamakan pada pergantian baris. Baris tunggal yang
+/// melampaui batas dipotong paksa pada batas karakter, karena
+/// memotong pada posisi byte akan memanikkan program pada teks
+/// non-ASCII seperti emoji dan aksara Arab.
 pub fn chunk_whatsapp_message(text: &str, max_len: usize) -> Vec<String> {
-    if text.len() <= max_len {
+    if max_len == 0 {
+        return vec![text.to_string()];
+    }
+    if text.chars().count() <= max_len {
         return vec![text.to_string()];
     }
 
@@ -94,17 +101,20 @@ pub fn chunk_whatsapp_message(text: &str, max_len: usize) -> Vec<String> {
     let mut current = String::new();
 
     for line in text.lines() {
-        if current.len() + line.len() + 1 > max_len && !current.is_empty() {
-            chunks.push(current.trim_end().to_string());
-            current = String::new();
+        for piece in split_oversized_line(line, max_len) {
+            let projected = current.chars().count() + piece.chars().count() + 1;
+            if projected > max_len && !current.is_empty() {
+                chunks.push(current.trim_end().to_string());
+                current = String::new();
+            }
+            if !current.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(&piece);
         }
-        if !current.is_empty() {
-            current.push('\n');
-        }
-        current.push_str(line);
     }
 
-    if !current.is_empty() {
+    if !current.trim().is_empty() {
         chunks.push(current.trim_end().to_string());
     }
 
@@ -113,6 +123,27 @@ pub fn chunk_whatsapp_message(text: &str, max_len: usize) -> Vec<String> {
     } else {
         chunks
     }
+}
+
+/// Memotong satu baris yang melampaui batas menjadi beberapa bagian,
+/// selalu pada batas karakter agar aman untuk teks multibyte.
+fn split_oversized_line(line: &str, max_len: usize) -> Vec<String> {
+    if line.chars().count() <= max_len {
+        return vec![line.to_string()];
+    }
+
+    let mut pieces = Vec::new();
+    let mut buffer = String::new();
+    for ch in line.chars() {
+        if buffer.chars().count() >= max_len {
+            pieces.push(std::mem::take(&mut buffer));
+        }
+        buffer.push(ch);
+    }
+    if !buffer.is_empty() {
+        pieces.push(buffer);
+    }
+    pieces
 }
 
 #[cfg(test)]
@@ -164,5 +195,47 @@ mod tests {
         for chunk in &chunks {
             assert!(chunk.len() <= 1000);
         }
+    }
+
+    #[test]
+    fn single_oversized_line_is_split_below_limit() {
+        let line = "A".repeat(9_000);
+        let chunks = chunk_whatsapp_message(&line, 3_500);
+        assert!(chunks.len() >= 3, "baris raksasa harus terpecah");
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 3_500);
+        }
+    }
+
+    #[test]
+    fn multibyte_text_is_split_without_panicking() {
+        let text = "\u{1F389}".repeat(5_000);
+        let chunks = chunk_whatsapp_message(&text, 1_000);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 1_000);
+        }
+        let rejoined: String = chunks.concat();
+        assert_eq!(rejoined.chars().count(), 5_000, "tidak ada karakter hilang");
+    }
+
+    #[test]
+    fn zero_limit_degrades_gracefully() {
+        let chunks = chunk_whatsapp_message("halo", 0);
+        assert_eq!(chunks, vec!["halo".to_string()]);
+    }
+
+    #[test]
+    fn long_code_block_survives_chunking_without_loss() {
+        let body = (0..400)
+            .map(|i| format!("let baris_{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = format!("```rust\n{body}\n```");
+        let chunks = chunk_whatsapp_message(&text, 2_000);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 2_000);
+        }
+        assert!(chunks.concat().contains("let baris_399 = 399;"));
     }
 }

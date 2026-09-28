@@ -47,7 +47,10 @@ pub(crate) fn is_whatsapp_enabled() -> bool {
 }
 
 pub(crate) fn get_whatsapp_db_path() -> std::path::PathBuf {
-    crate::ai::storage::xiao_data_dir().join("whatsapp.db")
+    let dir = crate::ai::storage::xiao_data_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    crate::ai::storage::harden_dir_mode(&dir);
+    dir.join("whatsapp.db")
 }
 
 fn get_config_path() -> std::path::PathBuf {
@@ -175,9 +178,20 @@ pub(crate) fn get_configured_token() -> Option<String> {
 // Main CLI Entrypoint
 // ==========================================
 
+fn init_tracing() {
+    use std::sync::Once;
+    static TRACING_INIT: Once = Once::new();
+    TRACING_INIT.call_once(|| {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    });
+}
+
 #[tokio::main]
 async fn main() {
     load_environment();
+    init_tracing();
     use std::io::IsTerminal;
     let args: Vec<String> = env::args().collect();
     let subcommand = args.get(1).map(|s| s.as_str());

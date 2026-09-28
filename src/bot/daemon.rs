@@ -301,8 +301,6 @@ pub async fn poll_loop(
 }
 
 pub async fn run_daemon(ai_service: Arc<AIChatService>) {
-    tracing_subscriber::fmt::init();
-
     let wa_db_path = get_whatsapp_db_path();
     let wa_status = crate::gateway::whatsapp::WhatsAppGateway::check_status(&wa_db_path);
     let wa_enabled =

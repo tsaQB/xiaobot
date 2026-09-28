@@ -70,12 +70,7 @@ impl DeliverySink for WhatsAppDeliverySink {
         Ok(())
     }
 
-    async fn send_text(
-        &self,
-        chat_id: i64,
-        text: &str,
-        _reply_to: Option<i64>,
-    ) -> Result<i64, String> {
+    async fn send_text(&self, chat_id: i64, text: &str) -> Result<(), String> {
         let Some(jid) = self.resolve_jid(chat_id).await else {
             return Err(format!("Invalid chat_id {chat_id} for WhatsApp JID"));
         };
@@ -86,25 +81,36 @@ impl DeliverySink for WhatsAppDeliverySink {
         // Pecah pesan jika melebihi batas 3.500 karakter per gelembung chat
         let chunks = chunk_whatsapp_message(&formatted, 3500);
 
-        let mut last_id = chrono::Utc::now().timestamp_millis();
         for chunk in chunks {
             let msg = wa::Message::text(chunk);
-            match self.client.send_message(&jid, msg).await {
-                Ok(resp) => {
-                    let mut hash: u64 = 0xcbf29ce484222325;
-                    for byte in resp.message_id.bytes() {
-                        hash ^= byte as u64;
-                        hash = hash.wrapping_mul(0x100000001b3);
-                    }
-                    last_id = hash as i64;
-                }
-                Err(e) => {
-                    error!("Failed to send WhatsApp message to {jid}: {e}");
-                    return Err(format!("WhatsApp send error: {e}"));
-                }
+            if let Err(e) = self.client.send_message(&jid, msg).await {
+                error!("Failed to send WhatsApp message to {jid}: {e}");
+                return Err(format!("WhatsApp send error: {e}"));
             }
         }
 
-        Ok(last_id)
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positive_chat_id_maps_to_direct_message_jid() {
+        let jid = WhatsAppDeliverySink::id_to_jid(6281234567890).expect("dm jid resolved");
+        assert_eq!(jid.to_string(), "6281234567890@s.whatsapp.net");
+    }
+
+    #[test]
+    fn negative_chat_id_maps_to_group_jid() {
+        let jid = WhatsAppDeliverySink::id_to_jid(-120363028384910293).expect("group jid resolved");
+        assert_eq!(jid.to_string(), "120363028384910293@g.us");
+    }
+
+    #[test]
+    fn zero_chat_id_is_rejected() {
+        assert!(WhatsAppDeliverySink::id_to_jid(0).is_none());
     }
 }

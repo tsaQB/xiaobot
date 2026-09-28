@@ -15,7 +15,6 @@ pub struct WhatsAppConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WhatsAppStatus {
-    Unconfigured,
     Linked,
     Unlinked,
 }
@@ -86,6 +85,6 @@ impl WhatsAppGateway {
         config: WhatsAppConfig,
         ai_service: std::sync::Arc<crate::ai::AIChatService>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        client::WhatsAppClientRunner::run(config, ai_service, None).await
+        client::WhatsAppClientRunner::run(config, ai_service).await
     }
 }
