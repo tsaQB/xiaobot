@@ -372,3 +372,44 @@ async fn a_reply_under_a_photo_lets_the_model_see_that_photo() {
 
     h.clean_up().await;
 }
+
+#[tokio::test]
+async fn a_long_replied_answer_reaches_the_model_whole_but_history_stays_short() {
+    let h = Harness::new(880_007, FakeTelegram::always_ok().await, "Baik.").await;
+    let now = clock_secs();
+    let long_answer = format!("{} BAGIAN-AKHIR", "kalimat panjang. ".repeat(600));
+    let reply = json!({
+        "text": "jelaskan bagian akhirnya",
+        "reply_to_message": {
+            "message_id": 4, "date": now,
+            "chat": {"id": h.owner, "type": "private"},
+            "from": {"id": 900, "is_bot": true, "first_name": "Xiao", "username": "XiaoBot"},
+            "text": long_answer
+        }
+    });
+    h.send(new_message(1, h.message(fresh_message_id(), now, reply)))
+        .await;
+
+    let requests = h.main_requests();
+    assert_eq!(requests.len(), 1);
+    let sent = last_user_content(&requests[0]);
+    assert!(
+        sent.contains("BAGIAN-AKHIR"),
+        "the model sees the whole answer"
+    );
+
+    let history = crate::ai::storage::load_scoped_messages_async(h.owner, 0, 10).await;
+    let stored = history
+        .iter()
+        .find(|message| message.role == "user")
+        .map(|message| message.content.to_string())
+        .unwrap_or_default();
+    assert!(stored.contains("jelaskan bagian akhirnya"), "{stored}");
+    assert!(
+        !stored.contains("BAGIAN-AKHIR"),
+        "history keeps a short quote"
+    );
+    assert!(stored.chars().count() < 2_000, "{}", stored.chars().count());
+
+    h.clean_up().await;
+}

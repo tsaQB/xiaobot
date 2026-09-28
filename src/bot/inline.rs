@@ -22,6 +22,7 @@ use crate::bot::guest::{
     deliver_inline_answer, generate_stateless_answer, EMPTY_ANSWER_TEXT, NO_PROVIDER_TEXT,
     THINKING_TEXT,
 };
+use crate::bot::media::MessageMedia;
 use crate::bot::models::{ChosenInlineResult, InlineQuery, InputRichMessage, RichBlock};
 use crate::bot::router::ChatRouteScope;
 use crate::bot::worker::{record_task_outcome, TaskOutcome, INLINE_SCOPE_THREAD_ID};
@@ -70,6 +71,45 @@ fn answer_message(query: &str, answer: &str) -> InputRichMessage {
         },
     );
     message
+}
+
+/// Largest picture fetched from a link in an inline question.
+const MAX_LINKED_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// The first link in `query` that points to a JPEG, PNG or WEBP picture.
+fn image_link(query: &str) -> Option<&str> {
+    query.split_whitespace().find(|word| {
+        let lower = word.to_ascii_lowercase();
+        let path = lower.split(['?', '#']).next().unwrap_or("");
+        (lower.starts_with("https://") || lower.starts_with("http://"))
+            && [".jpg", ".jpeg", ".png", ".webp"]
+                .iter()
+                .any(|ext| path.ends_with(ext))
+    })
+}
+
+/// Inline queries carry text only, so a picture can only arrive as a link:
+/// the first image link is downloaded through the SSRF-safe fetcher and shown
+/// to the model. Other links are left to the text and the web tools.
+async fn image_from_link(bot: &TelegramBotClient, query: &str) -> MessageMedia {
+    let Some(url) = image_link(query) else {
+        return MessageMedia::default();
+    };
+    let Some((bytes, _, file_name)) = bot.download_media_bytes(url, MAX_LINKED_IMAGE_BYTES).await
+    else {
+        return MessageMedia::default();
+    };
+    let mime = match file_name.as_str() {
+        "image.jpg" => "image/jpeg",
+        "image.png" => "image/png",
+        "image.webp" => "image/webp",
+        _ => return MessageMedia::default(),
+    };
+    MessageMedia {
+        image_bytes: Some(bytes),
+        mime_type: Some(mime.to_string()),
+        ..MessageMedia::default()
+    }
 }
 
 pub async fn handle_inline_query(
@@ -124,12 +164,14 @@ pub async fn handle_chosen_inline_result(
         return;
     }
 
+    let media = image_from_link(bot, query).await;
     let (answer, cancelled) = generate_stateless_answer(
         ai_service,
         owner_id,
         INLINE_SCOPE_THREAD_ID,
         owner_id,
         query,
+        media,
     )
     .await;
     if cancelled && ai_service.is_shutting_down() {
@@ -186,6 +228,27 @@ mod tests {
             "query": "apa itu Rust?",
         }))
         .expect("valid chosen inline result")
+    }
+
+    #[test]
+    fn only_picture_links_are_fetched() {
+        assert_eq!(
+            image_link("apa isi foto https://example.com/a/kucing.JPG?w=800 ini"),
+            Some("https://example.com/a/kucing.JPG?w=800")
+        );
+        assert_eq!(image_link("baca https://example.com/artikel"), None);
+        assert_eq!(image_link("file:///etc/passwd.png"), None);
+        assert_eq!(image_link("tanpa tautan"), None);
+    }
+
+    #[tokio::test]
+    async fn a_picture_link_to_a_private_address_is_never_fetched() {
+        let telegram = FakeTelegram::always_ok().await;
+        let media = image_from_link(&telegram.client, "lihat http://127.0.0.1/x.png").await;
+        assert!(
+            media.image_bytes.is_none(),
+            "the SSRF policy blocks loopback"
+        );
     }
 
     #[tokio::test]

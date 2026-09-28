@@ -191,6 +191,7 @@ cargo run -- setup
   - `inbound.rs`: Message kinds beyond text and classic media: stickers, locations/venues, live photos, forwarded rich messages, checklists and polls; reply context (`reply_context`, `reply_author`); and the edited-message window and text fingerprint.
   - `guest.rs`: Bot API 10.0 guest mode (`guest_message` → `answerGuestQuery` placeholder → inline edit with the final answer), plus the stateless generation and inline-edit delivery shared with inline mode.
   - `inline.rs`: Inline mode (`inline_query` → one placeholder result with a keyboard → `chosen_inline_result` → stateless generation → inline edit).
+  - `media.rs`: Downloads and reads the file a message carries (photo or live-photo clip, sticker, voice, audio, video, video note, document) into `MessageMedia`, reporting problems instead of messaging the chat; shared by ordinary chats and guest mode.
   - `image_flow.rs`: Multi-step conversational image generation pipeline, prompt extraction, and structured fallback cards.
   - `client.rs`: The single Telegram Bot API client (every network call, retries, Rich → HTML → plain fallback chain, draft preparation, file downloads). Behavioural tests live in `client/tests.rs` and run against the fake server in `test_support.rs`.
   - `client/raw.rs` / `client/raw/render.rs`: Transport-independent helpers the client delegates to: per-task delivery context, bounded SSRF-safe media downloads, remote-media-to-link conversion, text chunking, and the HTML/plain-text fallback renderers. (It no longer duplicates the Bot API calls.)
@@ -252,7 +253,7 @@ When modifying or adding features, you **must** preserve these invariants:
 
 ### 3. Outbound SSRF & Network Security
 - **Rule**: Any remote fetch of a URL that came from a user, a model, or a web page must go through `bot::url_policy::fetch_public_url` (or, for single-hop downloads without redirects, `resolve_download_url` plus a pinned client). `fetch_public_url` re-validates every redirect hop with `resolve_redirect_hop`, pins the connection to the vetted IP, bypasses ambient proxies, and bounds the body.
-- **Users**: `fetch_url` (`ai::tools::fetch_web_content`), the DuckDuckGo result scraper, and `client/raw.rs::download_media_bytes` (the Telegram media re-upload downloader and the `send_live_photo` tool). Generated-image downloads (`service/image.rs::download_generated_image`) use `resolve_download_url` with a pinned client and no redirects.
+- **Users**: `fetch_url` (`ai::tools::fetch_web_content`), the DuckDuckGo result scraper, and `client/raw.rs::download_media_bytes` (the Telegram media re-upload downloader, the `send_live_photo` tool, and picture links in inline questions). Generated-image downloads (`service/image.rs::download_generated_image`) use `resolve_download_url` with a pinned client and no redirects.
 - **Blocked**: Loopback (`127.0.0.0/8`, `::1`), RFC 1918 private subnets, link-local addresses, SIIT/NAT64-mapped IPv6, and unsafe URI schemes.
 
 ### 4. Secret Isolation
@@ -288,11 +289,13 @@ When modifying or adding features, you **must** preserve these invariants:
 - Only the owner's `guest_message` is answered; anyone else is dropped with no reply.
 - Guest generations run with `GenerationInput.guest_mode = true`: the guest system prompt instead of memories and summaries, no history loaded or saved, no curator, and only `GUEST_MODE_TOOLS` (`web_search`, `fetch_url`). Other tool calls get a refusal result.
 - Nothing is ever sent to the guest `chat.id` (it may coincide with an unrelated chat): `bot` is `None` for the generation and the reply is edited through `inline_message_id` only. Guest updates use their own mailbox (`thread_id = GUEST_SCOPE_THREAD_ID`).
+- A photo, voice note, video or document in the owner's guest message, or in the message it replies to, is loaded with `bot::media::load_message_media` after the placeholder is up and passed to the generation; it is never stored, and a download failure only adds a note to the prompt.
 - The guest query is answered once with a placeholder. An interrupted generation edits it into a "call again" notice rather than returning `Interrupted`, because the query cannot be answered twice.
 
 ### 6a-bis. Inline Mode Is Stateless Too
 - Only the owner's `inline_query` is answered (one result, `is_personal`, `cache_time: 0`); anyone else gets no answer. The result carries an inline keyboard because Telegram only reports `inline_message_id` for messages with one.
 - The generation starts on `chosen_inline_result` (requires `/setinlinefeedback` in @BotFather) and follows the guest-mode rules: guest system prompt, no history or memories, read-only tools, `bot` is `None`, and only the inline message is edited.
+- Inline questions are text only; the first picture link (`.jpg`, `.jpeg`, `.png`, `.webp`) is fetched with `download_media_bytes` (SSRF-safe, 10 MB) and passed as an image. Other links are left to `fetch_url`.
 - Inline queries and chosen results use separate owner mailboxes (`INLINE_QUERY_SCOPE_THREAD_ID`, `INLINE_SCOPE_THREAD_ID`) so a placeholder answer never waits behind a generation. Stale `inline_query` rows are acknowledged on replay; an interrupted chosen result returns `Interrupted` and is answered after restart, since an inline message can still be edited.
 
 ### 6b. Edited Messages
@@ -302,7 +305,7 @@ When modifying or adding features, you **must** preserve these invariants:
 
 ### 6c. Reply Context
 - A reply carries the replied-to message to the model through `ChatInput.reply_context`, fenced and labelled as quoted material, never as instructions. Image-intent detection reads only the owner's own words.
-- Xiao's own earlier answers are capped at `inbound::MAX_OWN_ANSWER_QUOTE_CHARS` (4,000); other messages at `MAX_QUOTED_CHARS`. A `TextQuote` (the part the user selected) is always included.
+- `inbound::reply_context` returns an `inbound::ReplyContext` in two sizes: `for_model` (up to `MAX_QUOTED_CHARS`) goes to the model, `for_history` (up to `HISTORY_QUOTE_CHARS`, 1,000) is what `GenerationInput.canonical_prompt` stores in history. A `TextQuote` (the part the user selected) is always included.
 - A reply without its own attachment reuses the replied message's media. That media is best effort: download or format failures are not reported and the question is answered from the quoted text.
 
 ### 7. WhatsApp Single-Owner Boundary

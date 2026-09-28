@@ -19,6 +19,7 @@ use tracing::warn;
 use crate::ai::{self, service::AIChatService};
 use crate::bot::client::TelegramBotClient;
 use crate::bot::inbound;
+use crate::bot::media::{self, MessageMedia};
 use crate::bot::models::{InputRichMessage, Message, RichBlock};
 use crate::bot::router::{strip_bot_mention, ChatRouteScope};
 use crate::bot::transport_policy::fallback_allowed_error;
@@ -41,8 +42,13 @@ const RESULT_ID: &str = "xiao-guest-reply";
 /// Builds the prompt for a guest request: the owner's words without the
 /// mention, plus the message they replied to (quoted as material, not as
 /// instructions) and any shared location, sticker or forwarded rich message.
+/// `has_media` says a file (photo, voice, video, document) comes along.
 /// `None` when there is nothing to answer.
-pub fn guest_prompt(message: &Message, bot_username: Option<&str>) -> Option<String> {
+pub fn guest_prompt(
+    message: &Message,
+    bot_username: Option<&str>,
+    has_media: bool,
+) -> Option<String> {
     let raw = inbound::message_text(message);
     let request = bot_username
         .and_then(|name| strip_bot_mention(raw, name))
@@ -51,12 +57,15 @@ pub fn guest_prompt(message: &Message, bot_username: Option<&str>) -> Option<Str
     // Guest replies are read by everyone in someone else's chat, so the
     // replied-to author is not named.
     if let Some(quoted) = inbound::reply_context(message, inbound::ReplyAuthor::Unknown) {
-        sections.push(quoted);
+        sections.push(quoted.for_model);
     }
     if let Some(extra) = inbound::describe_extra_content(message) {
         sections.push(extra);
     }
     match (request.is_empty(), sections.is_empty()) {
+        (true, true) if has_media => {
+            return Some("Permintaan: tanggapi lampiran ini secara ringkas.".to_string())
+        }
         (true, true) => return None,
         (false, true) => return Some(request),
         (true, false) => {
@@ -160,6 +169,7 @@ pub(crate) async fn generate_stateless_answer(
     scope_thread_id: i64,
     owner_id: i64,
     prompt: &str,
+    media: MessageMedia,
 ) -> (String, bool) {
     let generation_lock = ai_service
         .generation_lock(scope_chat_id, scope_thread_id)
@@ -172,16 +182,16 @@ pub(crate) async fn generate_stateless_answer(
         canonical_prompt: None,
         media_to_main: true,
         sink: None,
-        image_bytes: None,
-        document_images: None,
-        mime_type: None,
-        doc_text: None,
-        doc_name: None,
-        audio_bytes: None,
-        audio_mime: None,
-        video_bytes: None,
-        video_mime: None,
-        video_duration: None,
+        image_bytes: media.image_bytes,
+        document_images: media.document_images,
+        mime_type: media.mime_type.as_deref(),
+        doc_text: media.doc_text.as_deref(),
+        doc_name: media.doc_name.as_deref(),
+        audio_bytes: media.audio_bytes,
+        audio_mime: media.audio_mime.as_deref(),
+        video_bytes: media.video_bytes,
+        video_mime: media.video_mime.as_deref(),
+        video_duration: Some(media.video_duration),
         bot: None,
         reply_to_message_id: None,
         guest_mode: true,
@@ -229,7 +239,19 @@ pub async fn handle_guest_message(
         return;
     }
 
-    let Some(prompt) = guest_prompt(&msg, route_scope.bot_username.as_deref()) else {
+    // The owner's own file, or else the one in the message they replied to.
+    let media_message = if inbound::carries_media(&msg) {
+        Some(&msg)
+    } else {
+        msg.reply_to_message
+            .as_deref()
+            .filter(|replied| inbound::carries_media(replied))
+    };
+    let Some(mut prompt) = guest_prompt(
+        &msg,
+        route_scope.bot_username.as_deref(),
+        media_message.is_some(),
+    ) else {
         answer_notice(bot, guest_query_id, EMPTY_REQUEST_TEXT).await;
         return;
     };
@@ -250,12 +272,23 @@ pub async fn handle_guest_message(
         }
     };
 
+    // The file is read after the placeholder is up, so the chat does not
+    // wait on the download. It is used for this answer only: guest answers
+    // are never stored.
+    let media = match media_message {
+        Some(message) => media::load_message_media(bot, ai_service, message).await,
+        None => MessageMedia::default(),
+    };
+    if media_message.is_some() && !media.has_content() {
+        prompt.push_str("\n\n(Lampiran tidak dapat diunduh atau dibaca; jawab dari teksnya saja.)");
+    }
     let (answer, cancelled) = generate_stateless_answer(
         ai_service,
         msg.chat.id,
         GUEST_SCOPE_THREAD_ID,
         owner_id,
         &prompt,
+        media,
     )
     .await;
 
@@ -332,7 +365,7 @@ mod tests {
             }
         }))
         .expect("valid guest message");
-        let prompt = guest_prompt(&message, Some("XiaoBot")).expect("prompt built");
+        let prompt = guest_prompt(&message, Some("XiaoBot"), false).expect("prompt built");
         assert!(
             prompt.contains("\"\"\"\nSelamat pagi semua\n\"\"\""),
             "{prompt}"
@@ -344,11 +377,11 @@ mod tests {
         assert!(!prompt.contains("@XiaoBot"));
 
         assert_eq!(
-            guest_prompt(&guest_message(OWNER, "@XiaoBot"), Some("XiaoBot")),
+            guest_prompt(&guest_message(OWNER, "@XiaoBot"), Some("XiaoBot"), false),
             None
         );
         assert_eq!(
-            guest_prompt(&guest_message(OWNER, "apa kabar?"), Some("XiaoBot")).as_deref(),
+            guest_prompt(&guest_message(OWNER, "apa kabar?"), Some("XiaoBot"), false).as_deref(),
             Some("apa kabar?")
         );
     }
@@ -414,6 +447,65 @@ mod tests {
                 .iter()
                 .all(|name| ["web_search", "fetch_url"].contains(name)),
             "{tools:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_photo_in_a_guest_request_is_shown_to_the_model_without_being_stored() {
+        let telegram = FakeTelegram::start(Arc::new(|request, _| match request.method.as_str() {
+            "answerGuestQuery" => (
+                200,
+                json!({"ok": true, "result": {"inline_message_id": "inline-7"}}),
+            ),
+            "getFile" => (
+                200,
+                json!({"ok": true, "result": {
+                    "file_id": "P", "file_unique_id": "p", "file_size": 4,
+                    "file_path": "photos/file_3.jpg"
+                }}),
+            ),
+            _ => (200, json!({"ok": true, "result": true})),
+        }))
+        .await;
+        let provider = FakeProvider::streaming("Itu kucing oranye.").await;
+        let service = AIChatService::isolated_for_tests(provider.config());
+        let message: Message = serde_json::from_value(json!({
+            "message_id": 5,
+            "date": 1,
+            "chat": {"id": -100777, "type": "supergroup"},
+            "from": {"id": OWNER, "is_bot": false, "first_name": "Owner"},
+            "guest_query_id": "gq-7",
+            "caption": "@XiaoBot",
+            "photo": [{"file_id": "P", "file_unique_id": "p", "width": 10, "height": 10}]
+        }))
+        .expect("valid guest photo");
+
+        handle_guest_message(
+            &telegram.client,
+            &service,
+            &scope(&telegram.client),
+            message,
+        )
+        .await;
+
+        let methods = telegram.methods();
+        assert_eq!(
+            methods.first().map(String::as_str),
+            Some("answerGuestQuery")
+        );
+        assert!(
+            methods.iter().any(|method| method == "getFile"),
+            "{methods:?}"
+        );
+        assert_eq!(methods.last().map(String::as_str), Some("editMessageText"));
+        let body = provider.chat_requests()[0].to_string();
+        assert!(body.contains("data:image/jpeg;base64,"), "{body}");
+        assert!(body.contains("tanggapi lampiran"), "{body}");
+        assert!(
+            crate::ai::storage::load_scoped_messages_async(-100777, GUEST_SCOPE_THREAD_ID, 10)
+                .await
+                .is_empty(),
+            "guest answers are never stored"
         );
     }
 

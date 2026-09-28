@@ -15,10 +15,8 @@ use crate::bot::image_flow::{
 };
 use crate::bot::inbound;
 use crate::bot::models::{CallbackQuery, MessageGenerationStopped, Update};
-use crate::document;
 use crate::parser::build_full_rich_message;
 use crate::timeline::{ExecutionTimeline, GenerationProgressSink, ProgressActivity};
-use crate::util::escape_html;
 
 pub struct ChatInput<'a> {
     pub prompt: &'a str,
@@ -36,8 +34,9 @@ pub struct ChatInput<'a> {
     pub reply_to_message_id: Option<i64>,
     /// The message the user replied to, already fenced as quoted material
     /// ([`inbound::reply_context`]). Kept apart from `prompt` so image intent
-    /// detection only reads the user's own words; the model gets both.
-    pub reply_context: Option<&'a str>,
+    /// detection only reads the user's own words. The model gets the whole
+    /// message; the stored history keeps a shortened quote.
+    pub reply_context: Option<&'a inbound::ReplyContext>,
 }
 
 pub fn build_audio_chat_input<'a>(
@@ -442,12 +441,14 @@ pub async fn handle_ai_chat(
         reply_context,
     } = input;
     let composed_prompt;
-    let user_prompt = match reply_context {
+    let history_prompt;
+    let (user_prompt, canonical_prompt) = match reply_context {
         Some(context) => {
-            composed_prompt = format!("{context}\n\n{user_prompt}");
-            composed_prompt.as_str()
+            composed_prompt = format!("{}\n\n{user_prompt}", context.for_model);
+            history_prompt = format!("{}\n\n{user_prompt}", context.for_history);
+            (composed_prompt.as_str(), Some(history_prompt.as_str()))
         }
-        None => user_prompt,
+        None => (user_prompt, None),
     };
     let generation_lock = ai_service.generation_lock(chat_id, thread_id).await;
     let _generation_guard = generation_lock.lock().await;
@@ -487,7 +488,7 @@ pub async fn handle_ai_chat(
 
     let generation_input = ai::service::GenerationInput {
         prompt: user_prompt,
-        canonical_prompt: None,
+        canonical_prompt,
         media_to_main: true,
         sink: Some(timeline.as_ref() as &dyn GenerationProgressSink),
         image_bytes,
@@ -1039,180 +1040,41 @@ pub async fn handle_update(
         let has_audio = media_msg.voice.is_some() || media_msg.audio.is_some();
         let has_document = media_msg.document.is_some();
 
-        let mut image_bytes: Option<Vec<u8>> = None;
-        let mut document_images: Option<Vec<Vec<u8>>> = None;
-        let mut mime_type: Option<String> = None;
-        let mut doc_text: Option<String> = None;
-        let mut doc_name: Option<String> = None;
-        let mut audio_bytes: Option<Vec<u8>> = None;
-        let mut audio_mime: Option<String> = None;
-        let mut audio_duration: i32 = 0;
-        let mut video_bytes: Option<Vec<u8>> = None;
-        let mut video_mime: Option<String> = None;
-        let mut video_duration: i32 = 0;
-        let mut download_error: Option<crate::bot::client::FileDownloadError> = None;
-        let mut fetch_file =
-            |result: Result<(Vec<u8>, String), crate::bot::client::FileDownloadError>| {
-                result.map_err(|error| download_error = Some(error)).ok()
-            };
-
-        if let Some(v) = media_msg.voice.as_ref() {
-            audio_duration = v.duration;
-            audio_mime = v.mime_type.clone();
-            if let Some((data, path)) = fetch_file(bot.get_file_bytes(&v.file_id).await) {
-                audio_bytes = Some(data);
-                doc_name = path.split('/').next_back().map(str::to_string);
-            }
-        } else if let Some(a) = media_msg.audio.as_ref() {
-            audio_duration = a.duration;
-            audio_mime = a.mime_type.clone();
-            let audio_file_name = a.file_name.clone();
-            if let Some((data, path)) = fetch_file(bot.get_file_bytes(&a.file_id).await) {
-                audio_bytes = Some(data);
-                doc_name =
-                    audio_file_name.or_else(|| path.split('/').next_back().map(str::to_string));
-            }
-        } else if let Some(vid) = media_msg.video.as_ref() {
-            video_duration = vid.duration;
-            if let Some((data, path)) = fetch_file(bot.get_file_bytes(&vid.file_id).await) {
-                video_bytes = Some(data);
-                let ext = path.split('.').next_back().unwrap_or("mp4");
-                video_mime = vid
-                    .mime_type
-                    .clone()
-                    .or_else(|| Some(format!("video/{ext}")));
-            }
-        } else if let Some(vn) = media_msg.video_note.as_ref() {
-            video_duration = vn.duration;
-            if let Some((data, _)) = fetch_file(bot.get_file_bytes(&vn.file_id).await) {
-                video_bytes = Some(data);
-                video_mime = Some("video/mp4".to_string());
-            }
-        } else if has_photo {
-            // A live photo's motion clip goes to the Video route when one can
-            // take it; otherwise (or if that download fails) the still photo
-            // is used like any other photo.
-            let live_clip = match media_msg.live_photo.as_ref() {
-                Some(live) if inbound::live_photo_video_supported(ai_service).await => bot
-                    .get_file_bytes(&live.file_id)
-                    .await
-                    .ok()
-                    .map(|(data, _)| (data, live)),
-                _ => None,
-            };
-            let still = media_msg.photo.as_ref().or_else(|| {
-                media_msg
-                    .live_photo
-                    .as_ref()
-                    .and_then(|live| live.photo.as_ref())
-            });
-            if let Some((data, live)) = live_clip {
-                video_bytes = Some(data);
-                video_mime = Some(
-                    live.mime_type
-                        .clone()
-                        .unwrap_or_else(|| "video/mp4".to_string()),
-                );
-                video_duration = live.duration;
-            } else if let Some(largest) = still.and_then(|photos| photos.last()) {
-                if let Some((data, path)) = fetch_file(bot.get_file_bytes(&largest.file_id).await) {
-                    image_bytes = Some(data);
-                    let ext = path.split('.').next_back().unwrap_or("jpeg");
-                    mime_type = Some(if ext == "jpg" {
-                        "image/jpeg".to_string()
-                    } else {
-                        format!("image/{ext}")
-                    });
-                }
-            }
-        } else if let Some(file_id) = media_msg
-            .sticker
-            .as_ref()
-            .and_then(inbound::sticker_image_file_id)
-        {
-            // Best effort: without the picture the emoji description remains,
-            // so a failed download is not reported to the owner.
-            if let Ok((data, path)) = bot.get_file_bytes(file_id).await {
-                image_bytes = Some(data);
-                mime_type = Some(inbound::image_mime_from_path(&path));
-            }
-        } else if let Some(doc) = media_msg.document.as_ref() {
-            let d_mime = doc.mime_type.clone().unwrap_or_default();
-            let d_name = doc
-                .file_name
-                .clone()
-                .unwrap_or_else(|| "dokumen".to_string());
-            if let Some((data, path)) = fetch_file(bot.get_file_bytes(&doc.file_id).await) {
-                let ClassifiedTelegramDocument {
-                    kind,
-                    mime_type: resolved_mime,
-                } = classify_telegram_document_media(&d_mime, &d_name, &path);
-                match kind {
-                    TelegramDocumentMediaKind::Image => {
-                        image_bytes = Some(data);
-                        mime_type = resolved_mime;
-                    }
-                    TelegramDocumentMediaKind::Audio => {
-                        audio_bytes = Some(data);
-                        audio_mime = resolved_mime;
-                        doc_name = Some(d_name);
-                    }
-                    TelegramDocumentMediaKind::Video => {
-                        video_bytes = Some(data);
-                        video_mime = resolved_mime;
-                    }
-                    TelegramDocumentMediaKind::Other
-                        if document::is_extractable_document(&d_mime, &d_name) =>
-                    {
-                        match document::extract_document(data, &d_mime, &d_name).await {
-                            Ok(extracted) => {
-                                doc_text = extracted.text;
-                                if !extracted.rendered_pages.is_empty() {
-                                    document_images = Some(extracted.rendered_pages);
-                                }
-                                doc_name = Some(d_name);
-                                if let Some(warning) = extracted.warning {
-                                    info!("{warning}");
-                                }
-                            }
-                            Err(err) if media_from_reply => {
-                                info!("Replied-to document could not be read: {err}");
-                            }
-                            Err(err) => {
-                                let safe_name = escape_html(&d_name);
-                                let safe_error = escape_html(&err);
-                                let _ = bot
-                                    .send_message(
-                                        chat_id,
-                                        &format!(
-                                            "⚠️ <b>Dokumen tidak dapat diproses.</b>\n\n<code>{safe_name}</code>\n{safe_error}"
-                                        ),
-                                        Some("HTML"),
-                                        None,
-                                        None,
-                                        None,
-                                    )
-                                    .await;
-                                return;
-                            }
-                        }
-                    }
-                    // An unsupported file under a reply is only described.
-                    TelegramDocumentMediaKind::Other if media_from_reply => {}
-                    TelegramDocumentMediaKind::Other => {
-                        let safe_name = escape_html(&d_name);
-                        let _ = bot.send_message(
-                            chat_id,
-                            &format!(
-                                "⚠️ <b>Format dokumen belum didukung.</b>\n\n<code>{safe_name}</code> tidak akan dipaksa dibaca sebagai teks biner. Xiao mendukung dokumen teks/kode, PDF, DOCX, XLSX, serta arsip ZIP, TAR/TAR.GZ, dan 7Z."
-                            ),
-                            Some("HTML"), None, None, None
-                        ).await;
-                        return;
-                    }
-                }
+        let loaded = crate::bot::media::load_message_media(bot, ai_service, media_msg).await;
+        if let Some(problem) = loaded.problem.as_ref() {
+            // An unreadable or unsupported file under a reply is only
+            // described; one sent with the message is reported.
+            if media_from_reply {
+                info!("Replied-to document was not used: {problem:?}");
+            } else {
+                let _ = bot
+                    .send_message(
+                        chat_id,
+                        &problem.notice_html(),
+                        Some("HTML"),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                return;
             }
         }
+        let crate::bot::media::MessageMedia {
+            image_bytes,
+            document_images,
+            mime_type,
+            doc_text,
+            doc_name,
+            audio_bytes,
+            audio_mime,
+            audio_duration,
+            video_bytes,
+            video_mime,
+            video_duration,
+            download_error,
+            problem: _,
+        } = loaded;
 
         // Media taken from the replied-to message is best effort; its failure
         // is not reported and the question is answered from the quoted text.
@@ -1289,7 +1151,7 @@ pub async fn handle_update(
                 doc_name.as_deref(),
                 reply_to_msg_id,
             );
-            chat_input.reply_context = reply_context.as_deref();
+            chat_input.reply_context = reply_context.as_ref();
             handle_ai_chat(bot, ai_service, chat_id, thread_id, user_id, chat_input).await;
             return;
         }
@@ -1324,7 +1186,7 @@ pub async fn handle_update(
                     video_duration: Some(video_duration),
                     model_snapshot: None,
                     reply_to_message_id: reply_to_msg_id,
-                    reply_context: reply_context.as_deref(),
+                    reply_context: reply_context.as_ref(),
                 },
             )
             .await;
@@ -1355,7 +1217,7 @@ pub async fn handle_update(
                 video_duration: Some(video_duration),
                 model_snapshot: None,
                 reply_to_message_id: reply_to_msg_id,
-                reply_context: reply_context.as_deref(),
+                reply_context: reply_context.as_ref(),
             },
         )
         .await;
@@ -2061,15 +1923,15 @@ mod tests {
 
     #[test]
     fn telegram_document_runtime_uses_one_authoritative_media_classifier() {
-        let source = include_str!("router.rs").replace("\r\n", "\n");
-        let document_start = source
-            .find("} else if let Some(doc) = media_msg.document.as_ref() {")
+        let media_source = include_str!("media.rs").replace("\r\n", "\n");
+        let document_start = media_source
+            .find("} else if let Some(doc) = message.document.as_ref() {")
             .expect("Telegram document branch");
-        let document_end = source[document_start..]
-            .find("\n        }\n\n        // Strict provider lock")
+        let document_end = media_source[document_start..]
+            .find("\n    media\n}")
             .map(|offset| document_start + offset)
             .expect("Telegram document branch end");
-        let document_branch = &source[document_start..document_end];
+        let document_branch = &media_source[document_start..document_end];
 
         assert_eq!(
             document_branch
@@ -2081,6 +1943,7 @@ mod tests {
         assert!(!document_branch.contains("\"image/jpeg\".to_string()"));
         assert!(!document_branch.contains("\"video/mp4\".to_string()"));
 
+        let source = include_str!("router.rs").replace("\r\n", "\n");
         let audio_start = source
             .find("if let Some(a_bytes) = audio_bytes {")
             .expect("audio runtime branch");

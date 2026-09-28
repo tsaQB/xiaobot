@@ -6,6 +6,7 @@ pub mod guest;
 pub mod image_flow;
 pub mod inbound;
 pub mod inline;
+pub mod media;
 pub mod models;
 pub mod router;
 pub(crate) mod transport_policy;

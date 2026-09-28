@@ -408,7 +408,7 @@ impl AIChatService {
     ) -> ChatGenerationResult {
         let GenerationInput {
             prompt,
-            canonical_prompt: _,
+            canonical_prompt,
             media_to_main: _,
             sink,
             image_bytes,
@@ -466,7 +466,7 @@ impl AIChatService {
                     snapshot,
                     GenerationInput {
                         prompt,
-                        canonical_prompt: None,
+                        canonical_prompt,
                         media_to_main: true,
                         sink,
                         image_bytes,
@@ -525,7 +525,7 @@ impl AIChatService {
                         snapshot,
                         GenerationInput {
                             prompt,
-                            canonical_prompt: None,
+                            canonical_prompt,
                             media_to_main: true,
                             sink,
                             image_bytes,
@@ -589,7 +589,7 @@ impl AIChatService {
                     snapshot,
                     GenerationInput {
                         prompt: &synthesis_prompt,
-                        canonical_prompt: Some(prompt),
+                        canonical_prompt: Some(canonical_prompt.unwrap_or(prompt)),
                         media_to_main: false,
                         sink,
                         image_bytes,
@@ -621,7 +621,7 @@ impl AIChatService {
                     snapshot,
                     GenerationInput {
                         prompt,
-                        canonical_prompt: None,
+                        canonical_prompt,
                         media_to_main: true,
                         sink,
                         image_bytes,
@@ -682,7 +682,7 @@ impl AIChatService {
             snapshot,
             GenerationInput {
                 prompt: &synthesis_prompt,
-                canonical_prompt: Some(prompt),
+                canonical_prompt: Some(canonical_prompt.unwrap_or(prompt)),
                 media_to_main: false,
                 sink,
                 image_bytes,
