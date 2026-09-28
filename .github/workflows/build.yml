@@ -36,6 +36,23 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      - name: Guard against message content in logs
+        run: |
+          if rg -n 'info!|warn!|error!' src/gateway/ | rg -i 'trimmed|text|content|phone'; then
+            echo "Log tingkat info tidak boleh memuat isi pesan atau nomor telepon"
+            exit 1
+          fi
+
+      - name: Guard against oversized source files
+        run: |
+          for file in $(git ls-files 'src/**/*.rs'); do
+            lines=$(wc -l < "$file")
+            if [ "$lines" -gt 2500 ]; then
+              echo "$file memiliki $lines baris, melebihi batas 2500"
+              exit 1
+            fi
+          done
+
       - name: Check
         run: cargo check --locked
 
