@@ -152,7 +152,9 @@ pub fn format_for_whatsapp(input: &str) -> String {
         } else {
             // Tag media gaya Telegram (hasil tool) tidak dapat dirender WhatsApp;
             // ubah menjadi tautan/label yang terbaca sebelum format Markdown.
-            let c0 = render_media_markup_for_whatsapp(text);
+            // WhatsApp has no highlight, super/subscript or date-time entities.
+            let flattened = super::markdown::flatten_extended_inline(text);
+            let c0 = render_media_markup_for_whatsapp(&flattened);
             // Gunakan Cow dari hasil replace_all untuk menghindari alokasi String yang tidak perlu (Shallow Modules fix)
             let c1 = RE_HEADER.replace_all(&c0, "\x01$1\x01");
             let c2 = RE_BULLET.replace_all(&c1, "• $1");

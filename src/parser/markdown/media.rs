@@ -581,9 +581,10 @@ pub(crate) fn try_parse_media_block(line: &str) -> Option<RichBlock> {
             && !lower.starts_with("![peta")
         {
             if let Some((alt, link)) = split_bracket_and_parenthesis(rest) {
-                if link.starts_with("http://")
+                if (link.starts_with("http://")
                     || link.starts_with("https://")
-                    || link.starts_with("tg://")
+                    || link.starts_with("tg://"))
+                    && !super::extended::is_entity_link_markup(s_clean)
                 {
                     if is_streaming_web_video(link) {
                         return Some(format_media_fallback_paragraph(
@@ -1051,7 +1052,13 @@ pub fn isolate_embedded_media_blocks(text: &str) -> String {
             continue;
         }
 
-        if !RE_EMBEDDED_MEDIA.is_match(line) {
+        // Date-time and custom emoji links look like images but are inline
+        // text, so they stay inside their line.
+        let media_matches: Vec<regex::Match<'_>> = RE_EMBEDDED_MEDIA
+            .find_iter(line)
+            .filter(|mat| !super::extended::is_entity_link_markup(mat.as_str()))
+            .collect();
+        if media_matches.is_empty() {
             if !output.is_empty() {
                 output.push('\n');
             }
@@ -1061,7 +1068,7 @@ pub fn isolate_embedded_media_blocks(text: &str) -> String {
 
         // Split line around matches, putting each media block on its own line
         let mut last_end = 0;
-        for mat in RE_EMBEDDED_MEDIA.find_iter(line) {
+        for mat in media_matches {
             let start = mat.start();
             let end = mat.end();
 

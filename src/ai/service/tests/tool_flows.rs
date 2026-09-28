@@ -15,6 +15,7 @@ fn test_create_quiz_sanitization_and_validation() {
         ),
         preamble: Some("  Preamble text  ".to_string()),
         is_anonymous: None,
+        ..Default::default()
     };
 
     args.sanitize();

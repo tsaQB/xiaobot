@@ -622,3 +622,99 @@ fn test_inline_interleaved_rich_media_placement_order() {
     assert_eq!(json_blocks[4]["type"], "audio");
     assert_eq!(json_blocks[5]["type"], "paragraph");
 }
+
+#[test]
+fn update_wire_format_deserializes_replies_checklists_and_inline_mode() {
+    let reply: Update = serde_json::from_value(serde_json::json!({
+        "update_id": 30,
+        "message": {
+            "message_id": 9, "date": 1,
+            "chat": {"id": 42, "type": "private"},
+            "text": "sudah?",
+            "quote": {"text": "Telur", "position": 3, "is_manual": true},
+            "reply_to_checklist_task_id": 2,
+            "reply_to_message": {
+                "message_id": 5, "date": 1, "chat": {"id": 42, "type": "private"},
+                "checklist": {"title": "Belanja", "tasks": [
+                    {"id": 1, "text": "Beras", "completion_date": 1700000000},
+                    {"id": 2, "text": "Telur"}
+                ]}
+            },
+            "external_reply": {"origin": {"type": "hidden_user", "date": 1, "sender_user_name": "Anon"}}
+        }
+    }))
+    .expect("reply update should deserialize");
+    let message = reply.message.expect("message present");
+    let quote = message.quote.expect("quote present");
+    assert_eq!(quote.text, "Telur");
+    assert_eq!(quote.is_manual, Some(true));
+    assert_eq!(message.reply_to_checklist_task_id, Some(2));
+    let checklist = message
+        .reply_to_message
+        .and_then(|replied| replied.checklist)
+        .expect("checklist present");
+    assert!(checklist.tasks[0].is_done());
+    assert!(!checklist.tasks[1].is_done());
+    assert!(message.external_reply.is_some());
+
+    let query: Update = serde_json::from_value(serde_json::json!({
+        "update_id": 31,
+        "inline_query": {"id": "iq", "from": {"id": 42, "is_bot": false, "first_name": "O"},
+                         "query": "halo", "offset": "", "chat_type": "sender"}
+    }))
+    .expect("inline query should deserialize");
+    assert_eq!(query.inline_query.expect("inline query").query, "halo");
+
+    let chosen: Update = serde_json::from_value(serde_json::json!({
+        "update_id": 32,
+        "chosen_inline_result": {"result_id": "r", "from": {"id": 42, "is_bot": false, "first_name": "O"},
+                                 "inline_message_id": "im", "query": "halo"}
+    }))
+    .expect("chosen inline result should deserialize");
+    assert_eq!(
+        chosen
+            .chosen_inline_result
+            .and_then(|result| result.inline_message_id)
+            .as_deref(),
+        Some("im")
+    );
+}
+
+#[test]
+fn extended_rich_text_entities_match_bot_api_shapes() {
+    let blocks = parser::parse_markdown_to_rich_blocks(
+        "==a== x<sup>2</sup> H<sub>2</sub>O ![22:45](tg://time?unix=1647531900&format=wDT) ![👍](tg://emoji?id=5368324170671202286)",
+    );
+    let json = serde_json::to_value(&blocks).expect("blocks serialize");
+    let text = &json[0]["text"];
+    let entity = |kind: &str| {
+        text.as_array()
+            .and_then(|parts| parts.iter().find(|part| part["type"] == kind))
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(entity("marked")["text"], "a");
+    assert_eq!(entity("superscript")["text"], "2");
+    assert_eq!(entity("subscript")["text"], "2");
+    let date_time = entity("date_time");
+    assert_eq!(date_time["unix_time"], 1_647_531_900_i64);
+    assert_eq!(date_time["date_time_format"], "wDT");
+    assert_eq!(date_time["text"], "22:45");
+    let emoji = entity("custom_emoji");
+    assert_eq!(emoji["custom_emoji_id"], "5368324170671202286");
+    assert_eq!(emoji["alternative_text"], "👍");
+    assert!(
+        emoji.get("text").is_none(),
+        "custom emoji has no text field"
+    );
+}
+
+#[test]
+fn poll_options_carry_optional_media() {
+    let mut option = InputPollOption::new("Paus");
+    let plain = serde_json::to_value(&option).expect("option serializes");
+    assert!(plain.get("media").is_none());
+    option.media = Some(serde_json::json!({"type": "photo", "media": "https://example.com/a.jpg"}));
+    let with_media = serde_json::to_value(&option).expect("option serializes");
+    assert_eq!(with_media["media"]["type"], "photo");
+}

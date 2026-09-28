@@ -693,6 +693,27 @@ impl TelegramBotClient {
                     "spoiler" => format!("<tg-spoiler>{inner}</tg-spoiler>"),
                     "strikethrough" | "strike" => format!("<s>{inner}</s>"),
                     "underline" => format!("<u>{inner}</u>"),
+                    "date_time" => {
+                        match obj.get("unix_time").and_then(Value::as_i64) {
+                            Some(unix) => {
+                                let format = obj
+                                    .get("date_time_format")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("");
+                                let format = html_escape::encode_double_quoted_attribute(format);
+                                format!("<tg-time unix=\"{unix}\" format=\"{format}\">{inner}</tg-time>")
+                            }
+                            None => inner,
+                        }
+                    }
+                    // The fallback exists because the rich form was rejected,
+                    // possibly for the custom emoji itself: keep its emoji.
+                    "custom_emoji" => html_escape::encode_text(
+                        obj.get("alternative_text")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or(""),
+                    )
+                    .into_owned(),
                     "paragraph" => inner,
                     _ => inner,
                 }
@@ -709,7 +730,9 @@ impl TelegramBotClient {
                 .map(|item| self.rich_value_to_plain(item))
                 .collect(),
             Value::Object(obj) => {
-                if let Some(text) = obj.get("text") {
+                if let Some(alternative) = obj.get("alternative_text") {
+                    self.rich_value_to_plain(alternative)
+                } else if let Some(text) = obj.get("text") {
                     self.rich_value_to_plain(text)
                 } else if let Some(expr) = obj.get("expression") {
                     self.rich_value_to_plain(expr)

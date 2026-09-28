@@ -131,6 +131,7 @@ fn test_create_quiz_cascading_duplicate_disambiguation() {
         explanation: None,
         preamble: None,
         is_anonymous: None,
+        ..Default::default()
     };
     args.sanitize();
     assert_eq!(args.options, vec!["A", "A (2)", "A (3)"]);
@@ -144,6 +145,7 @@ fn test_create_quiz_cascading_duplicate_disambiguation() {
         explanation: None,
         preamble: None,
         is_anonymous: None,
+        ..Default::default()
     };
     all_same.sanitize();
     assert_eq!(all_same.options, vec!["X", "X (2)", "X (3)", "X (4)"]);
@@ -181,6 +183,7 @@ fn test_create_quiz_oversized_preamble_truncated() {
         explanation: None,
         preamble: Some(huge_preamble),
         is_anonymous: None,
+        ..Default::default()
     };
     args.sanitize();
     let pre = args.preamble.expect("preamble must exist");

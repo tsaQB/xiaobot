@@ -521,7 +521,7 @@ pub fn get_tools_definition() -> Value {
             "type": "function",
             "function": {
                 "name": "create_quiz",
-                "description": "Buat kuis interaktif native Telegram (mode kuis) dengan 2-10 pilihan ganda. Gunakan parameter preamble jika ingin menyajikan pengantar, konteks bacaan/studi kasus, atau potongan kode panjang sebelum kuis.",
+                "description": "Buat kuis interaktif native Telegram (mode kuis) dengan 2-12 pilihan ganda. Kuis boleh punya lebih dari satu jawaban benar, bergambar (gambar soal dan/atau gambar per pilihan), dan pilihannya boleh diacak. Gunakan parameter preamble jika ingin menyajikan pengantar, konteks bacaan/studi kasus, atau potongan kode panjang sebelum kuis.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -534,11 +534,33 @@ pub fn get_tools_definition() -> Value {
                             "items": {
                                 "type": "string"
                             },
-                            "description": "Daftar pilihan jawaban (2 sampai 10 opsi, masing-masing 1-100 karakter)"
+                            "description": "Daftar pilihan jawaban (2 sampai 12 opsi, masing-masing 1-100 karakter)"
+                        },
+                        "correct_option_ids": {
+                            "type": "array",
+                            "items": {
+                                "type": "integer"
+                            },
+                            "description": "Indeks semua jawaban yang benar (0-based). Isi lebih dari satu indeks jika soal memang punya beberapa jawaban benar; pemain lalu boleh memilih beberapa jawaban."
                         },
                         "correct_option_id": {
                             "type": "integer",
-                            "description": "Indeks jawaban yang benar (0-based, dimulai dari 0)"
+                            "description": "Bentuk lama untuk satu jawaban benar (0-based); utamakan correct_option_ids"
+                        },
+                        "shuffle_options": {
+                            "type": "boolean",
+                            "description": "true agar urutan pilihan diacak untuk tiap pemain"
+                        },
+                        "image_url": {
+                            "type": "string",
+                            "description": "URL gambar https (.jpg/.png/.webp) untuk kuis bergambar, tampil bersama soal. Cari dulu URL gambar terverifikasi dengan web_search; jangan mengarang URL."
+                        },
+                        "option_image_urls": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "description": "URL gambar https per pilihan, urutannya sama dengan options; isi string kosong untuk pilihan tanpa gambar"
                         },
                         "explanation": {
                             "type": "string",
@@ -549,7 +571,7 @@ pub fn get_tools_definition() -> Value {
                             "description": "Pesan pengantar atau materi/studi kasus/kode panjang sebelum kuis (opsional, terformat Markdown)"
                         }
                     },
-                    "required": ["question", "options", "correct_option_id"]
+                    "required": ["question", "options", "correct_option_ids"]
                 }
             }
         },
@@ -997,7 +1019,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 pub struct CreateQuizArgs {
     pub question: String,
     #[serde(deserialize_with = "deserialize_quiz_options")]
@@ -1007,12 +1029,71 @@ pub struct CreateQuizArgs {
         deserialize_with = "crate::bot::models::deserialize_flexible_opt_i32"
     )]
     pub correct_option_id: Option<i32>,
+    /// Every correct answer (Bot API 9.6); several make a quiz in which
+    /// players may pick several answers.
+    #[serde(default, deserialize_with = "deserialize_flexible_i32_list")]
+    pub correct_option_ids: Vec<i32>,
     #[serde(default)]
     pub explanation: Option<String>,
     #[serde(default)]
     pub preamble: Option<String>,
     #[serde(default, deserialize_with = "deserialize_flexible_opt_bool")]
     pub is_anonymous: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_flexible_opt_bool")]
+    pub shuffle_options: Option<bool>,
+    /// Picture shown with the question.
+    #[serde(default)]
+    pub image_url: Option<String>,
+    /// Pictures for the options, in option order; empty for none.
+    #[serde(default, deserialize_with = "deserialize_url_list")]
+    pub option_image_urls: Vec<String>,
+}
+
+/// Accepts `[1, "2"]`, a single number, or `null`; unreadable items are
+/// dropped and caught by validation.
+fn deserialize_flexible_i32_list<'de, D>(deserializer: D) -> Result<Vec<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Item {
+        Num(i64),
+        Str(String),
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum List {
+        Many(Vec<Item>),
+        One(Item),
+    }
+    let to_i32 = |item: Item| match item {
+        Item::Num(number) => i32::try_from(number).ok(),
+        Item::Str(text) => text.trim().parse::<i32>().ok(),
+    };
+    Ok(match Option::<List>::deserialize(deserializer)? {
+        None => Vec::new(),
+        Some(List::Many(items)) => items.into_iter().filter_map(to_i32).collect(),
+        Some(List::One(item)) => to_i32(item).into_iter().collect(),
+    })
+}
+
+/// A list of URLs where `null` (for the list or an item) means "none".
+fn deserialize_url_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Vec<Option<String>>>::deserialize(deserializer)?
+        .unwrap_or_default()
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect())
+}
+
+/// Only absolute web URLs can be fetched by Telegram for poll media.
+fn web_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    (url.starts_with("https://") || url.starts_with("http://")).then(|| url.to_string())
 }
 
 impl CreateQuizArgs {
@@ -1069,6 +1150,28 @@ impl CreateQuizArgs {
                 }
             }
         }
+        // Answers must be in range, unique and ascending ("monotonically
+        // increasing" in the Bot API); the legacy single id fills in when the
+        // list is missing or held only invalid entries.
+        let option_count = self.options.len();
+        let mut correct_ids: Vec<i32> = self
+            .correct_option_ids
+            .iter()
+            .copied()
+            .filter(|id| usize::try_from(*id).is_ok_and(|id| id < option_count))
+            .collect();
+        if correct_ids.is_empty() {
+            correct_ids.extend(self.correct_option_id);
+        }
+        correct_ids.sort_unstable();
+        correct_ids.dedup();
+        self.correct_option_ids = correct_ids;
+
+        self.image_url = self.image_url.as_deref().and_then(web_url);
+        self.option_image_urls.truncate(option_count);
+        for url in &mut self.option_image_urls {
+            *url = web_url(url).unwrap_or_default();
+        }
 
         if let Some(exp) = &mut self.explanation {
             let normalized = exp.replace("\r\n", "\n").replace('\r', "\n");
@@ -1122,22 +1225,42 @@ impl CreateQuizArgs {
         }
     }
 
-    pub fn validate(&self) -> Result<i32, String> {
-        let correct_id = self
-            .correct_option_id
-            .ok_or_else(|| "Quiz requires correct_option_id".to_string())?;
+    /// The correct answers: the list when given, else the legacy single id.
+    pub fn correct_ids(&self) -> Vec<i32> {
+        if self.correct_option_ids.is_empty() {
+            self.correct_option_id.into_iter().collect()
+        } else {
+            self.correct_option_ids.clone()
+        }
+    }
+
+    /// Checks the quiz against the Bot API limits and returns its correct
+    /// answers.
+    pub fn validate(&self) -> Result<Vec<i32>, String> {
+        let correct_ids = self.correct_ids();
+        if correct_ids.is_empty() {
+            return Err("Quiz requires correct_option_ids".to_string());
+        }
         let input_options: Vec<crate::bot::models::InputPollOption> = self
             .options
             .iter()
             .map(|opt| crate::bot::models::InputPollOption::new(opt.as_str()))
             .collect();
-        crate::bot::models::validate_quiz(
-            &self.question,
-            &input_options,
-            correct_id,
-            self.explanation.as_deref(),
-        )?;
-        Ok(correct_id)
+        for correct_id in &correct_ids {
+            crate::bot::models::validate_quiz(
+                &self.question,
+                &input_options,
+                *correct_id,
+                self.explanation.as_deref(),
+            )?;
+        }
+        if correct_ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err("Quiz correct_option_ids must be unique and ascending".to_string());
+        }
+        if correct_ids.len() >= self.options.len() {
+            return Err("A quiz needs at least one wrong option".to_string());
+        }
+        Ok(correct_ids)
     }
 }
 

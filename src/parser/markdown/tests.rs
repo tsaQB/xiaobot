@@ -1452,3 +1452,118 @@ fn exponent_operator_is_not_bold() {
     assert!(mixed.contains("\"bold\""));
     assert!(mixed.contains("x**2"));
 }
+
+fn inline_json(text: &str) -> String {
+    parse_inline(text).to_string()
+}
+
+#[test]
+fn highlight_superscript_and_subscript_become_rich_text_entities() {
+    assert_eq!(
+        parse_inline("ini ==penting== sekali"),
+        serde_json::json!(["ini ", {"type": "marked", "text": "penting"}, " sekali"])
+    );
+    assert_eq!(
+        parse_inline("<mark>stabilo</mark>"),
+        serde_json::json!({"type": "marked", "text": "stabilo"})
+    );
+    assert_eq!(
+        parse_inline("E = mc<sup>2</sup>, H<sub>2</sub>O"),
+        serde_json::json!([
+            "E = mc", {"type": "superscript", "text": "2"},
+            ", H", {"type": "subscript", "text": "2"}, "O"
+        ])
+    );
+    // Comparisons are not highlights, and nothing is left behind by tags
+    // that never close.
+    assert_eq!(inline_json("jika a == b == c"), "\"jika a == b == c\"");
+    assert_eq!(inline_json("x<sup>2"), "\"x2\"");
+}
+
+#[test]
+fn date_times_become_entities_only_with_a_known_moment() {
+    let tagged = parse_inline(
+        "Rapat <time datetime=\"2026-10-05T14:00:00+07:00\" format=\"wDT\">5 Okt 14.00 WIB</time>",
+    );
+    assert_eq!(
+        tagged,
+        serde_json::json!(["Rapat ", {
+            "type": "date_time", "text": "5 Okt 14.00 WIB",
+            "unix_time": 1_791_183_600_i64, "date_time_format": "wDT"
+        }])
+    );
+    let link = parse_inline("![22:45 besok](tg://time?unix=1647531900&format=r)");
+    assert_eq!(link["type"], "date_time");
+    assert_eq!(link["unix_time"], 1_647_531_900_i64);
+    assert_eq!(link["date_time_format"], "r");
+
+    // Without a time zone the moment is ambiguous; an invalid format is
+    // rejected by Telegram. Both keep only their text.
+    assert_eq!(
+        inline_json("<time datetime=\"2026-10-05 14:00\">5 Okt</time>"),
+        "\"5 Okt\""
+    );
+    assert_eq!(
+        inline_json("![besok](tg://time?unix=1647531900&format=xyz)"),
+        "\"besok\""
+    );
+}
+
+#[test]
+fn custom_emoji_keeps_its_alternative_emoji() {
+    let emoji = parse_inline("Mantap ![👍](tg://emoji?id=5368324170671202286)");
+    assert_eq!(
+        emoji,
+        serde_json::json!(["Mantap ", {
+            "type": "custom_emoji",
+            "custom_emoji_id": "5368324170671202286",
+            "alternative_text": "👍"
+        }])
+    );
+    assert_eq!(
+        parse_inline("<tg-emoji emoji-id=\"5368324170671202286\">🔥</tg-emoji>")["type"],
+        "custom_emoji"
+    );
+    assert_eq!(inline_json("![👍](tg://emoji?id=bukan-angka)"), "\"👍\"");
+}
+
+#[test]
+fn tags_inside_inline_code_stay_literal() {
+    assert_eq!(
+        parse_inline("tulis `<sup>2</sup>` atau `<b>x</b>`"),
+        serde_json::json!([
+            "tulis ", {"type": "code", "text": "<sup>2</sup>"},
+            " atau ", {"type": "code", "text": "<b>x</b>"}
+        ])
+    );
+}
+
+#[test]
+fn plain_channels_get_a_readable_flattening() {
+    assert_eq!(
+        flatten_extended_inline(
+            "x<sup>2</sup> ==penting== H<sub>2</sub>O <time datetime=\"2026-10-05T14:00+07:00\">5 Okt</time> ![👍](tg://emoji?id=1) log<sub>b</sub>"
+        ),
+        "x² **penting** H₂O 5 Okt 👍 log_b"
+    );
+    assert_eq!(
+        flatten_extended_inline_outside_code("`==a==` ==b=="),
+        "`==a==` **b**"
+    );
+}
+
+#[test]
+fn full_messages_keep_extended_entities_inline() {
+    let message = build_full_rich_message(
+        "Rapat <time datetime=\"2026-10-05T14:00:00+07:00\">5 Okt</time> membahas x<sup>2</sup> dan <mark>anggaran</mark> ![22:45](tg://time?unix=1647531900&format=t).",
+        None,
+    );
+    assert_eq!(message.blocks.len(), 1, "one paragraph, no media block");
+    let json = serde_json::to_string(&message.blocks).expect("blocks serialize");
+    assert!(json.contains(r#""type":"date_time""#), "{json}");
+    assert!(json.contains(r#""unix_time":1791183600"#), "{json}");
+    assert!(json.contains(r#""unix_time":1647531900"#), "{json}");
+    assert!(json.contains(r#""type":"superscript""#), "{json}");
+    assert!(json.contains(r#""type":"marked""#), "{json}");
+    assert!(!json.contains("tg://time"), "{json}");
+}

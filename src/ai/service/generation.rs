@@ -1483,174 +1483,24 @@ impl AIChatService {
                         if let Some(s) = sink {
                             s.on_action("Quiz", Some(ProgressActivity::Quiz));
                         }
-                        match serde_json::from_str::<crate::ai::tools::CreateQuizArgs>(
+                        let outcome = super::quiz::run_create_quiz(
+                            bot.as_ref(),
+                            chat_id,
+                            reply_to_message_id,
                             &tc.arguments,
-                        ) {
-                            Ok(mut args) => {
-                                args.sanitize();
-                                match args.validate() {
-                                    Ok(correct_id) => {
-                                        if let Some(bot_client) = &bot {
-                                            let (preamble_msg_id, preamble_err) = if let Some(
-                                                preamble,
-                                            ) =
-                                                &args.preamble
-                                            {
-                                                let rich_preamble =
-                                                    crate::parser::build_full_rich_message(
-                                                        preamble, None,
-                                                    );
-                                                match bot_client
-                                                    .send_rich_message(
-                                                        chat_id,
-                                                        &rich_preamble,
-                                                    None,
-                                                    None,
-                                                        reply_to_message_id,
-                                                    )
-                                                    .await
-                                                {
-                                                    Ok(res) => {
-                                                        let pid = res
-                                                            .get("message_id")
-                                                            .and_then(Value::as_i64)
-                                                            .or_else(|| {
-                                                                res.get("result")
-                                                                    .and_then(|r| r.get("message_id"))
-                                                                    .and_then(Value::as_i64)
-                                                            });
-                                                        if let Some(pid) = pid {
-                                                            (Some(pid), None)
-                                                    } else {
-                                                            (None, Some(format!("Gagal mendapatkan ID pesan pengantar kuis dari Telegram: {res}")))
-                                                        }
-                                                    }
-                                                    Err(err) => {
-                                                        (None, Some(format!("Gagal mengirim pesan pengantar kuis ke Telegram: {err}")))
-                                                    }
-                                                }
-                                            } else {
-                                                (None, None)
-                                            };
-
-                                            if let Some(err) = preamble_err {
-                                                err
-                                            } else {
-                                                let poll_reply_to =
-                                                    preamble_msg_id.or(reply_to_message_id);
-                                                let input_options: Vec<
-                                                    crate::bot::models::InputPollOption,
-                                                > = args
-                                                    .options
-                                                    .iter()
-                                                    .map(|opt| {
-                                                        crate::bot::models::InputPollOption::new(
-                                                            opt.as_str(),
-                                                        )
-                                                    })
-                                                    .collect();
-
-                                                let is_anon = args.is_anonymous.unwrap_or(false);
-                                                match bot_client
-                                                    .send_poll(
-                                                        chat_id,
-                                                        &args.question,
-                                                        &input_options,
-                                                        Some(is_anon),
-                                                        Some("quiz"),
-                                                        Some(correct_id),
-                                                        args.explanation.as_deref(),
-                                                        None,
-                                                        poll_reply_to,
-                                                    )
-                                                    .await
-                                                {
-                                                    Ok(_poll_res) => {
-                                                        quiz_sent = true;
-                                                        let mut summary = String::new();
-                                                        if let Some(pre) = &args.preamble {
-                                                            summary.push_str(pre);
-                                                            summary.push_str("\n\n");
-                                                        }
-                                                        summary.push_str(&format!(
-                                                            "📊 **Kuis**: {}\n",
-                                                            args.question
-                                                        ));
-                                                        for (i, opt) in
-                                                            args.options.iter().enumerate()
-                                                        {
-                                                            let mark = if i as i32 == correct_id {
-                                                                " (Benar)"
-                                                            } else {
-                                                                ""
-                                                            };
-                                                            summary.push_str(&format!(
-                                                                "{}. {opt}{mark}\n",
-                                                                i + 1
-                                                            ));
-                                                        }
-                                                        if let Some(exp) = &args.explanation {
-                                                            summary.push_str(&format!(
-                                                                "\n💡 Penjelasan: {exp}\n"
-                                                            ));
-                                                        }
-                                                        if let Some(existing) =
-                                                            &mut quiz_history_summary
-                                                        {
-                                                            existing.push_str("\n\n---\n\n");
-                                                            existing.push_str(&summary);
-                                                        } else {
-                                                            quiz_history_summary = Some(summary);
-                                                        }
-                                                        "Kuis native Telegram berhasil dikirim ke obrolan.".to_string()
-                                                    }
-                                                    Err(err) => {
-                                                        if let Some(pid) = preamble_msg_id {
-                                                            let _ = bot_client
-                                                                .delete_message(chat_id, pid)
-                                                                .await;
-                                                        }
-                                                        format!("Gagal mengirim kuis native ke Telegram: {err}")
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            let mut output = String::new();
-                                            if let Some(pre) = &args.preamble {
-                                                output.push_str(pre);
-                                                output.push_str("\n\n");
-                                            }
-                                            output.push_str(&format!(
-                                                "📊 **Kuis**: {}\n\n",
-                                                args.question
-                                            ));
-                                            for (i, opt) in args.options.iter().enumerate() {
-                                                let marker = if i as i32 == correct_id {
-                                                    "✅"
-                                                } else {
-                                                    "⚪"
-                                                };
-                                                output.push_str(&format!(
-                                                    "{marker} {}. {opt}\n",
-                                                    i + 1
-                                                ));
-                                            }
-                                            if let Some(exp) = &args.explanation {
-                                                output
-                                                    .push_str(&format!("\n💡 Penjelasan: {exp}\n"));
-                                            }
-                                            output
-                                        }
-                                    }
-                                    Err(validation_err) => {
-                                        format!("Validasi kuis gagal: {validation_err}")
-                                    }
+                        )
+                        .await;
+                        quiz_sent |= outcome.sent;
+                        if let Some(summary) = outcome.history_summary {
+                            match &mut quiz_history_summary {
+                                Some(existing) => {
+                                    existing.push_str("\n\n---\n\n");
+                                    existing.push_str(&summary);
                                 }
-                            }
-                            Err(parse_err) => {
-                                format!("Format argumen kuis tidak valid: {parse_err}")
+                                None => quiz_history_summary = Some(summary),
                             }
                         }
+                        outcome.result
                     } else if name == "send_photo" {
                         if let Some(s) = sink {
                             s.on_action("Photo", Some(ProgressActivity::Drawing));

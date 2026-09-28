@@ -678,6 +678,7 @@ pub async fn handle_image_generation(
                 video_duration: None,
                 model_snapshot: Some(&model_snapshot),
                 reply_to_message_id,
+                reply_context: None,
             },
         )
         .await;

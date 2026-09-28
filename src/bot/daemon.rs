@@ -84,6 +84,14 @@ pub async fn try_bootstrap_telegram(
             } else {
                 "\x1b[38;5;244m○ Nonaktif · atur di @BotFather\x1b[0m".to_string()
             };
+            let inline_val = if bot_info.supports_inline_queries == Some(true) {
+                format!(
+                    "\x1b[38;2;16;185;129m●\x1b[0m \x1b[1;37mAktif\x1b[0m \x1b[38;5;244m· ketik @{uname} lalu pertanyaan\x1b[0m"
+                )
+            } else {
+                "\x1b[38;5;244m○ Nonaktif · /setinline & /setinlinefeedback di @BotFather\x1b[0m"
+                    .to_string()
+            };
 
             let daemon_rows = [
                 ("BOT NAME", bot_val.as_str()),
@@ -91,6 +99,7 @@ pub async fn try_bootstrap_telegram(
                 ("RUNTIME", timeline_val),
                 ("ENGINE", engine_val),
                 ("GUEST MODE", guest_val.as_str()),
+                ("INLINE MODE", inline_val.as_str()),
             ];
             crate::cli::tui::print_mini_header("Daemon Service");
             let hud =
@@ -255,6 +264,8 @@ pub async fn poll_loop(
                     "message".to_string(),
                     "edited_message".to_string(),
                     "guest_message".to_string(),
+                    "inline_query".to_string(),
+                    "chosen_inline_result".to_string(),
                     "callback_query".to_string(),
                     "stopped_message_generation".to_string(),
                 ]),

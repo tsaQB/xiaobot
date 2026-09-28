@@ -1823,6 +1823,10 @@ pub struct Update {
     /// of, answered with `answerGuestQuery` using `Message.guest_query_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_message: Option<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_query: Option<super::extras::InlineQuery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen_inline_result: Option<super::extras::ChosenInlineResult>,
     pub callback_query: Option<CallbackQuery>,
     pub stopped_message_generation: Option<MessageGenerationStopped>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1922,6 +1926,21 @@ pub struct Message {
     pub video: Option<Video>,
     pub video_note: Option<VideoNote>,
     pub reply_to_message: Option<Box<Message>>,
+    /// The part of the replied-to message the user quoted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<super::extras::TextQuote>,
+    /// A reply to a message from another chat or topic (`ExternalReplyInfo`),
+    /// kept as JSON: only its origin and media kind are described.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_reply: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checklist: Option<super::extras::Checklist>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_flexible_opt_i64"
+    )]
+    pub reply_to_checklist_task_id: Option<i64>,
     pub community_chat_joined: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll: Option<Poll>,
@@ -2017,6 +2036,9 @@ pub struct User {
     /// Bot API 10.0: whether guest mode is enabled for the bot (getMe only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_guest_queries: Option<bool>,
+    /// Whether inline mode is enabled for the bot (getMe only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_inline_queries: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2162,6 +2184,9 @@ pub struct InputPollOption {
     pub text_parse_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_entities: Option<Vec<Value>>,
+    /// Bot API 10.1 `InputPollOptionMedia`, e.g. a photo for this answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media: Option<Value>,
 }
 
 impl<'de> serde::Deserialize<'de> for InputPollOption {
@@ -2176,6 +2201,8 @@ impl<'de> serde::Deserialize<'de> for InputPollOption {
             text_parse_mode: Option<String>,
             #[serde(default)]
             text_entities: Option<Vec<Value>>,
+            #[serde(default)]
+            media: Option<Value>,
         }
 
         #[derive(Deserialize)]
@@ -2191,6 +2218,7 @@ impl<'de> serde::Deserialize<'de> for InputPollOption {
                 text: obj.text,
                 text_parse_mode: obj.text_parse_mode,
                 text_entities: obj.text_entities,
+                media: obj.media,
             }),
         }
     }
@@ -2202,6 +2230,7 @@ impl InputPollOption {
             text: text.into(),
             text_parse_mode: None,
             text_entities: None,
+            media: None,
         }
     }
 
@@ -2210,6 +2239,7 @@ impl InputPollOption {
             text: text.into(),
             text_parse_mode: Some(parse_mode.into()),
             text_entities: None,
+            media: None,
         }
     }
 }

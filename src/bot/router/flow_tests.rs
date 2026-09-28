@@ -275,3 +275,100 @@ async fn a_sticker_is_shown_to_the_model_as_an_image_with_its_emoji() {
 
     h.clean_up().await;
 }
+
+#[tokio::test]
+async fn a_reply_carries_the_replied_message_as_quoted_context() {
+    let h = Harness::new(880_005, FakeTelegram::always_ok().await, "Siap.").await;
+    let now = clock_secs();
+    let reply_to_answer = json!({
+        "text": "jelaskan poin kedua",
+        "reply_to_message": {
+            "message_id": 1, "date": now,
+            "chat": {"id": h.owner, "type": "private"},
+            "from": {"id": 900, "is_bot": true, "first_name": "Xiao", "username": "XiaoBot"},
+            "rich_message": {"blocks": [{"type": "paragraph", "text": "Poin kedua: gunakan cache."}]}
+        }
+    });
+    h.send(new_message(
+        1,
+        h.message(fresh_message_id(), now, reply_to_answer),
+    ))
+    .await;
+
+    // Quoted text that reads like an image request must not trigger image
+    // generation: intent detection only sees the owner's own words.
+    let reply_to_own = json!({
+        "text": "terjemahkan ke bahasa Inggris",
+        "reply_to_message": {
+            "message_id": 2, "date": now,
+            "chat": {"id": h.owner, "type": "private"},
+            "from": {"id": h.owner, "is_bot": false, "first_name": "Owner"},
+            "text": "buatkan gambar kucing lucu"
+        }
+    });
+    h.send(new_message(
+        2,
+        h.message(fresh_message_id(), now, reply_to_own),
+    ))
+    .await;
+
+    let requests = h.main_requests();
+    assert_eq!(requests.len(), 2, "both replies are answered by the model");
+    let first = last_user_content(&requests[0]);
+    assert!(
+        first.contains("Pesan yang dibalas (jawaban Xiao sebelumnya;"),
+        "{first}"
+    );
+    assert!(first.contains("Poin kedua: gunakan cache."), "{first}");
+    assert!(first.contains("jelaskan poin kedua"), "{first}");
+    let second = last_user_content(&requests[1]);
+    assert!(second.contains("(pesan Anda sendiri;"), "{second}");
+    assert!(second.contains("buatkan gambar kucing lucu"), "{second}");
+
+    h.clean_up().await;
+}
+
+#[tokio::test]
+async fn a_reply_under_a_photo_lets_the_model_see_that_photo() {
+    let telegram = FakeTelegram::start(std::sync::Arc::new(|request, _| {
+        if request.method == "getFile" {
+            (
+                200,
+                json!({"ok": true, "result": {
+                    "file_id": "P", "file_unique_id": "p", "file_size": 4,
+                    "file_path": "photos/file_7.jpg"
+                }}),
+            )
+        } else {
+            crate::bot::test_support::ok_message(1)
+        }
+    }))
+    .await;
+    let h = Harness::new(880_006, telegram, "Itu Gunung Rinjani.").await;
+    let now = clock_secs();
+    let reply = json!({
+        "text": "ini gunung apa?",
+        "reply_to_message": {
+            "message_id": 3, "date": now,
+            "chat": {"id": h.owner, "type": "private"},
+            "from": {"id": h.owner, "is_bot": false, "first_name": "Owner"},
+            "photo": [{"file_id": "P", "file_unique_id": "p", "width": 10, "height": 10}]
+        }
+    });
+    h.send(new_message(1, h.message(fresh_message_id(), now, reply)))
+        .await;
+
+    assert!(h
+        .telegram
+        .methods()
+        .iter()
+        .any(|method| method == "getFile"));
+    let requests = h.main_requests();
+    assert_eq!(requests.len(), 1);
+    let body = requests[0].to_string();
+    assert!(body.contains("data:image/jpeg;base64,"), "{body}");
+    assert!(body.contains("[Foto]"), "{body}");
+    assert!(body.contains("ini gunung apa?"), "{body}");
+
+    h.clean_up().await;
+}

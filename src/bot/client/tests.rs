@@ -22,13 +22,15 @@ async fn quiz_payload_uses_correct_option_ids_and_delivery_context() {
         context,
         fake.client.send_poll(
             5,
-            "Berapa 1+1?",
-            &quiz_options(),
-            Some(false),
-            Some("quiz"),
-            Some(1),
-            Some("Karena 1+1=2"),
-            None,
+            &PollRequest {
+                question: "Berapa 1+1?",
+                options: &quiz_options(),
+                is_anonymous: Some(false),
+                poll_type: Some("quiz"),
+                correct_option_ids: &[1],
+                explanation: Some("Karena 1+1=2"),
+                ..PollRequest::default()
+            },
             Some(999),
         ),
     )
@@ -46,6 +48,42 @@ async fn quiz_payload_uses_correct_option_ids_and_delivery_context() {
     assert_eq!(request.json["message_thread_id"], 77);
     assert_eq!(request.json["reply_parameters"]["message_id"], 999);
     assert_eq!(request.json["options"][1]["text"], "Dua");
+    assert!(
+        request.json.get("allows_multiple_answers").is_none(),
+        "a single correct answer keeps single choice"
+    );
+    assert!(request.json.get("shuffle_options").is_none());
+    assert!(request.json.get("media").is_none());
+}
+
+#[tokio::test]
+async fn quiz_with_several_answers_pictures_and_shuffling() {
+    let fake = FakeTelegram::always_ok().await;
+    let mut options = quiz_options();
+    options[0].media = Some(json!({"type": "photo", "media": "https://example.com/satu.jpg"}));
+    fake.client
+        .send_poll(
+            5,
+            &PollRequest {
+                question: "Mana yang bilangan?",
+                options: &options,
+                poll_type: Some("quiz"),
+                correct_option_ids: &[0, 1],
+                shuffle_options: true,
+                media: Some(json!({"type": "photo", "media": "https://example.com/soal.jpg"})),
+                ..PollRequest::default()
+            },
+            None,
+        )
+        .await
+        .expect("sendPoll succeeds");
+    let request = &fake.requests()[0].json;
+    assert_eq!(request["correct_option_ids"], json!([0, 1]));
+    assert_eq!(request["allows_multiple_answers"], true);
+    assert_eq!(request["shuffle_options"], true);
+    assert_eq!(request["media"]["media"], "https://example.com/soal.jpg");
+    assert_eq!(request["options"][0]["media"]["type"], "photo");
+    assert!(request["options"][1].get("media").is_none());
 }
 
 #[tokio::test]
@@ -54,13 +92,11 @@ async fn poll_type_defaults_to_regular() {
     fake.client
         .send_poll(
             5,
-            "Pilih",
-            &quiz_options(),
-            None,
-            None,
-            None,
-            None,
-            None,
+            &PollRequest {
+                question: "Pilih",
+                options: &quiz_options(),
+                ..PollRequest::default()
+            },
             None,
         )
         .await

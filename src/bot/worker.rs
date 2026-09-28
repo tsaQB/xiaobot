@@ -23,6 +23,11 @@ pub const PANIC_RETRY_BACKOFF: Duration = Duration::from_millis(1500);
 pub const MAX_TASK_ATTEMPTS: i64 = 2;
 /// Mailbox thread id reserved for guest-mode updates (never a real topic id).
 pub const GUEST_SCOPE_THREAD_ID: i64 = i64::MIN;
+/// Mailbox thread id for inline queries. They only need a quick placeholder
+/// answer, so they never wait behind an inline generation.
+pub const INLINE_QUERY_SCOPE_THREAD_ID: i64 = i64::MIN + 1;
+/// Mailbox (and generation) thread id for chosen inline results.
+pub const INLINE_SCOPE_THREAD_ID: i64 = i64::MIN + 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ScopeKey {
@@ -43,6 +48,16 @@ impl ScopeKey {
             Self {
                 chat_id: msg.chat.id,
                 thread_id: msg.message_thread_id.unwrap_or(0),
+            }
+        } else if let Some(query) = update.inline_query.as_ref() {
+            Self {
+                chat_id: query.from.id,
+                thread_id: INLINE_QUERY_SCOPE_THREAD_ID,
+            }
+        } else if let Some(chosen) = update.chosen_inline_result.as_ref() {
+            Self {
+                chat_id: chosen.from.id,
+                thread_id: INLINE_SCOPE_THREAD_ID,
             }
         } else if let Some(cb) = update.callback_query.as_ref() {
             if let Some(msg) = cb.message.as_ref() {
@@ -84,6 +99,12 @@ pub fn update_actor_id(update: &Update) -> Option<i64> {
     }
     if let Some(cb) = update.callback_query.as_ref() {
         return Some(cb.from.id);
+    }
+    if let Some(query) = update.inline_query.as_ref() {
+        return Some(query.from.id);
+    }
+    if let Some(chosen) = update.chosen_inline_result.as_ref() {
+        return Some(chosen.from.id);
     }
     update
         .stopped_message_generation
@@ -600,9 +621,11 @@ pub async fn replay_durable_inbox(
             }
             match serde_json::from_str::<Update>(&record.payload_json) {
                 Ok(update) => {
-                    if update.stopped_message_generation.is_some() {
+                    if update.stopped_message_generation.is_some() || update.inline_query.is_some()
+                    {
                         // A stop request from before the restart refers to a
-                        // generation that no longer exists; acknowledge it.
+                        // generation that no longer exists, and an inline
+                        // query expires within seconds; acknowledge both.
                         let _ = ai::storage::skip_telegram_update_async(record.update_id).await;
                         continue;
                     }
@@ -922,6 +945,43 @@ mod tests {
                 .as_ref()
                 .and_then(|message| message.guest_query_id.as_deref()),
             Some("gq-1")
+        );
+    }
+
+    #[test]
+    fn inline_queries_and_chosen_results_have_separate_owner_mailboxes() {
+        let query: Update = serde_json::from_str(
+            r#"{"update_id": 13, "inline_query": {"id": "iq", "query": "halo", "offset": "",
+                "from": {"id": 42, "is_bot": false, "first_name": "Owner"}}}"#,
+        )
+        .expect("deserialize inline query succeeds");
+        assert_eq!(
+            ScopeKey::from_update(&query),
+            ScopeKey {
+                chat_id: 42,
+                thread_id: INLINE_QUERY_SCOPE_THREAD_ID
+            }
+        );
+        assert_eq!(update_actor_id(&query), Some(42));
+
+        let chosen: Update = serde_json::from_str(
+            r#"{"update_id": 14, "chosen_inline_result": {"result_id": "r", "query": "halo",
+                "inline_message_id": "im",
+                "from": {"id": 7, "is_bot": false, "first_name": "Orang lain"}}}"#,
+        )
+        .expect("deserialize chosen inline result succeeds");
+        assert_eq!(
+            ScopeKey::from_update(&chosen),
+            ScopeKey {
+                chat_id: 7,
+                thread_id: INLINE_SCOPE_THREAD_ID
+            },
+            "a quick query answer never waits behind an inline generation"
+        );
+        assert_eq!(
+            update_actor_id(&chosen),
+            Some(7),
+            "non-owner inline traffic is dropped by the dispatcher"
         );
     }
 }

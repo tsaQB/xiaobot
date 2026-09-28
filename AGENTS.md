@@ -184,8 +184,9 @@ cargo run -- setup
   - `daemon.rs`: Bot initialization, Telegram connection handshake, command clearing (`pure zero-slash`), concurrent WhatsApp gateway spawn, and long-polling loop with graceful shutdown.
   - `worker.rs`: Keyed per-scope mailboxes (`ScopeKey`), worker concurrency limits, durable inbox queue replay, and bounded retry with panic isolation.
   - `router.rs`: Incoming update routing (new and edited messages), media and document classification, context overflow policies, and AI chat dispatch. End-to-end routing tests live in `router/flow_tests.rs`.
-  - `inbound.rs`: Message kinds beyond text and classic media: stickers, locations/venues, live photos, forwarded rich messages, and the edited-message window and text fingerprint.
-  - `guest.rs`: Bot API 10.0 guest mode (`guest_message` → `answerGuestQuery` placeholder → inline edit with the final answer).
+  - `inbound.rs`: Message kinds beyond text and classic media: stickers, locations/venues, live photos, forwarded rich messages, checklists and polls; reply context (`reply_context`, `reply_author`); and the edited-message window and text fingerprint.
+  - `guest.rs`: Bot API 10.0 guest mode (`guest_message` → `answerGuestQuery` placeholder → inline edit with the final answer), plus the stateless generation and inline-edit delivery shared with inline mode.
+  - `inline.rs`: Inline mode (`inline_query` → one placeholder result with a keyboard → `chosen_inline_result` → stateless generation → inline edit).
   - `image_flow.rs`: Multi-step conversational image generation pipeline, prompt extraction, and structured fallback cards.
   - `client.rs`: The single Telegram Bot API client (every network call, retries, Rich → HTML → plain fallback chain, draft preparation, file downloads). Behavioural tests live in `client/tests.rs` and run against the fake server in `test_support.rs`.
   - `client/raw.rs` / `client/raw/render.rs`: Transport-independent helpers the client delegates to: per-task delivery context, bounded SSRF-safe media downloads, remote-media-to-link conversion, text chunking, and the HTML/plain-text fallback renderers. (It no longer duplicates the Bot API calls.)
@@ -198,6 +199,7 @@ cargo run -- setup
     - `context.rs`: Token budget estimation, sliding-window message context assembly, and conversation trimming.
     - `prompt.rs`: System prompt assembly; long-term memory and summaries are sanitized, capped and fenced as untrusted data.
     - `generation.rs`: Streaming SSE lifecycle, provider HTTP dispatch, retry backoff, tool execution loops, and the shared `race_with_cancel` cancellation helper.
+    - `quiz.rs`: The `create_quiz` tool: preamble, native quiz with one or several correct answers, question/option pictures, shuffled options, and a retry without pictures when Telegram cannot load them.
     - `curator.rs`: Background memory curation: profile fact extraction and older-history summarization.
     - `image.rs`: Image generation providers, prompt translation, and base64/download resolution.
     - `multimodal.rs`: Specialist inputs (Vision, Video, Audio STT) and observation turn formatting.
@@ -223,7 +225,7 @@ cargo run -- setup
   - `whatsapp/delivery.rs`: Outbound delivery, JID cache, and typing indicators.
   - `whatsapp/mapper.rs`: JID normalization, id mapping, and owner authorization.
 - `src/parser/`:
-  - `markdown.rs`: Converts extended markdown to Telegram Bot API 10.3 `RichBlock` AST representations.
+  - `markdown.rs`: Converts extended markdown to Telegram Bot API 10.3 `RichBlock` AST representations. Inline text is parsed in `markdown/inline.rs`; `markdown/extended.rs` handles highlight (`==x==`, `<mark>`), `<sup>`/`<sub>`, date-times (`<time datetime>`, `<tg-time>`, `tg://time` links) and custom emoji (`<tg-emoji>`, `tg://emoji` links), and flattens them for WhatsApp and the terminal. Tags inside inline code stay literal.
   - `whatsapp.rs`: Converts markdown to WhatsApp formatting and splits replies on character boundaries.
   - `latex.rs`: Sanitizes mathematical expressions for cross-platform Android and iOS rendering.
   - `rtl.rs`: Detects Right-to-Left (RTL) scripts (Arabic, Hebrew, Persian, Urdu, etc.) and Eastern Arabic numerals, automatically setting layout direction and right-aligned table cells.
@@ -283,10 +285,20 @@ When modifying or adding features, you **must** preserve these invariants:
 - Nothing is ever sent to the guest `chat.id` (it may coincide with an unrelated chat): `bot` is `None` for the generation and the reply is edited through `inline_message_id` only. Guest updates use their own mailbox (`thread_id = GUEST_SCOPE_THREAD_ID`).
 - The guest query is answered once with a placeholder. An interrupted generation edits it into a "call again" notice rather than returning `Interrupted`, because the query cannot be answered twice.
 
+### 6a-bis. Inline Mode Is Stateless Too
+- Only the owner's `inline_query` is answered (one result, `is_personal`, `cache_time: 0`); anyone else gets no answer. The result carries an inline keyboard because Telegram only reports `inline_message_id` for messages with one.
+- The generation starts on `chosen_inline_result` (requires `/setinlinefeedback` in @BotFather) and follows the guest-mode rules: guest system prompt, no history or memories, read-only tools, `bot` is `None`, and only the inline message is edited.
+- Inline queries and chosen results use separate owner mailboxes (`INLINE_QUERY_SCOPE_THREAD_ID`, `INLINE_SCOPE_THREAD_ID`) so a placeholder answer never waits behind a generation. Stale `inline_query` rows are acknowledged on replay; an interrupted chosen result returns `Interrupted` and is answered after restart, since an inline message can still be edited.
+
 ### 6b. Edited Messages
 - An `edited_message` is answered again only if its text/caption changed, the edit is within `inbound::EDIT_WINDOW_SECS` (10 minutes), and the message is still the latest answered prompt in its chat/topic (`telegram_latest_prompts`). Live location updates are never answered.
 - `claim_edited_prompt_async` is the dedup point: it stores only a hash of the text, and accepts a crash-recovery replay of the same `update_id`.
 - The new answer replies to the edited message; the earlier answer is not touched.
+
+### 6c. Reply Context
+- A reply carries the replied-to message to the model through `ChatInput.reply_context`, fenced and labelled as quoted material, never as instructions. Image-intent detection reads only the owner's own words.
+- Xiao's own earlier answers are capped at `inbound::MAX_OWN_ANSWER_QUOTE_CHARS` (4,000); other messages at `MAX_QUOTED_CHARS`. A `TextQuote` (the part the user selected) is always included.
+- A reply without its own attachment reuses the replied message's media. That media is best effort: download or format failures are not reported and the question is answered from the quoted text.
 
 ### 7. WhatsApp Single-Owner Boundary
 - Authorization is decided on the **phone number**, never on raw JID text.

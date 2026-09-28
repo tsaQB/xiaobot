@@ -1,7 +1,12 @@
 #[path = "models/base.rs"]
 mod base;
+#[path = "models/extras.rs"]
+mod extras;
 #[path = "models/rich_text.rs"]
 mod rich_text;
+
+#[allow(unused_imports)]
+pub use extras::{Checklist, ChecklistTask, ChosenInlineResult, InlineQuery, TextQuote};
 
 #[allow(unused_imports)]
 pub use base::{

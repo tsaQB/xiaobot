@@ -320,7 +320,9 @@ pub fn render_terminal_markdown(input: &str) -> String {
 }
 
 fn sanitize_terminal_input(input: &str) -> String {
-    super::markdown::sanitize_leaked_llm_artifacts(input)
+    let cleaned = super::markdown::sanitize_leaked_llm_artifacts(input);
+    // The terminal has no highlight, super/subscript or date-time entities.
+    super::markdown::flatten_extended_inline_outside_code(&cleaned)
 }
 
 pub fn render_terminal_inline(text: &str) -> String {

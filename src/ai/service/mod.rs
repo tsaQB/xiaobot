@@ -4,6 +4,7 @@ pub mod generation;
 pub mod image;
 pub mod multimodal;
 pub(crate) mod prompt;
+mod quiz;
 pub mod session;
 
 #[cfg(test)]

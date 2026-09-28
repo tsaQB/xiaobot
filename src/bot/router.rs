@@ -34,6 +34,10 @@ pub struct ChatInput<'a> {
     pub video_duration: Option<i32>,
     pub model_snapshot: Option<&'a GenerationModelSnapshot>,
     pub reply_to_message_id: Option<i64>,
+    /// The message the user replied to, already fenced as quoted material
+    /// ([`inbound::reply_context`]). Kept apart from `prompt` so image intent
+    /// detection only reads the user's own words; the model gets both.
+    pub reply_context: Option<&'a str>,
 }
 
 pub fn build_audio_chat_input<'a>(
@@ -57,6 +61,7 @@ pub fn build_audio_chat_input<'a>(
         video_duration: None,
         model_snapshot: None,
         reply_to_message_id,
+        reply_context: None,
     }
 }
 
@@ -434,7 +439,16 @@ pub async fn handle_ai_chat(
         video_duration,
         model_snapshot,
         reply_to_message_id,
+        reply_context,
     } = input;
+    let composed_prompt;
+    let user_prompt = match reply_context {
+        Some(context) => {
+            composed_prompt = format!("{context}\n\n{user_prompt}");
+            composed_prompt.as_str()
+        }
+        None => user_prompt,
+    };
     let generation_lock = ai_service.generation_lock(chat_id, thread_id).await;
     let _generation_guard = generation_lock.lock().await;
 
@@ -908,6 +922,14 @@ pub async fn handle_update(
         crate::bot::guest::handle_guest_message(bot, ai_service, route_scope, msg).await;
         return;
     }
+    if let Some(query) = update.inline_query {
+        crate::bot::inline::handle_inline_query(bot, route_scope, query).await;
+        return;
+    }
+    if let Some(chosen) = update.chosen_inline_result {
+        crate::bot::inline::handle_chosen_inline_result(bot, ai_service, route_scope, chosen).await;
+        return;
+    }
     let update_id = update.update_id;
     let incoming = update
         .message
@@ -937,31 +959,12 @@ pub async fn handle_update(
             .reply_to_message
             .as_ref()
             .and_then(|r| r.from.as_ref())
-            .map(|u| {
-                if let Some(bot_id) = route_scope.bot_id {
-                    if u.id == bot_id {
-                        return true;
-                    }
-                }
-                if let Some(ref my_bot) = route_scope.bot_username {
-                    u.username
-                        .as_deref()
-                        .unwrap_or("")
-                        .eq_ignore_ascii_case(my_bot)
-                } else {
-                    u.is_bot
-                }
-            })
-            .unwrap_or(false);
+            .is_some_and(|u| {
+                inbound::is_this_bot(u, route_scope.bot_id, route_scope.bot_username.as_deref())
+            });
 
-        let has_video = msg.video.is_some() || msg.video_note.is_some();
-        // A live photo also carries `photo` for backward compatibility.
-        let has_photo = msg.photo.is_some() || msg.live_photo.is_some();
-        let has_audio = msg.voice.is_some() || msg.audio.is_some();
-        let has_document = msg.document.is_some();
         let extra_content = inbound::describe_extra_content(&msg);
-        let has_media =
-            has_video || has_photo || has_audio || has_document || extra_content.is_some();
+        let has_media = inbound::carries_media(&msg) || extra_content.is_some();
         let is_forum = msg.chat.is_forum.unwrap_or(false) || thread_id > 0;
 
         let route_ctx = MessageRouteContext {
@@ -1011,6 +1014,31 @@ pub async fn handle_update(
             None => text,
         };
 
+        // A reply carries the message it answers as quoted context.
+        let reply_author = inbound::reply_author(
+            &msg,
+            route_scope.owner_user_id,
+            route_scope.bot_id,
+            route_scope.bot_username.as_deref(),
+        );
+        let reply_context = inbound::reply_context(&msg, reply_author);
+
+        // A reply without media of its own uses the media of the message it
+        // answers, so "what is this?" under a photo lets Xiao see the photo.
+        // That media is best effort: if it cannot be used, the question is
+        // still answered from the quoted text.
+        let replied_media = msg
+            .reply_to_message
+            .as_deref()
+            .filter(|replied| !inbound::carries_media(&msg) && inbound::carries_media(replied));
+        let media_from_reply = replied_media.is_some();
+        let media_msg: &crate::bot::models::Message = replied_media.unwrap_or(&msg);
+        let has_video = media_msg.video.is_some() || media_msg.video_note.is_some();
+        // A live photo also carries `photo` for backward compatibility.
+        let has_photo = media_msg.photo.is_some() || media_msg.live_photo.is_some();
+        let has_audio = media_msg.voice.is_some() || media_msg.audio.is_some();
+        let has_document = media_msg.document.is_some();
+
         let mut image_bytes: Option<Vec<u8>> = None;
         let mut document_images: Option<Vec<Vec<u8>>> = None;
         let mut mime_type: Option<String> = None;
@@ -1028,14 +1056,14 @@ pub async fn handle_update(
                 result.map_err(|error| download_error = Some(error)).ok()
             };
 
-        if let Some(ref v) = msg.voice {
+        if let Some(v) = media_msg.voice.as_ref() {
             audio_duration = v.duration;
             audio_mime = v.mime_type.clone();
             if let Some((data, path)) = fetch_file(bot.get_file_bytes(&v.file_id).await) {
                 audio_bytes = Some(data);
                 doc_name = path.split('/').next_back().map(str::to_string);
             }
-        } else if let Some(ref a) = msg.audio {
+        } else if let Some(a) = media_msg.audio.as_ref() {
             audio_duration = a.duration;
             audio_mime = a.mime_type.clone();
             let audio_file_name = a.file_name.clone();
@@ -1044,7 +1072,7 @@ pub async fn handle_update(
                 doc_name =
                     audio_file_name.or_else(|| path.split('/').next_back().map(str::to_string));
             }
-        } else if let Some(ref vid) = msg.video {
+        } else if let Some(vid) = media_msg.video.as_ref() {
             video_duration = vid.duration;
             if let Some((data, path)) = fetch_file(bot.get_file_bytes(&vid.file_id).await) {
                 video_bytes = Some(data);
@@ -1054,7 +1082,7 @@ pub async fn handle_update(
                     .clone()
                     .or_else(|| Some(format!("video/{ext}")));
             }
-        } else if let Some(ref vn) = msg.video_note {
+        } else if let Some(vn) = media_msg.video_note.as_ref() {
             video_duration = vn.duration;
             if let Some((data, _)) = fetch_file(bot.get_file_bytes(&vn.file_id).await) {
                 video_bytes = Some(data);
@@ -1064,7 +1092,7 @@ pub async fn handle_update(
             // A live photo's motion clip goes to the Video route when one can
             // take it; otherwise (or if that download fails) the still photo
             // is used like any other photo.
-            let live_clip = match msg.live_photo.as_ref() {
+            let live_clip = match media_msg.live_photo.as_ref() {
                 Some(live) if inbound::live_photo_video_supported(ai_service).await => bot
                     .get_file_bytes(&live.file_id)
                     .await
@@ -1072,10 +1100,12 @@ pub async fn handle_update(
                     .map(|(data, _)| (data, live)),
                 _ => None,
             };
-            let still = msg
-                .photo
-                .as_ref()
-                .or_else(|| msg.live_photo.as_ref().and_then(|live| live.photo.as_ref()));
+            let still = media_msg.photo.as_ref().or_else(|| {
+                media_msg
+                    .live_photo
+                    .as_ref()
+                    .and_then(|live| live.photo.as_ref())
+            });
             if let Some((data, live)) = live_clip {
                 video_bytes = Some(data);
                 video_mime = Some(
@@ -1095,7 +1125,7 @@ pub async fn handle_update(
                     });
                 }
             }
-        } else if let Some(file_id) = msg
+        } else if let Some(file_id) = media_msg
             .sticker
             .as_ref()
             .and_then(inbound::sticker_image_file_id)
@@ -1106,7 +1136,7 @@ pub async fn handle_update(
                 image_bytes = Some(data);
                 mime_type = Some(inbound::image_mime_from_path(&path));
             }
-        } else if let Some(doc) = msg.document {
+        } else if let Some(doc) = media_msg.document.as_ref() {
             let d_mime = doc.mime_type.clone().unwrap_or_default();
             let d_name = doc
                 .file_name
@@ -1145,6 +1175,9 @@ pub async fn handle_update(
                                     info!("{warning}");
                                 }
                             }
+                            Err(err) if media_from_reply => {
+                                info!("Replied-to document could not be read: {err}");
+                            }
                             Err(err) => {
                                 let safe_name = escape_html(&d_name);
                                 let safe_error = escape_html(&err);
@@ -1164,6 +1197,8 @@ pub async fn handle_update(
                             }
                         }
                     }
+                    // An unsupported file under a reply is only described.
+                    TelegramDocumentMediaKind::Other if media_from_reply => {}
                     TelegramDocumentMediaKind::Other => {
                         let safe_name = escape_html(&d_name);
                         let _ = bot.send_message(
@@ -1179,15 +1214,18 @@ pub async fn handle_update(
             }
         }
 
-        if has_photo && image_bytes.is_none() && video_bytes.is_none() {
+        // Media taken from the replied-to message is best effort; its failure
+        // is not reported and the question is answered from the quoted text.
+        if has_photo && !media_from_reply && image_bytes.is_none() && video_bytes.is_none() {
             notify_download_failure(bot, chat_id, "gambar", download_error).await;
             return;
         }
-        if has_audio && audio_bytes.is_none() {
+        if has_audio && !media_from_reply && audio_bytes.is_none() {
             notify_download_failure(bot, chat_id, "audio", download_error).await;
             return;
         }
         if has_document
+            && !media_from_reply
             && image_bytes.is_none()
             && audio_bytes.is_none()
             && video_bytes.is_none()
@@ -1244,13 +1282,14 @@ pub async fn handle_update(
                 )
             };
 
-            let chat_input = build_audio_chat_input(
+            let mut chat_input = build_audio_chat_input(
                 &prompt_audio,
                 a_bytes,
                 audio_mime.as_deref(),
                 doc_name.as_deref(),
                 reply_to_msg_id,
             );
+            chat_input.reply_context = reply_context.as_deref();
             handle_ai_chat(bot, ai_service, chat_id, thread_id, user_id, chat_input).await;
             return;
         }
@@ -1259,7 +1298,7 @@ pub async fn handle_update(
         if let Some(v_bytes) = video_bytes {
             let prompt_video = if !text.is_empty() {
                 text.clone()
-            } else if msg.live_photo.is_some() {
+            } else if media_msg.live_photo.is_some() {
                 "Lihat live photo ini (foto dengan klip gerak singkat) dan jelaskan isinya, termasuk gerakan atau suara yang terekam.".to_string()
             } else {
                 "Tonton dan analisis rekaman video ini secara mendalam. Jelaskan isi visual, alur peristiwa, teks di layar, dan suara di dalamnya.".to_string()
@@ -1285,6 +1324,7 @@ pub async fn handle_update(
                     video_duration: Some(video_duration),
                     model_snapshot: None,
                     reply_to_message_id: reply_to_msg_id,
+                    reply_context: reply_context.as_deref(),
                 },
             )
             .await;
@@ -1315,6 +1355,7 @@ pub async fn handle_update(
                 video_duration: Some(video_duration),
                 model_snapshot: None,
                 reply_to_message_id: reply_to_msg_id,
+                reply_context: reply_context.as_deref(),
             },
         )
         .await;
@@ -2022,7 +2063,7 @@ mod tests {
     fn telegram_document_runtime_uses_one_authoritative_media_classifier() {
         let source = include_str!("router.rs").replace("\r\n", "\n");
         let document_start = source
-            .find("} else if let Some(doc) = msg.document {")
+            .find("} else if let Some(doc) = media_msg.document.as_ref() {")
             .expect("Telegram document branch");
         let document_end = source[document_start..]
             .find("\n        }\n\n        // Strict provider lock")

@@ -40,6 +40,25 @@ pub enum FileDownloadError {
     Network,
 }
 
+/// A native poll or quiz for `sendPoll`.
+#[derive(Debug, Clone, Default)]
+pub struct PollRequest<'a> {
+    pub question: &'a str,
+    pub options: &'a [InputPollOption],
+    pub is_anonymous: Option<bool>,
+    /// `"quiz"` or `"regular"` (the Bot API default).
+    pub poll_type: Option<&'a str>,
+    /// Correct answers of a quiz, ascending; several make a quiz whose
+    /// players may pick several answers.
+    pub correct_option_ids: &'a [i32],
+    pub explanation: Option<&'a str>,
+    pub explanation_parse_mode: Option<&'a str>,
+    /// Show the options in a random order to each player.
+    pub shuffle_options: bool,
+    /// Media shown with the question (`InputPollMedia`), e.g. a photo.
+    pub media: Option<Value>,
+}
+
 /// Converts one rendered Telegram-HTML chunk back to readable plain text.
 fn html_chunk_to_plain_text(html: &str) -> String {
     static RE_TAG: std::sync::LazyLock<regex::Regex> =
@@ -587,38 +606,41 @@ impl TelegramBotClient {
         Ok(last)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn send_poll(
         &self,
         chat_id: i64,
-        question: &str,
-        options: &[InputPollOption],
-        is_anonymous: Option<bool>,
-        poll_type: Option<&str>,
-        correct_option_id: Option<i32>,
-        explanation: Option<&str>,
-        explanation_parse_mode: Option<&str>,
+        poll: &PollRequest<'_>,
         reply_to_message_id: Option<i64>,
     ) -> Result<Value, String> {
         // Bot API defaults `type` to "regular"; a quiz is only requested
         // explicitly (it would be rejected without a correct answer anyway).
         let mut payload = json!({
             "chat_id": chat_id,
-            "question": question,
-            "options": options,
-            "type": poll_type.unwrap_or("regular"),
+            "question": poll.question,
+            "options": poll.options,
+            "type": poll.poll_type.unwrap_or("regular"),
         });
-        if let Some(anon) = is_anonymous {
+        if let Some(anon) = poll.is_anonymous {
             payload["is_anonymous"] = json!(anon);
         }
-        if let Some(correct_id) = correct_option_id {
+        if !poll.correct_option_ids.is_empty() {
             // Bot API 9.6 replaced `correct_option_id` with the array
-            // `correct_option_ids` (quizzes may now have several answers).
-            payload["correct_option_ids"] = json!([correct_id]);
+            // `correct_option_ids`; a quiz with several correct answers must
+            // also let players pick several.
+            payload["correct_option_ids"] = json!(poll.correct_option_ids);
+            if poll.correct_option_ids.len() > 1 {
+                payload["allows_multiple_answers"] = json!(true);
+            }
         }
-        if let Some(exp) = explanation.map(str::trim).filter(|s| !s.is_empty()) {
+        if poll.shuffle_options {
+            payload["shuffle_options"] = json!(true);
+        }
+        if let Some(media) = poll.media.as_ref() {
+            payload["media"] = media.clone();
+        }
+        if let Some(exp) = poll.explanation.map(str::trim).filter(|s| !s.is_empty()) {
             payload["explanation"] = json!(exp);
-            if let Some(pm) = explanation_parse_mode {
+            if let Some(pm) = poll.explanation_parse_mode {
                 payload["explanation_parse_mode"] = json!(pm);
             }
         }
@@ -1583,6 +1605,26 @@ impl TelegramBotClient {
             .await?;
         serde_json::from_value(response.get("result").cloned().unwrap_or(Value::Null))
             .map_err(|error| format!("answerGuestQuery returned an unexpected result: {error}"))
+    }
+
+    /// Answers an inline query. Results are cached only for the asking user
+    /// and never reused: each one stands for a question still to be answered.
+    pub async fn answer_inline_query(
+        &self,
+        inline_query_id: &str,
+        results: Value,
+    ) -> Result<(), String> {
+        self.post_json(
+            "answerInlineQuery",
+            json!({
+                "inline_query_id": inline_query_id,
+                "results": results,
+                "cache_time": 0,
+                "is_personal": true,
+            }),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Edits an inline message (such as a guest-mode reply) into a rich
