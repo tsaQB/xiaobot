@@ -124,7 +124,9 @@ fn secret_setting_namespace(key: &str) -> Option<&'static str> {
     match key {
         "BOT_TOKEN" => Some("telegram"),
         "AI_API_KEY" => Some("app-provider"),
-        "BRAVE_API_KEY" | "TAVILY_API_KEY" | "TAVILY_KEY" | "EXA_API_KEY" => Some("search"),
+        "BRAVE_API_KEY" | "TAVILY_API_KEY" | "TAVILY_KEY" | "EXA_API_KEY" | "EXA_KEY" => {
+            Some("search")
+        }
         _ if is_credential_setting_key(key) => Some("app-secret"),
         _ => None,
     }
@@ -394,6 +396,7 @@ mod tests {
             "TAVILY_API_KEY",
             "TAVILY_KEY",
             "EXA_API_KEY",
+            "EXA_KEY",
             "SOME_FUTURE_API_KEY",
             "WEBHOOK_SECRET",
         ] {

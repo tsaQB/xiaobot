@@ -15,11 +15,11 @@
 
 ---
 
-[![CI](https://github.com/tsaQB/xiao-chat/actions/workflows/build.yml/badge.svg)](https://github.com/tsaQB/xiao-chat/actions)
+[![CI](https://github.com/tsaQB/xiaobot/actions/workflows/build.yml/badge.svg)](https://github.com/tsaQB/xiaobot/actions)
 ![Telegram Bot API](https://img.shields.io/badge/Telegram%20Bot%20API-10.3-2CA5E0?logo=telegram&logoColor=white)
 ![Rust](https://img.shields.io/badge/Rust-2021%20Edition-DEA584?logo=rust&logoColor=white)
-![MSRV](https://img.shields.io/badge/MSRV-1.80%2B-lightgrey)
-![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Armbian%20%7C%20Termux-097ABB?logo=linux&logoColor=white)
+![MSRV](https://img.shields.io/badge/MSRV-1.94%2B-lightgrey)
+![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Armbian%20%7C%20Termux%20%7C%20Windows-097ABB?logo=linux&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
 [Key Features](#-key-features) • [Architecture](#-architecture) • [Quickstart](#-quickstart) • [Installation](#-multi-platform-installation) • [CLI & Terminal Chat](#-cli--terminal-chat) • [Configuration](#-configuration-reference)
@@ -32,7 +32,7 @@
 
 Xiao is an autonomous, single-owner AI gateway designed to run continuously on low-overhead environments, from cloud servers to single-board computers (Armbian) and edge smartphones (Android Termux). It serves two channels: Telegram, treated not as a simple chat wrapper but as a rich display surface powered by **Telegram Bot API 10.3**, and WhatsApp multi-device.
 
-- **Telegram Bot API 10.3 Native**: Real-time streaming drafts (`sendRichMessageDraft`), native stop controls, AST layout blocks (tables, expandable quotes, collages, slideshows, buttons, thinking indicators), and cross-platform LaTeX rendering.
+- **Telegram Bot API 10.3 Native**: Real-time streaming drafts (`sendRichMessageDraft`), native stop controls, AST layout blocks (tables, expandable quotes, collages, slideshows, thinking indicators), in-message links and footnotes, and cross-platform LaTeX rendering.
 - **Hardened Single-Owner Boundary**: Zero information leakage. Non-owner updates are dropped silently at the network boundary without acknowledging bot existence.
 - **Pure Zero-Slash Gateway**: Runs with empty command menus (`set_my_commands(&[])`). Interacts naturally through conversational intent, context-aware mentions, media attachments, or dedicated forum topics.
 - **Durable SQLite WAL Intake Queue**: Ingests updates to an ACID SQLite inbox (`telegram_inbox`, `whatsapp_inbox`) before acknowledgment. Dispatches to per-scope FIFO mailboxes with task-level panic isolation, bounded retry (2 attempts), and poison-pill quarantine.
@@ -40,7 +40,7 @@ Xiao is an autonomous, single-owner AI gateway designed to run continuously on l
 - **Three-Tier Long-Term Memory**: Tier 1 (Autonomous profile facts), Tier 2 (Sliding-window topic summaries), and Tier 3 (Full thread-scoped turns).
 - **Specialist Context Isolation**: Routes queries across `Main`, `Vision`, `Video`, `Audio STT`, `Image Generation`, and `Curator`. Specialist models only receive transient media payloads, preventing token context exhaustion and preserving privacy.
 - **In-Memory Document & Anti-Bomb Inspection**: Safe extraction of PDF, DOCX, XLSX, text, code, and archives (ZIP, TAR, 7Z) with strict memory quotas and anti-zip-bomb limits.
-- **Autonomous Tool Calling**: Built-in `web_search` (keyless Exa MCP protocol, Tavily, Brave, and DuckDuckGo fallbacks) and SSRF-hardened `fetch_url`.
+- **Autonomous Tool Calling**: Built-in `web_search` (Brave → Tavily → Exa API when keys are configured, then keyless Exa MCP → DuckDuckGo, with Wikipedia for verified images), SSRF-hardened `fetch_url`, and tools for quizzes, photos, collages, slideshows, audio, voice notes, live photos, locations, documents and archives.
 
 ---
 
@@ -76,10 +76,10 @@ Xiao is an autonomous, single-owner AI gateway designed to run continuously on l
 │         Model Role Router         │                         │         Three-Tier Memory         │
 │  ├─ Main (Canonical History)      │                         │  ├─ Tier 1: User Profile Facts    │
 │  ├─ Vision (Transient Media)      │                         │  ├─ Tier 2: Scoped Topic Summaries│
-│  ├─ Video (Bounded Frames)        │                         │  └─ Tier 3: Scoped Canonical Turns│
-│  ├─ Audio STT (Whisper Stream)    │                         └───────────────────────────────────┘
-│  ├─ Image Gen (OpenAI/Pollinations)                         │         SQLite WAL Storage        │
-│  └─ Curator (Fact Extraction)     │                         │      (~/.local/share/xiaoai/)     │
+│  ├─ Video (Whole Clip)            │                         │  └─ Tier 3: Scoped Canonical Turns│
+│  ├─ Audio STT (Transcription)     │                         ├───────────────────────────────────┤
+│  ├─ Image Gen (OpenAI-compatible) │                         │         SQLite WAL Storage        │
+│  └─ Curator (Fact Extraction)     │                         │          (XIAO_DATA_DIR)          │
 └───────────────────────────────────┘                         └───────────────────────────────────┘
 ```
 
@@ -94,7 +94,7 @@ Xiao is an autonomous, single-owner AI gateway designed to run continuously on l
   - **Tables**: Multi-column tables with custom text alignments. Unspecified columns in Right-to-Left (Arabic/Hebrew) or Eastern Arabic numeral contexts automatically mirror to the right.
   - **Expandable Quotes & Callouts**: GitHub-style alerts (`> [!NOTE]`, `> [!WARNING]`) and expandable blockquotes.
   - **Visual Media Groups**: Native photo collages and horizontal media slideshows.
-  - **Interactive Action Buttons**: Copy-text buttons, URLs, and ephemeral interactive buttons.
+  - **Buttons & Ephemeral Messages**: The models and client cover rich-message buttons (Bot API 10.3) and ephemeral messages (Bot API 10.2); an answer to an incoming ephemeral message is delivered as an ephemeral message too. Xiao's own answers do not add buttons.
 - **Cross-Platform LaTeX Sanitizer**: Mathematical expressions (`$...$`, `$$...$$`, `\(...\)`) are sanitized downstream to render flawlessly on both Android (`JLaTeXMath`) and iOS (`SwiftMath`), normalizing units (`44\ \mathrm{cm}`), decimal commas, and LaTeX operator symbols.
 - **Guest Mode (Bot API 10.0)**: When guest mode is enabled for the bot in @BotFather, the owner can mention Xiao in a chat Xiao is not a member of. Xiao answers with a "thinking" placeholder (`answerGuestQuery`) and edits it into the final answer. Because other people read these replies, guest conversations are stateless: no personal memories or summaries reach the prompt, nothing is written to history, and only `web_search` and `fetch_url` are available. The daemon status box shows whether guest mode is enabled.
 - **Edited Messages**: Editing your latest message to Xiao within 10 minutes gets a fresh answer that quotes the edited message; the earlier answer is left as it was. Edits of older messages, and edit events that do not change the text (such as live location updates), are ignored.
@@ -103,13 +103,13 @@ Xiao is an autonomous, single-owner AI gateway designed to run continuously on l
 - **Inline Mode**: With inline mode enabled in @BotFather (`/setinline` and `/setinlinefeedback`), the owner can type `@XiaoBot question` in any chat and pick "Tanya Xiao". The posted message shows a placeholder and is edited into the answer. Like guest mode, these answers are stateless and use only the read-only research tools; queries from anyone else are never answered. The daemon status box shows whether inline mode is enabled.
 - **Advanced Text Formatting (Bot API 10.1)**: Highlighted text (`==text==` or `<mark>`), superscript and subscript (`<sup>`, `<sub>`), date-times that each reader sees in their own time zone (`<time datetime="2026-10-05T14:00:00+07:00">…</time>`, or Telegram's `![22:45](tg://time?unix=…&format=wDT)`), and custom emoji (`![👍](tg://emoji?id=…)`, which Telegram only accepts when the bot owner has Telegram Premium or the bot has a Fragment username). WhatsApp and the terminal get readable equivalents (bold, `x²`, `H₂O`, the visible date text).
 - **Quizzes**: Native quizzes may have several correct answers, a picture for the question, for each option and for the explanation, a description under the question, shuffled options, answers that can be changed, and a time limit after which the quiz closes (optionally hiding everyone's results until then). If Telegram cannot load a picture URL, the quiz is sent without pictures instead of failing.
-- **In-Message Navigation (Bot API 10.1)**: Long answers can open with a table of contents whose entries jump to the sections of the same message (`[2. DNS](#2-dns)`), and use footnotes (`fact[^1]` with `[^1]: source`). An anchor is placed only on headings that are linked to, and a link whose target is missing keeps only its text. WhatsApp and the terminal show the plain text (`DNS`, `[1]`).
+- **In-Message Navigation (Bot API 10.1)**: Long answers can open with a table of contents whose entries jump to the sections of the same message (`[2. DNS](#2-dns)`), and use footnotes (`fact[^1]` with `[^1]: source`). An anchor is placed only on headings that are linked to, and a link whose target is missing keeps only its text. A `[^…]` without a matching note, such as the regex class `[^0-9]`, is left exactly as written. WhatsApp and the terminal show the plain text (`DNS`, `[1]`).
 - **Live Photos (Bot API 10.0)**: The `send_live_photo` tool sends a still photo with a motion clip of at most 10 seconds and 10 MB. Telegram does not accept live photos by URL, so Xiao downloads both files through the SSRF-safe fetcher, checks the clip length, and uploads them.
 
 ### 2. 🛡️ Hardened Security & Zero-Slash UX
 - **Strict Single-Owner Boundary**: Xiao ignores all non-owner interactions at the network gate. Messages from unauthorized users or rogue groups are discarded with `RouteDecision::Ignore`, leaking zero information about the bot's presence.
 - **Zero-Slash Gateway**: On startup, Xiao executes `set_my_commands(&[])` to clear Telegram slash menus. Interaction is completely natural—speak naturally, drop files, send voice messages, or mention the bot.
-- **Filesystem Secret Vault**: Plaintext API keys and bot tokens are never stored in SQLite or environment dumps. They are isolated in permission-hardened local files (`~/.local/share/xiaoai/secrets/`, permissions `0o600`/`0o700`) and referenced internally via opaque `secret://` URIs.
+- **Filesystem Secret Vault**: API keys and bot tokens saved by Xiao are never stored in SQLite. They are isolated in permission-hardened local files (`<data dir>/secrets/`, permissions `0o600`/`0o700` on Unix) and referenced internally via opaque `secret://` URIs.
 - **Outbound SSRF Firewall**: Remote fetches (`fetch_url`, media downloads) pass through strict IP validation, blocking RFC 1918 private subnets, loopback addresses (`127.0.0.0/8`, `::1`), link-local spaces, and SIIT/NAT64 translated ranges.
 
 ### 3. 🧠 Three-Tier Memory & Multimodal Routing
@@ -121,8 +121,8 @@ Xiao is an autonomous, single-owner AI gateway designed to run continuously on l
 ### 4. ⚡ Durable SQLite WAL Queue & Fault Isolation
 - **At-Least-Once Intake Guarantee**: Telegram long-polling commits updates directly to SQLite table `telegram_inbox` with status `pending` before Telegram acknowledgment.
 - **Per-Scope Keyed Mailboxes**: Updates are dispatched into dedicated per-scope FIFO queues (`ScopeKey { chat_id, thread_id }`). Messages within the same chat/topic maintain strict sequential order, while different chats process concurrently up to a global semaphore limit (8 permits).
-- **Panic Isolation & Bounded Retry**: Each processing task runs within an isolated `tokio::spawn` wrapper with unwinding panic protection. Transient panics release concurrency permits immediately and trigger a 1.5-second backoff sleep with up to 2 retry attempts. Updates exceeding retry limits are quarantined as `failed` ("poison pills") to prevent infinite daemon crash loops.
-- **Crash Recovery**: On process startup, `recover_telegram_processing_async()` resets in-flight `processing` updates back to `pending`, ensuring zero message loss across reboots.
+- **Panic Isolation & Bounded Retry**: Each processing task runs within an isolated `tokio::spawn` wrapper with unwinding panic protection. A panic releases the concurrency permit immediately and, after a 1.5-second backoff, the update is retried once (2 attempts in total). Updates exceeding the limit are quarantined as `failed` ("poison pills") to prevent infinite crash loops.
+- **Crash Recovery**: On process startup, `recover_telegram_processing_async()` resets in-flight `processing` updates back to `pending`, ensuring zero message loss across reboots. Stop requests and inline queries from before the restart are acknowledged instead of replayed, since they no longer apply.
 
 ### 5. 📱 WhatsApp Multi-Device Gateway
 - **Self-Service Linking**: Link by scanning a QR code or by entering a phone pairing code.
@@ -138,17 +138,17 @@ Xiao is an autonomous, single-owner AI gateway designed to run continuously on l
 
 ## 📦 Multi-Platform Installation
 
-Xiao is distributed as a single static binary with pure Rust dependencies. Choose your deployment environment:
+Xiao is a single self-contained binary (TLS through `rustls`, SQLite compiled in, no system OpenSSL or SQLite needed). There are no GitHub Releases: CI uploads prebuilt binaries as workflow artifacts for Linux ARM64 (`xiao-linux-arm64-armbian`), Android ARM64 (`xiao-android-arm64`) and Windows x86_64 (`xiao-windows-x86_64`) on every push to `main` and every pull request, after the quality and security jobs pass. Artifacts are zip files downloaded from the workflow run page while signed in to GitHub. Other targets, including Linux x86_64, are built from source (Option D). Choose your deployment environment:
 
 ### Option A: Linux x86_64 Server (Systemd Service)
 
 Ideal for dedicated servers, VPS instances (Ubuntu, Debian, Arch Linux), or home servers.
 
-1. **Download the latest release binary**:
+1. **Build and install the binary** (see Option D for the build itself):
    ```bash
-   sudo mkdir -p /usr/local/bin /var/lib/xiaoai
-   # Download xiao binary from GitHub Releases / Actions to /usr/local/bin/xiao
-   sudo chmod +x /usr/local/bin/xiao
+   cargo build --release --locked
+   sudo mkdir -p /var/lib/xiaoai
+   sudo install -m 755 target/release/xiao /usr/local/bin/xiao
    ```
 
 2. **Create a dedicated system user**:
@@ -207,11 +207,11 @@ Ideal for dedicated servers, VPS instances (Ubuntu, Debian, Arch Linux), or home
 
 Optimized for Orange Pi, Raspberry Pi, Radxa, or any SBC running Armbian or Debian ARM64 (`aarch64-unknown-linux-gnu`).
 
-1. **Download pre-built ARM64 binary**:
-   GitHub Actions automatically compiles `xiao-linux-arm64-armbian` on every commit:
+1. **Get the prebuilt ARM64 binary**:
+   Download the `xiao-linux-arm64-armbian` artifact from a successful run of the **Build XiaoAI** workflow (GitHub → Actions), then:
    ```bash
-   sudo curl -L -o /usr/local/bin/xiao "<RELEASE_OR_ARTIFACT_URL>"
-   sudo chmod +x /usr/local/bin/xiao
+   unzip xiao-linux-arm64-armbian.zip
+   sudo install -m 755 xiao /usr/local/bin/xiao
    ```
 
 2. **Quick onboarding setup**:
@@ -219,8 +219,9 @@ Optimized for Orange Pi, Raspberry Pi, Radxa, or any SBC running Armbian or Debi
    # Run the interactive onboarding wizard to configure bot token and AI provider
    xiao setup
    ```
+   Run it as the user the service runs as (or with the same `XIAO_DATA_DIR`), so the service finds the configuration.
 
-3. **Enable systemd background service**:
+3. **Enable the systemd background service** (create `xiao.service` and the `xiao` user as in Option A first):
    ```bash
    sudo systemctl enable --now xiao
    journalctl -u xiao -f
@@ -232,15 +233,15 @@ Optimized for Orange Pi, Raspberry Pi, Radxa, or any SBC running Armbian or Debi
 
 Run Xiao 24/7 directly on your Android device without requiring root access.
 
-1. **Install required packages in Termux**:
+1. **Install required packages in Termux** (a C compiler is needed for the bundled SQLite):
    ```bash
-   pkg update && pkg install -y git clang rust openssl termux-api
+   pkg update && pkg install -y git clang rust
    ```
 
-2. **Clone & build native Android binary**:
+2. **Clone & build native Android binary** (or use the `xiao-android-arm64` CI artifact instead):
    ```bash
-   git clone https://github.com/tsaQB/xiao-chat.git
-   cd xiao-chat
+   git clone https://github.com/tsaQB/xiaobot.git
+   cd xiaobot
    cargo build --release --locked
    cp target/release/xiao $PREFIX/bin/
    ```
@@ -256,11 +257,11 @@ Run Xiao 24/7 directly on your Android device without requiring root access.
 
 ### Option D: Build from Source
 
-Requirements: **Rust 1.80+** (`cargo`, `rustc`).
+Requirements: **Rust 1.94+** (`cargo`, `rustc`; the WhatsApp crates require 1.94, CI builds with 1.98.0) and a C compiler for the bundled SQLite.
 
 ```bash
-git clone https://github.com/tsaQB/xiao-chat.git
-cd xiao-chat
+git clone https://github.com/tsaQB/xiaobot.git
+cd xiaobot
 
 # Verify compilation
 cargo check --locked
@@ -274,14 +275,23 @@ cargo build --release --locked
 
 ---
 
+### Option E: Windows x86_64
+
+Download the `xiao-windows-x86_64` artifact (it contains `xiao.exe`) or build from source as in Option D. Run `xiao setup` once, then `xiao start` in a terminal; no Windows service wrapper is included. On Windows, data lives in `%APPDATA%\xiaoai` and a `.env` can be placed in `%APPDATA%\xiao\.env` (see the configuration order below).
+
+---
+
 ## ⚡ Quickstart
 
 ### 1. Configure Environment
-Xiao reads configuration in the following order:
-1. `.env` in the current working directory
-2. `~/.xiao.env`
-3. `~/xiao/.env`
-4. `~/XiaoAI/.env`
+Xiao loads the first `.env` file it finds, in this order (`src/main.rs::get_config_path`):
+1. `.env` in the current working directory (on Unix only when it is owned by you and not writable by group or others)
+2. `$XDG_CONFIG_HOME/xiao/.env`, `$XDG_CONFIG_HOME/.xiao/.env`, `$XDG_CONFIG_HOME/xiaoai/.env`
+3. In `$HOME` (then `%USERPROFILE%`): `.xiao.env`, `.xiao/.env`, `.xiaoai/.env`, `.config/xiao/.env`, `xiao/.env`, `xiaoai/.env`, `XiaoAI/.env`
+4. On Windows, in `%APPDATA%`: `xiao\.env`, `XiaoAI\.env`, `xiaoai\.env`, `.xiao.env`
+5. A trusted `.env` in a parent directory of the working directory
+
+Variables already set in the process environment (for example by systemd) take precedence over the file. Settings saved through the CLI (`xiao setup`, `xiao gateway`, `xiao ai`, `xiao search`) are stored in the data directory and are used when the environment does not set them.
 
 Create `.env` based on the template:
 ```bash
@@ -326,7 +336,7 @@ xiao <subcommand> [arguments]
 
 | Subcommand | Description |
 | :--- | :--- |
-| *(none)* | Start terminal chat session (default mode; auto-launches setup on first run). |
+| *(none)* | Start terminal chat session (default mode; auto-launches setup on first run; prints help when stdout is not a terminal). |
 | `<question...>` | Ask a quick one-shot question directly (e.g. `xiao "What is Rust?"`). |
 | `menu` | Open interactive Control Center (TUI). |
 | `chat [prompt]` | Terminal chat mode: run an interactive REPL or execute a one-shot query. |
@@ -347,11 +357,11 @@ xiao <subcommand> [arguments]
 | `ai addon` | Configure multimodal specialist roles (`Vision`, `Video`, `Audio STT`, `Image Generation`, `Curator`). |
 | `ai test [role]` | Run live diagnostic capability probes against configured endpoints. |
 | `search` | Web search engine hub and interactive configuration menu. |
-| `search test <query>` | Execute live web search test across prioritized search engines. |
+| `search test [query]` | Run a live web search through the engine chain (a sample query is used when omitted; `xiao search <words>` does the same). |
 | `search brave [key]` | Configure Brave Search API key (or remove with `rm`). |
 | `search tavily [key]` | Configure Tavily Search API key (or remove with `rm`). |
 | `search exa [key]` | Configure Exa Search API key (or remove with `rm`). |
-| `search engine [name]` | Inspect search engine priority order and active engine status. |
+| `search engine [name]` | Show the active engine and the automatic priority order (engines are chosen by configured keys, not by name). |
 | `mcp` | Interactive Model Context Protocol (MCP) server & tool hub. |
 | `mcp list` | Show the active MCP endpoint and status. |
 | `mcp url <URL>` | Set the active MCP endpoint (SSRF guarded; alias: `mcp set`). |
@@ -370,8 +380,8 @@ xiao <subcommand> [arguments]
 | `gateway wa owner <NUM>` | Set the authorized owner phone number (E.164 without the plus sign). |
 | `gateway wa status` | Inspect WhatsApp link status, owner, and session path (alias: `check`). |
 | `gateway wa unlink` | Delete the stored WhatsApp session (alias: `logout`). |
-| `version`, `-v` | Display version and target build metadata. |
-| `help`, `-h` | Display command-line help screen. |
+| `version`, `-v`, `--version` | Display the version. |
+| `help`, `-h`, `--help` | Display the command-line help screen. Each hub also accepts `help` (for example `xiao ai help`). |
 
 ### Terminal Interactive REPL
 Launch direct chat mode without Telegram:
@@ -409,49 +419,55 @@ Xiao inspects documents and rich media locally inside bounded memory buffers:
 
 | Media Type | Processing & Ingestion Method |
 | :--- | :--- |
-| **Plain Text / Code** | UTF-8 sanitized ingestion (with UTF-8 BOM stripping and Latin-1 lossy fallback). |
-| **Photos & Images** | Analyzed via `Vision` specialist role (JPEG, PNG, WEBP). |
+| **Plain Text / Code** | UTF-8 ingestion with BOM stripping; invalid byte sequences are replaced (lossy UTF-8) instead of failing. |
+| **Photos & Images** | Routed through the `Vision` role (a dedicated Vision model, otherwise the main model). |
 | **Stickers** | Regular stickers are analyzed as images; animated and video stickers via their thumbnail, together with the emoji and set name. |
 | **Live Photos** | The motion clip goes to the `Video` role when a dedicated Video model, or a main model with verified video input, is available; otherwise the still photo goes to `Vision`. |
 | **Locations & Venues** | Passed to the model as text: coordinates, place name and address, and a map link. |
 | **Forwarded Rich Messages** | Converted to readable text that keeps headings, list items, table rows, quotes and link targets; media blocks are named (for example `[Foto: caption]`) instead of exposing file ids. Telegram caps a rich message at 32,768 characters, so a forwarded message is passed on in full. |
-| **Voice Notes & Audio** | Transcribed via `Audio STT` (Whisper-compatible `/v1/audio/transcriptions` endpoints). |
-| **Video & Video Notes** | Bounded frame extraction processed via `Video` specialist role. |
+| **Voice Notes & Audio** | Transcribed via `Audio STT` (Whisper-compatible `/audio/transcriptions`, falling back to chat completions when the provider has no transcription endpoint); up to 20 MB. |
+| **Video & Video Notes** | The whole clip is sent to the `Video` role (a dedicated Video model, otherwise the main model); there is no local frame extraction. Telegram limits bot downloads to 20 MB. |
 | **PDF Documents** | Text extracted via `lopdf`. Scanned pages (up to 6) are rendered to images and routed to `Vision`. |
 | **DOCX Documents** | In-memory XML text and paragraph extraction. |
 | **XLSX Spreadsheets** | In-memory streaming XML parsing of sheets and shared string tables (`<si>`). |
-| **Archives (ZIP, TAR, 7Z)** | In-memory text extraction with strict safety caps: max 30 MB uncompressed, max 2 MB per file, no recursive bomb unpacking. |
+| **Archives (ZIP, TAR, TAR.GZ, 7Z)** | In-memory text extraction with strict safety caps: max 30 MB uncompressed, max 2 MB per file, nested archives are not unpacked. |
+| **Checklists, Polls & Quizzes** | A shared checklist, poll or quiz is read as text (tasks with their done state, options with the correct answers when known). |
+| **Replies** | The replied-to message is added as quoted context; a reply without its own file reuses the photo, voice note, video or document it answers (best effort). |
 
 ---
 
 ## ⚙️ Configuration Reference
 
-Settings can be provided via `.env` or managed dynamically through the CLI:
+Settings can be provided via `.env` (or the process environment) or managed through the CLI:
 
 | Environment Variable | Default | Description |
 | :--- | :--- | :--- |
-| `BOT_TOKEN` | *Required* | Telegram Bot API token from [@BotFather](https://t.me/BotFather). |
-| `OWNER_USER_ID` | *Required* | Numerical Telegram user ID of the authorized owner. |
-| `ALLOWED_CHAT_IDS` | *Empty* | Comma-separated list of guest group IDs permitted to use the bot. |
-| `DEDICATED_CHAT_IDS` | *Empty* | Comma-separated list of forum supergroups acting as dedicated workspaces. |
-| `AI_ENDPOINT` | `https://openrouter.ai/api/v1` | OpenAI-compatible completions API endpoint base URL. |
-| `AI_API_KEY` | *Required* | Bearer authentication token for the AI endpoint. |
-| `AI_MODEL` | `google/gemini-2.0-flash-001` | Default model identifier for general conversation. |
+| `BOT_TOKEN` | *Required* | Telegram Bot API token from [@BotFather](https://t.me/BotFather). Can also be set with `xiao setup` or `xiao gateway token`. |
+| `OWNER_USER_ID` | *Required* | Numerical Telegram user ID of the only authorized user. Can also be set with `xiao gateway owner`. |
+| `ALLOWED_CHAT_IDS` | *Empty* | Comma-separated group IDs where the owner may use Xiao. Empty means every group is allowed. Either way, in an ordinary group Xiao answers only the owner, and only when mentioned, replied to, or addressed with a leading `/`. |
+| `DEDICATED_CHAT_IDS` | *Empty* | Comma-separated group IDs used as dedicated workspaces, where every owner message is answered without a mention. A forum supergroup in which the bot is an administrator is treated as a dedicated workspace automatically. |
+| `AI_ENDPOINT` | `https://openrouter.ai/api/v1` | OpenAI-compatible endpoint used to seed the first provider when none is configured yet. Afterwards providers are managed with `xiao ai`. |
+| `AI_API_KEY` | *Required for seeding* | API key for that first provider (not needed for a local endpoint such as `localhost`). |
+| `AI_MODEL` | `google/gemini-2.0-flash-001` | Main model for that first provider (`default` for endpoints other than OpenRouter). |
 | `IMAGE_FALLBACK_PROVIDER` | `none` | Fallback provider for image generation (`none` or `pollinations`). |
-| `AI_PROVIDER_CONNECT_TIMEOUT_SECS` | `10` | HTTP connect timeout for standard AI API requests. |
+| `AI_PROVIDER_CONNECT_TIMEOUT_SECS` | `10` | Connect timeout for chat completions, capability probes and speech-to-text. |
+| `IMAGE_PROVIDER_CONNECT_TIMEOUT_SECS` | `10` | Connect timeout for downloading generated images. |
 | `IMAGE_GENERATION_TIMEOUT_SECS` | `120` | Request timeout for image generation endpoints. |
-| `IMAGE_DOWNLOAD_TIMEOUT_SECS` | `30` | Timeout for retrieving generated image payloads. |
-| `BRAVE_API_KEY` | *Optional* | API key for Brave Search integration in `web_search`. |
-| `TAVILY_API_KEY` | *Optional* | API key for Tavily AI search integration. |
-| `EXA_API_KEY` | *Optional* | API key for Exa search integration. |
-| `EXA_MCP_URL` | `https://mcp.exa.ai/` | Model Context Protocol search server endpoint. |
+| `IMAGE_DOWNLOAD_TIMEOUT_SECS` | `30` | Timeout for downloading generated image payloads. |
+| `BRAVE_API_KEY` | *Optional* | API key for Brave Search in `web_search`. |
+| `TAVILY_API_KEY` | *Optional* | API key for Tavily search (the legacy name `TAVILY_KEY` is also read). |
+| `EXA_API_KEY` | *Optional* | API key for the Exa REST API (the legacy name `EXA_KEY` is also read). |
+| `EXA_MCP_URL` | `https://mcp.exa.ai/` | Keyless Exa MCP search endpoint (`xiao mcp url` changes it). |
 | `WHATSAPP_ENABLED` | `false` | Enables the WhatsApp gateway in the daemon. A linked session also enables it automatically. |
 | `WHATSAPP_OWNER_NUMBER` | *Empty* | Owner phone number in E.164 form without the plus sign. |
 | `WHATSAPP_DEDICATED_GROUPS` | *Empty* | Comma-separated group JIDs (or numeric ids) where Xiao answers every owner message without a mention. |
-| `XIAO_HISTORY_RETENTION` | `2000` | Messages kept per chat/topic in canonical history (older context lives on in the topic summary). `0` disables pruning. |
-| `XIAO_DATA_DIR` | `~/.local/share/xiaoai` | Base filesystem directory for database, secrets, and attachments. |
+| `XIAO_HISTORY_RETENTION` | `2000` | Messages kept per chat/topic in canonical history (older context lives on in the topic summary). `0` disables pruning. Read from the environment only. |
+| `XIAO_DATA_DIR` | see below | Base directory for the database, secrets, attachments and the WhatsApp session. |
+| `RUST_LOG` | `info` | Log filter (for example `debug` or `xiao=debug`). |
 
-> API keys and tokens set through the CLI (`xiao search`, `xiao gateway`, `xiao ai`) are stored in the file vault, never in the SQLite `settings` table. A `.env` in the working directory is only loaded when it is owned by you and not writable by other users.
+The four timeouts take whole seconds and are capped at 600. Without `XIAO_DATA_DIR`, the data directory is `%APPDATA%\xiaoai` on Windows, otherwise `$XDG_DATA_HOME/xiaoai`, otherwise `~/.local/share/xiaoai`.
+
+> API keys and tokens set through the CLI (`xiao setup`, `xiao gateway`, `xiao ai`, `xiao search`) are stored in the file vault, never in the SQLite `settings` table. On Unix, a `.env` in the working directory (or a parent directory) is only loaded when it is owned by you and not writable by group or others.
 
 ---
 
@@ -480,7 +496,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 1. **Hard Single-Owner Invariant**: Non-owner updates are dropped silently at the gateway (`src/bot/router.rs`). Never acknowledge unauthorized Telegram IDs. Guest-mode and inline queries from anyone but the owner are never answered.
 2. **Pure Zero-Slash Gateway**: Menus are cleared on boot. Xiao interacts conversationally or via CLI.
 3. **Outbound SSRF Firewall**: Every fetch of a user-, model- or web-supplied URL (media downloads, `fetch_url`, search result scraping) validates each redirect hop against RFC 1918, RFC 4193, loopback, and SIIT/NAT64 ranges and pins the connection to the vetted address.
-4. **Secret Isolation**: Secrets are stored in `~/.local/share/xiaoai/secrets/` with mode `0o600`/`0o700`. The database only stores opaque `secret://` references; the values themselves are protected by file permissions, not encryption.
+4. **Secret Isolation**: Secrets are stored in `<data dir>/secrets/` with mode `0o600`/`0o700` on Unix (on Windows the per-user profile ACL protects them). The database only stores opaque `secret://` references; the values themselves are protected by file permissions, not encryption.
 5. **Zero `.unwrap()` Policy**: Handled idiomatically with `?`, pattern matching, or `.expect()` with descriptive invariant explanations in tests.
 6. **WhatsApp Single-Owner Boundary**: Authorization is decided on the phone number, not raw JID text. Both `sender` and `sender_alt` are inspected so LID mode is recognized, and device or agent suffixes never corrupt the match. Unauthorized senders are dropped with no reply and no identity trace in the logs.
 7. **WhatsApp Credential Handling**: `whatsapp.db` holds Signal session keys and is treated the same as the secret vault. The file and its `-wal` and `-shm` sidecars are locked to `0o600` on Unix systems.

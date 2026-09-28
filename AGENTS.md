@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> Operational and architectural guide for AI coding agents working in the `xiao-chat` repository.
+> Operational and architectural guide for AI coding agents working in the `xiaobot` repository (crate and binary name: `xiao`).
 
 ---
 
@@ -13,6 +13,7 @@
 ## 2. Essential Commands
 
 ### Build & Check
+Toolchain: Rust 1.94 or newer (the WhatsApp crates require 1.94; `rust-version` in `Cargo.toml`), CI pins 1.98.0. A C compiler is needed for the bundled SQLite and `ring`.
 ```bash
 # Verify compilation without emitting binaries
 cargo check --locked
@@ -37,6 +38,9 @@ cargo test --locked -- --nocapture
 
 # Run the Telegram Bot API 10.3 contract suite only
 cargo test --test bot_api_10_3_contract --locked
+
+# Run the multimedia (tool arguments, media groups, rich media) contract suite only
+cargo test --test telegram_multimedia_contract --locked
 ```
 
 ### Formatting & Linting
@@ -93,13 +97,13 @@ cargo run -- search test [query]
 cargo run -- search brave [KEY|rm]
 cargo run -- search tavily [KEY|rm]
 cargo run -- search exa [KEY|rm]
-cargo run -- search engine [NAME]
+cargo run -- search engine          # shows the automatic engine order (chosen by configured keys)
 
 # Model Context Protocol (MCP) Server Registry & Tools
 cargo run -- mcp
 cargo run -- mcp list
 cargo run -- mcp add <URL>
-cargo run -- mcp rm <NAME>
+cargo run -- mcp rm                  # restores the default endpoint
 cargo run -- mcp tools
 cargo run -- mcp test [query]
 cargo run -- mcp url [URL]
@@ -190,7 +194,7 @@ cargo run -- setup
   - `image_flow.rs`: Multi-step conversational image generation pipeline, prompt extraction, and structured fallback cards.
   - `client.rs`: The single Telegram Bot API client (every network call, retries, Rich → HTML → plain fallback chain, draft preparation, file downloads). Behavioural tests live in `client/tests.rs` and run against the fake server in `test_support.rs`.
   - `client/raw.rs` / `client/raw/render.rs`: Transport-independent helpers the client delegates to: per-task delivery context, bounded SSRF-safe media downloads, remote-media-to-link conversion, text chunking, and the HTML/plain-text fallback renderers. (It no longer duplicates the Bot API calls.)
-  - `models.rs` / `models/base.rs`: Type-safe Telegram API models, rich message block definitions (`RichBlock`), and validation bounds.
+  - `models.rs` / `models/base.rs`: Type-safe Telegram API models, rich message block definitions (`RichBlock`), and validation bounds. `models/extras.rs` holds the reply, checklist and inline-mode objects (`TextQuote`, `Checklist`, `InlineQuery`, `ChosenInlineResult`); `models/rich_text.rs` turns received rich messages into readable text.
   - `transport_policy.rs`: Retry backoff logic, HTTP 429 rate limit parsing, and Bad Request fallback gates.
   - `url_policy.rs`: Outbound SSRF firewall preventing requests to private, loopback, link-local, and SIIT/NAT64 translated IP ranges.
 - `src/ai/`:
@@ -199,8 +203,8 @@ cargo run -- setup
     - `context.rs`: Token budget estimation, sliding-window message context assembly, and conversation trimming.
     - `prompt.rs`: System prompt assembly; long-term memory and summaries are sanitized, capped and fenced as untrusted data.
     - `generation.rs`: Streaming SSE lifecycle, provider HTTP dispatch, retry backoff, tool execution loops, and the shared `race_with_cancel` cancellation helper.
-    - `quiz.rs`: The `create_quiz` tool: preamble, native quiz with one or several correct answers, question/option/explanation pictures, description, shuffled options, revoting, open period with results hidden until close (only with an open period), and a retry without pictures when Telegram cannot load them.
-    - `live_photo.rs`: The `send_live_photo` tool. Live photos cannot be sent by URL, so both files are downloaded with `download_media_bytes` (SSRF-safe, bounded), the MP4 duration is checked (at most 10 seconds), and the files are uploaded with `sendLivePhoto`.
+    - `quiz.rs`: The `create_quiz` tool: preamble, native quiz with one or several correct answers, question/option/explanation pictures, description, shuffled options, revoting, open period (zero or negative means no limit) with results hidden until close (only with an open period), and a retry without pictures when Telegram cannot load them.
+    - `live_photo.rs`: The `send_live_photo` tool. Live photos cannot be sent by URL, so both files are downloaded with `download_media_bytes` (SSRF-safe, bounded), the MP4 duration is checked (at most 10 seconds) before the photo is fetched, and the files are uploaded with `sendLivePhoto`. The call runs under `race_with_cancel`, so Stop and shutdown interrupt it, and only a successful send counts as delivered media.
     - `curator.rs`: Background memory curation: profile fact extraction and older-history summarization.
     - `image.rs`: Image generation providers, prompt translation, and base64/download resolution.
     - `multimodal.rs`: Specialist inputs (Vision, Video, Audio STT) and observation turn formatting.
@@ -226,7 +230,7 @@ cargo run -- setup
   - `whatsapp/delivery.rs`: Outbound delivery, JID cache, and typing indicators.
   - `whatsapp/mapper.rs`: JID normalization, id mapping, and owner authorization.
 - `src/parser/`:
-  - `markdown.rs`: Converts extended markdown to Telegram Bot API 10.3 `RichBlock` AST representations. Inline text is parsed in `markdown/inline.rs`; `markdown/extended.rs` handles highlight (`==x==`, `<mark>`), `<sup>`/`<sub>`, date-times (`<time datetime>`, `<tg-time>`, `tg://time` links) and custom emoji (`<tg-emoji>`, `tg://emoji` links), and flattens them for WhatsApp and the terminal. Tags inside inline code stay literal. `markdown/links.rs` handles in-message navigation: `[text](#section)` becomes an `anchor_link` to an `anchor` block placed before the linked heading, and footnotes (`[^id]` / `[^id]: note`) become `reference_link` / `reference`. Targets are collected before parsing, and links whose target did not end up in the message keep only their text.
+  - `markdown.rs`: Converts extended markdown to Telegram Bot API 10.3 `RichBlock` AST representations. Media tags and media blocks are parsed in `markdown/media.rs`. Inline text is parsed in `markdown/inline.rs`; `markdown/extended.rs` handles highlight (`==x==`, `<mark>`), `<sup>`/`<sub>`, date-times (`<time datetime>`, `<tg-time>`, `tg://time` links) and custom emoji (`<tg-emoji>`, `tg://emoji` links), and flattens them for WhatsApp and the terminal. Tags inside inline code stay literal. `markdown/links.rs` handles in-message navigation: the parser emits placeholders, and `links::resolve` (run once in `parse_markdown_to_rich_blocks`) resolves them against the finished blocks. `[text](#section)` becomes an `anchor_link` to an `anchor` block placed before the matching top-level heading (an exact match wins over one without the numbering); a link without a matching heading keeps only its text. Footnotes (`[^id]` / `[^id]: note`, the note may start on the next line) become `reference_link` / `reference`, numbered by first mention; a `[^…]` without a note, such as the regex class `[^0-9]`, stays literal text, also on WhatsApp and in the terminal.
   - `whatsapp.rs`: Converts markdown to WhatsApp formatting and splits replies on character boundaries.
   - `latex.rs`: Sanitizes mathematical expressions for cross-platform Android and iOS rendering.
   - `rtl.rs`: Detects Right-to-Left (RTL) scripts (Arabic, Hebrew, Persian, Urdu, etc.) and Eastern Arabic numerals, automatically setting layout direction and right-aligned table cells.
@@ -248,13 +252,13 @@ When modifying or adding features, you **must** preserve these invariants:
 
 ### 3. Outbound SSRF & Network Security
 - **Rule**: Any remote fetch of a URL that came from a user, a model, or a web page must go through `bot::url_policy::fetch_public_url` (or, for single-hop downloads without redirects, `resolve_download_url` plus a pinned client). `fetch_public_url` re-validates every redirect hop with `resolve_redirect_hop`, pins the connection to the vetted IP, bypasses ambient proxies, and bounds the body.
-- **Users**: `fetch_url` (`ai::tools::fetch_web_content`), the DuckDuckGo result scraper, and the Telegram media re-upload downloader (`client/raw.rs::download_media_bytes`).
+- **Users**: `fetch_url` (`ai::tools::fetch_web_content`), the DuckDuckGo result scraper, and `client/raw.rs::download_media_bytes` (the Telegram media re-upload downloader and the `send_live_photo` tool). Generated-image downloads (`service/image.rs::download_generated_image`) use `resolve_download_url` with a pinned client and no redirects.
 - **Blocked**: Loopback (`127.0.0.0/8`, `::1`), RFC 1918 private subnets, link-local addresses, SIIT/NAT64-mapped IPv6, and unsafe URI schemes.
 
 ### 4. Secret Isolation
 - **Rule**: Plaintext API keys and bot tokens are **never** committed, written to SQLite in plaintext, or printed in debug logs.
 - **Mechanism**: Secrets are written to disk under `~/.local/share/xiaoai/secrets/` with strict `0o600` file / `0o700` directory permissions. The database only stores a `secret://` URI reference (`api_key_ref`). The reference is an opaque file name, not encryption: protection comes from the file permissions (on Windows, from the per-user profile ACL).
-- **Coverage**: `secrets.rs::secret_setting_namespace` routes `BOT_TOKEN`, `AI_API_KEY`, the search keys (`BRAVE_API_KEY`, `TAVILY_API_KEY`, `EXA_API_KEY`) and any setting ending in `_API_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD` to the vault. Legacy plaintext rows are migrated on first read.
+- **Coverage**: `secrets.rs::secret_setting_namespace` routes `BOT_TOKEN`, `AI_API_KEY`, the search keys (`BRAVE_API_KEY`, `TAVILY_API_KEY`, `EXA_API_KEY` and the legacy `TAVILY_KEY` / `EXA_KEY`) and any setting ending in `_API_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD` to the vault. Legacy plaintext rows are migrated on first read.
 
 ### 5. Durable Intake Queue, Keyed Mailbox Isolation & Native Stop
 - **Queue**: Telegram long-polling writes incoming updates directly to SQLite table `telegram_inbox` as `pending`.
@@ -268,7 +272,7 @@ When modifying or adding features, you **must** preserve these invariants:
 - **Operational Trade-Off & Duplicate Side-Effect Risk**:
   - Because in-worker retries trigger rapidly (~1.5s) on *any* panic without killing the daemon process, external side effects executed before an unexpected panic (e.g. an outbound Telegram message draft/reply already dispatched or an intermediate turn committed to SQLite before final inbox checkpointing) **will repeat upon retry**.
   - This is an intentional operational trade-off of at-least-once processing semantics: Xiao guarantees zero message loss over exactly-once execution.
-- **Crash Recovery**: On startup, `recover_telegram_processing_async()` resets any in-flight `processing` updates back to `pending` to guarantee at-least-once recovery across process restarts, while quarantining updates with `attempts >= 2` (`quarantine_telegram_update_async` works on `pending` rows too). Stop updates from before a restart are acknowledged, not replayed.
+- **Crash Recovery**: On startup, `recover_telegram_processing_async()` resets any in-flight `processing` updates back to `pending` to guarantee at-least-once recovery across process restarts, while quarantining updates with `attempts >= 2` (`quarantine_telegram_update_async` works on `pending` rows too). Stop updates and inline queries from before a restart are acknowledged, not replayed.
 - **Native Stop Priority**: `stopped_message_generation` updates bypass worker mailboxes and execute immediately (in their own task, so a panic cannot take down the poll loop) to cancel in-flight generation tokens with zero latency. When the user stops a private-chat answer, the partial text is sent as a real message, because Bot API drafts disappear after ~30 seconds.
 - **Drafts Are Ephemeral**: `sendRichMessageDraft` is only a temporary preview. Every generation, including failed or interrupted ones, must end with a real `sendRichMessage` (`timeline::finalize_answer_with_media`); drafts never carry uploads or URL media (`TelegramBotClient::prepare_draft_message`).
 - **Retry Safety**: Timeouts are retried only for idempotent methods (`transport_policy::is_idempotent_method`); a timed-out `send*` is reported rather than risking a duplicate message.
@@ -328,7 +332,7 @@ When modifying or adding features, you **must** preserve these invariants:
 ## 5. Storage & State Layout
 
 SQLite database location and files default to:
-- **Base directory**: `~/.local/share/xiaoai/` (or `$XIAO_DATA_DIR` if configured)
+- **Base directory** (`storage::xiao_data_dir`): `$XIAO_DATA_DIR` if set; otherwise `%APPDATA%\xiaoai` on Windows, `$XDG_DATA_HOME/xiaoai`, or `~/.local/share/xiaoai`
 - **Database**: `xiaoai.db` (configured with `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`)
 - **Secrets directory**: `<base>/secrets/` (e.g. `~/.local/share/xiaoai/secrets/`)
 - **Attachments directory**: `<base>/attachments/<chat_id>/<thread_id>/`
@@ -340,7 +344,7 @@ SQLite database location and files default to:
 - `user_memories`: Tier-1 persistent user profile facts (Name, Tech Stack, Preferences).
 - `scoped_summaries`: Tier-2 condensed summaries of older topics per chat/thread.
 - `telegram_inbox`: Durable update queue for Telegram intake.
-- `telegram_state`: Offset and webhook state persistence.
+- `telegram_state`: Long-polling offset.
 - `telegram_latest_prompts`: Latest answered owner message per chat/topic (message id, text hash, claiming update id) for edited-message handling.
 - `whatsapp_inbox`: Durable message queue for WhatsApp intake, keyed by `chat:sender:message_id`; completed rows are kept as dedup tombstones (newest 5000 and anything from the last 14 days).
 
@@ -362,10 +366,10 @@ The full effective list lives in `src/main.rs`; treat the code as the source of 
 ## 6. Testing Patterns & Guidelines
 
 - **Unit tests**: Colocated in each source file within `#[cfg(test)] mod tests { ... }`.
-- **Contract tests**: Located in `tests/bot_api_10_3_contract.rs`. This suite verifies serialization and wire compatibility against Telegram Bot API 10.3 requirements:
-  - Discriminator fields (e.g., `type: "voice_note"`, `type: "button"`).
-  - Rich block bounds (`RICH_MESSAGE_MAX_TEXT_CHARS = 32_768`, `RICH_MESSAGE_MAX_BLOCKS = 500`).
-  - Media group constraints (albums must contain 2 to 10 homogeneous items).
+- **Contract tests**: Two suites include the model and parser sources directly (`#[path]`):
+  - `tests/bot_api_10_3_contract.rs`: serialization and wire compatibility against Telegram Bot API 10.3: discriminator fields (e.g., `type: "voice_note"`, `type: "button"`), rich block bounds (`RICH_MESSAGE_MAX_TEXT_CHARS = 32_768`, `RICH_MESSAGE_MAX_BLOCKS = 500`), media group constraints (albums must contain 2 to 10 homogeneous items), update shapes, extended rich-text entities, and in-message navigation.
+  - `tests/telegram_multimedia_contract.rs`: multimedia tool arguments (collage, location, document, audio), `InputMedia` wire formats, and rich-message media references.
+- **Behavioural tests**: `bot/test_support.rs` provides an in-process fake Telegram Bot API server (`FakeTelegram`) and a fake streaming provider (`FakeProvider`); client, router, guest, inline, quiz and live-photo tests assert on the requests the real code sends. Service-level tests use the process-wide SQLite database, so each test owns a distinct chat id.
 - **Mocking & Isolation**:
   - Tests do not require a live Telegram bot token or active AI provider; network calls in tests use mock HTTP responses or test synthetic structs.
   - When writing tests involving `rusqlite`, use in-memory SQLite connections (`Connection::open_in_memory()`) or isolated temporary directories.
@@ -383,7 +387,7 @@ The full effective list lives in `src/main.rs`; treat the code as the source of 
      - Max single entry: 2 MB (`MAX_ARCHIVE_SINGLE_ENTRY_BYTES`).
      - Nested archives are classified as `NestedArchive` and **not** unpacked recursively.
 3. **Android / Termux Platform Context**:
-   - This project compiles and runs inside Termux on Android (`aarch64-linux-android`) as well as standard Linux servers (`aarch64-unknown-linux-gnu` and `x86_64`).
+   - This project compiles and runs inside Termux on Android (`aarch64-linux-android`), on standard Linux servers (`aarch64-unknown-linux-gnu` and `x86_64`), and on Windows (`x86_64-pc-windows-msvc`); CI uploads ARM64 Linux, Android and Windows binaries as workflow artifacts.
    - Keep build dependencies pure Rust where possible (e.g., `rustls-tls` is enabled in `reqwest`, `rusqlite` uses the `bundled` feature).
 4. **Git Commits & Formatting**:
    - Always run `cargo fmt --all -- --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings` before committing.

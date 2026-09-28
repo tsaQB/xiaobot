@@ -1,9 +1,9 @@
-# Required `master` protection
+# Required `main` protection
 
-The repository-side files can harden workflows and ownership, but branch protection/rulesets are GitHub-hosted settings and are not configured by the application. The repository owner should configure `master` with the following minimum policy:
+The repository-side files can harden workflows and ownership, but branch protection/rulesets are GitHub-hosted settings and are not configured by the application. The repository owner should configure `main` (the default branch) with the following minimum policy:
 
 - Require changes through pull requests.
-- Require the checks produced by `.github/workflows/build.yml`: **Rust quality gates**, **RustSec dependency audit**, **Linux ARM64 (Armbian)**, and **Android ARM64**.
+- Require the checks produced by `.github/workflows/build.yml`: **Rust quality gates**, **RustSec dependency audit**, **Linux ARM64 (Armbian)**, **Android ARM64**, and **Windows x86_64**.
 - Block force pushes.
 - Block branch deletion.
 - Keep required approvals compatible with a single-maintainer repository; do not require an approval that the only maintainer cannot satisfy.

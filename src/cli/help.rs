@@ -37,7 +37,7 @@ pub(crate) fn print_cli_help() {
     println!("    \x1b[1;38;5;45mxiao menu\x1b[0m                        \x1b[38;5;242m# Open Control Center TUI\x1b[0m");
     println!("    \x1b[1;38;5;45mxiao search test \"Rust 2024\"\x1b[0m     \x1b[38;5;242m# Test active search engine\x1b[0m");
     println!("    \x1b[1;38;5;45mxiao search brave\x1b[0m                \x1b[38;5;242m# Interactively set Brave Search key\x1b[0m");
-    println!("    \x1b[1;38;5;45mxiao mcp list\x1b[0m                    \x1b[38;5;242m# List connected MCP servers\x1b[0m");
+    println!("    \x1b[1;38;5;45mxiao mcp list\x1b[0m                    \x1b[38;5;242m# Show the active MCP endpoint\x1b[0m");
     println!("    \x1b[1;38;5;45mxiao ai use\x1b[0m                      \x1b[38;5;242m# Interactive model picker\x1b[0m");
     println!("    \x1b[1;38;5;45mxiao gateway token\x1b[0m               \x1b[38;5;242m# Interactively bind Telegram bot token\x1b[0m");
     println!("    \x1b[1;38;5;45mxiao gateway wa pair\x1b[0m             \x1b[38;5;242m# Tautkan WhatsApp lewat QR\x1b[0m\n");

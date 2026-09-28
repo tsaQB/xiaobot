@@ -2,6 +2,7 @@
 name = "xiao"
 version = "0.2.0"
 edition = "2021"
+rust-version = "1.94"
 authors = ["Assaqib <264941327+tsaQB@users.noreply.github.com>"]
 description = "xiao - single-owner AI assistant for Telegram and WhatsApp, with Rich Messages, streaming drafts, and OpenAI-compatible providers"
 license = "MIT"
