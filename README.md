@@ -10,8 +10,8 @@
 ```
 
 ### Xiao (小)
-**A hardened, single-owner AI assistant for Telegram built with Rust.**  
-*Engineered for Telegram Bot API 10.3 • Durable SQLite Intake Queue • Three-Tier Memory • Multimodal Routing*
+**A hardened, single-owner AI assistant for Telegram and WhatsApp built with Rust.**  
+*Engineered for Telegram Bot API 10.3 • WhatsApp Multi-Device • Durable SQLite Intake Queue • Three-Tier Memory • Multimodal Routing*
 
 ---
 
@@ -30,12 +30,13 @@
 
 ## 🌟 Highlights
 
-Xiao is an autonomous, single-owner AI gateway designed to run continuously on low-overhead environments—from cloud servers to single-board computers (Armbian) and edge smartphones (Android Termux). It treats Telegram not as a simple chat wrapper, but as a rich display surface powered by **Telegram Bot API 10.3**.
+Xiao is an autonomous, single-owner AI gateway designed to run continuously on low-overhead environments, from cloud servers to single-board computers (Armbian) and edge smartphones (Android Termux). It serves two channels: Telegram, treated not as a simple chat wrapper but as a rich display surface powered by **Telegram Bot API 10.3**, and WhatsApp multi-device.
 
 - **Telegram Bot API 10.3 Native**: Real-time streaming drafts (`sendRichMessageDraft`), native stop controls, AST layout blocks (tables, expandable quotes, collages, slideshows, buttons, thinking indicators), and cross-platform LaTeX rendering.
 - **Hardened Single-Owner Boundary**: Zero information leakage. Non-owner updates are dropped silently at the network boundary without acknowledging bot existence.
 - **Pure Zero-Slash Gateway**: Runs with empty command menus (`set_my_commands(&[])`). Interacts naturally through conversational intent, context-aware mentions, media attachments, or dedicated forum topics.
-- **Durable SQLite WAL Intake Queue**: Ingests updates to an ACID SQLite inbox (`telegram_inbox`) before acknowledgment. Dispatches to per-scope FIFO mailboxes with task-level panic isolation, bounded retry (2 attempts), and poison-pill quarantine.
+- **Durable SQLite WAL Intake Queue**: Ingests updates to an ACID SQLite inbox (`telegram_inbox`, `whatsapp_inbox`) before acknowledgment. Dispatches to per-scope FIFO mailboxes with task-level panic isolation, bounded retry (2 attempts), and poison-pill quarantine.
+- **WhatsApp Multi-Device Gateway**: Self-service linking by QR scan or phone pairing code, owner authorization by phone number across both legacy and LID addressing modes, ordered per-chat processing, and crash-safe queueing.
 - **Three-Tier Long-Term Memory**: Tier 1 (Autonomous profile facts), Tier 2 (Sliding-window topic summaries), and Tier 3 (Full thread-scoped turns).
 - **Specialist Context Isolation**: Routes queries across `Main`, `Vision`, `Video`, `Audio STT`, `Image Generation`, and `Curator`. Specialist models only receive transient media payloads, preventing token context exhaustion and preserving privacy.
 - **In-Memory Document & Anti-Bomb Inspection**: Safe extraction of PDF, DOCX, XLSX, text, code, and archives (ZIP, TAR, 7Z) with strict memory quotas and anti-zip-bomb limits.
@@ -113,6 +114,13 @@ Xiao is an autonomous, single-owner AI gateway designed to run continuously on l
 - **Per-Scope Keyed Mailboxes**: Updates are dispatched into dedicated per-scope FIFO queues (`ScopeKey { chat_id, thread_id }`). Messages within the same chat/topic maintain strict sequential order, while different chats process concurrently up to a global semaphore limit (8 permits).
 - **Panic Isolation & Bounded Retry**: Each processing task runs within an isolated `tokio::spawn` wrapper with unwinding panic protection. Transient panics release concurrency permits immediately and trigger a 1.5-second backoff sleep with up to 2 retry attempts. Updates exceeding retry limits are quarantined as `failed` ("poison pills") to prevent infinite daemon crash loops.
 - **Crash Recovery**: On process startup, `recover_telegram_processing_async()` resets in-flight `processing` updates back to `pending`, ensuring zero message loss across reboots.
+
+### 5. 📱 WhatsApp Multi-Device Gateway
+- **Self-Service Linking**: Link by scanning a QR code or by entering a phone pairing code.
+- **Single-Owner Boundary**: Authorization is decided on the phone number, recognizing both legacy and LID addressing modes. Device suffixes such as `:12` never corrupt the match. Other senders are dropped silently.
+- **Durable Queue**: Incoming messages are recorded to `whatsapp_inbox` before processing, so they survive restarts and hard kills.
+- **Ordered Processing**: Messages within a single chat are processed one at a time, in arrival order.
+- **Hardened Credentials**: The session database holding Signal keys is locked to `0o600` on Unix, together with its WAL and SHM sidecars.
 
 ---
 
@@ -311,7 +319,7 @@ xiao <subcommand> [arguments]
 | `menu` | Open interactive Control Center (TUI). |
 | `chat [prompt]` | Terminal chat mode: run an interactive REPL or execute a one-shot query. |
 | `setup` | Interactive initial configuration and onboarding wizard. |
-| `start` | Start the Telegram polling daemon. |
+| `start` | Start the gateway daemon (Telegram polling plus the WhatsApp gateway when configured). |
 | `status` | Display system telemetry, provider health, SQLite database size, and active models. |
 | `context [chat] [th]` | Inspect token usage, sliding-window consumption, and context breakdown. |
 | `memory` | Open interactive long-term memory management menu. |
@@ -333,9 +341,10 @@ xiao <subcommand> [arguments]
 | `search exa [key]` | Configure Exa Search API key (or remove with `rm`). |
 | `search engine [name]` | Inspect search engine priority order and active engine status. |
 | `mcp` | Interactive Model Context Protocol (MCP) server & tool hub. |
-| `mcp list` | List all registered MCP server endpoints and status. |
-| `mcp add <name> <URL>` | Connect new remote MCP server (SSRF guarded). |
-| `mcp rm <name>` | Reset custom MCP server endpoint back to default. |
+| `mcp list` | Show the active MCP endpoint and status. |
+| `mcp url <URL>` | Set the active MCP endpoint (SSRF guarded; alias: `mcp set`). |
+| `mcp add <URL>` | Alias for `mcp url`. |
+| `mcp rm` | Restore the default MCP endpoint (alias: `mcp remove`). |
 | `mcp tools` | List registered tool schemas exposed to AI. |
 | `mcp test [query]` | Direct JSON-RPC handshake and latency probe to MCP server. |
 | `mcp reset` | Reset MCP endpoint to default (`https://mcp.exa.ai/`). |
@@ -343,6 +352,12 @@ xiao <subcommand> [arguments]
 | `gateway check` | Check Telegram Bot API connectivity and token health (aliases: `test`, `status`). |
 | `gateway token [val]` | Interactively or directly bind Telegram Bot Token. |
 | `gateway owner [id]` | Set authorized owner user ID (alias: `gateway id [id]`). |
+| `gateway wa` | Open the interactive WhatsApp gateway configuration menu. |
+| `gateway wa pair` | Link WhatsApp by scanning a QR code (alias: `gateway wa qr`). |
+| `gateway wa code <NUM>` | Link WhatsApp using a phone pairing code. |
+| `gateway wa owner <NUM>` | Set the authorized owner phone number (E.164 without the plus sign). |
+| `gateway wa status` | Inspect WhatsApp link status, owner, and session path (alias: `check`). |
+| `gateway wa unlink` | Delete the stored WhatsApp session (alias: `logout`). |
 | `version`, `-v` | Display version and target build metadata. |
 | `help`, `-h` | Display command-line help screen. |
 
@@ -414,6 +429,8 @@ Settings can be provided via `.env` or managed dynamically through the CLI:
 | `TAVILY_API_KEY` | *Optional* | API key for Tavily AI search integration. |
 | `EXA_API_KEY` | *Optional* | API key for Exa search integration. |
 | `EXA_MCP_URL` | `https://mcp.exa.ai/` | Model Context Protocol search server endpoint. |
+| `WHATSAPP_ENABLED` | `false` | Enables the WhatsApp gateway in the daemon. A linked session also enables it automatically. |
+| `WHATSAPP_OWNER_NUMBER` | *Empty* | Owner phone number in E.164 form without the plus sign. |
 | `XIAO_DATA_DIR` | `~/.local/share/xiaoai` | Base filesystem directory for database, secrets, and attachments. |
 
 ---
@@ -429,7 +446,7 @@ cargo fmt --all -- --check
 # Compiler check without emitting binaries
 cargo check --locked
 
-# Unit tests and Telegram Bot API 10.3 contract suite (415+ tests)
+# Unit tests and Telegram Bot API 10.3 contract suite (794 tests)
 cargo test --locked
 
 # Strict Clippy lint check (CI enforced)
@@ -445,6 +462,8 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 3. **Outbound SSRF Firewall**: Remote downloads validate target IPs against RFC 1918, RFC 4193, loopback, and SIIT/NAT64 ranges.
 4. **Secret Isolation**: Secrets are stored in `~/.local/share/xiaoai/secrets/` with mode `0o600`/`0o700`. Database only stores `secret://` URIs.
 5. **Zero `.unwrap()` Policy**: Handled idiomatically with `?`, pattern matching, or `.expect()` with descriptive invariant explanations in tests.
+6. **WhatsApp Single-Owner Boundary**: Authorization is decided on the phone number, not raw JID text. Both `sender` and `sender_alt` are inspected so LID mode is recognized, and device or agent suffixes never corrupt the match. Unauthorized senders are dropped with no reply and no identity trace in the logs.
+7. **WhatsApp Credential Handling**: `whatsapp.db` holds Signal session keys and is treated the same as the secret vault. The file and its `-wal` and `-shm` sidecars are locked to `0o600` on Unix systems.
 
 ---
 

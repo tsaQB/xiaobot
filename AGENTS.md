@@ -6,7 +6,7 @@
 
 ## 1. Project Overview
 
-`xiao` is a hardened, single-owner AI assistant for Telegram built in Rust (2021 edition) targeting **Telegram Bot API 10.3**. It supports Rich Messages (AST blocks), streaming drafts with native stop controls, durable inbox queueing with at-least-once recovery, three-tier long-term memory, and modular OpenAI-compatible multimodal AI routing (Main, Vision, Video, Audio STT, Image Generation, Curator).
+`xiao` is a hardened, single-owner AI assistant built in Rust (2021 edition) that serves **two channels**: Telegram (targeting **Telegram Bot API 10.3**) and WhatsApp multi-device. It supports Rich Messages (AST blocks), streaming drafts with native stop controls, durable inbox queueing with at-least-once recovery on both channels, three-tier long-term memory, and modular OpenAI-compatible multimodal AI routing (Main, Vision, Video, Audio STT, Image Generation, Curator).
 
 ---
 
@@ -112,6 +112,14 @@ cargo run -- gateway token <BOT_TOKEN>
 cargo run -- gateway owner <OWNER_USER_ID>
 cargo run -- gateway id <OWNER_USER_ID>
 
+# WhatsApp Multi-Device Gateway
+cargo run -- gateway wa                 # WhatsApp configuration menu
+cargo run -- gateway wa pair            # Link by scanning a QR code
+cargo run -- gateway wa code <NUMBER>   # Link using a phone pairing code
+cargo run -- gateway wa owner <NUMBER>  # Set the owner phone number
+cargo run -- gateway wa status          # Inspect link status
+cargo run -- gateway wa unlink          # Delete the stored session
+
 # Interactive initial setup wizard
 cargo run -- setup
 ```
@@ -162,21 +170,22 @@ cargo run -- setup
   - `tui.rs`: Terminal UI engine, RAII raw-mode lifecycle guard (`CleanRawMode`), and ANSI layout formatters.
   - `launcher.rs`: Control Center interactive hub (`xiao menu`).
   - `status.rs`: Dashboard and diagnostic system status rendering.
-  - `gateway.rs`: Telegram gateway and bot token/owner management.
+  - `gateway.rs`: Telegram and WhatsApp gateway management (bot token, owner, QR/code pairing, link status).
   - `wizard.rs`: Interactive setup and onboarding quickstart.
   - `chat.rs`: Terminal chat REPL, smart one-shot queries, and multi-session manager (`/sessions`, `/switch`, `/rm`, `/new`).
   - `memory.rs`: Tier-1 persistent memory management (`xiao memory`).
   - `context.rs`: Token usage and sliding-window breakdown inspector (`xiao context`).
   - `search.rs`: Web search engine hub and retrieval keys (`xiao search`).
-  - `mcp.rs`: Model Context Protocol server registry and dynamic tool introspection (`xiao mcp`).
+  - `mcp.rs`: Model Context Protocol active endpoint and dynamic tool introspection (`xiao mcp`). XiaoBot manages one active endpoint rather than a server list, so `rm` restores the default endpoint.
+  - `tests.rs`: Shared CLI argument-parsing tests.
   - `ai_hub.rs`: Provider, model catalog, and multimodal specialist routing (`xiao ai`).
   - `help.rs`: Global CLI help screen.
 - `src/bot/`:
-  - `daemon.rs`: Bot initialization, Telegram connection handshake, command clearing (`pure zero-slash`), and long-polling loop with graceful shutdown.
+  - `daemon.rs`: Bot initialization, Telegram connection handshake, command clearing (`pure zero-slash`), concurrent WhatsApp gateway spawn, and long-polling loop with graceful shutdown.
   - `worker.rs`: Keyed per-scope mailboxes (`ScopeKey`), worker concurrency limits, durable inbox queue replay, and bounded retry with panic isolation.
   - `router.rs`: Incoming update routing, media and document classification, context overflow policies, and AI chat dispatch.
   - `image_flow.rs`: Multi-step conversational image generation pipeline, prompt extraction, and structured fallback cards.
-  - `client.rs` / `client/raw.rs`: Telegram API client supporting Bot API 10.3 rich message drafts, ephemeral contexts, and file downloads.
+  - `client.rs` / `client/raw.rs` / `client/raw/render.rs`: Telegram API client supporting Bot API 10.3 rich message drafts, ephemeral contexts, and file downloads. `render.rs` holds the HTML and plain-text fallback renderers.
   - `models.rs` / `models/base.rs`: Type-safe Telegram API models, rich message block definitions (`RichBlock`), and validation bounds.
   - `transport_policy.rs`: Retry backoff logic, HTTP 429 rate limit parsing, and Bad Request fallback gates.
   - `url_policy.rs`: Outbound SSRF firewall preventing requests to private, loopback, link-local, and SIIT/NAT64 translated IP ranges.
@@ -184,24 +193,34 @@ cargo run -- setup
   - `service/`: Modular AI orchestration engine:
     - `session.rs`: Session state transitions, active generation tracking, and cancellation signals.
     - `context.rs`: Token budget estimation, sliding-window message context assembly, and conversation trimming.
-    - `generation.rs`: Streaming SSE lifecycle, provider HTTP dispatch, retry backoff, and tool execution loops.
+    - `generation.rs`: Streaming SSE lifecycle, provider HTTP dispatch, retry backoff, tool execution loops, and the shared `race_with_cancel` cancellation helper.
+    - `curator.rs`: Background memory curation: profile fact extraction and older-history summarization.
     - `image.rs`: Image generation providers, prompt translation, and base64/download resolution.
     - `multimodal.rs`: Specialist inputs (Vision, Video, Audio STT) and observation turn formatting.
   - `storage/`: Modular SQLite (WAL mode) persistence layer and secret store:
     - `secrets.rs`: Atomic filesystem secret vault (`0o600`/`0o700`), encrypted references (`secret://`), and application settings.
     - `inbox.rs`: Durable Telegram inbox queue, state transitions, in-flight processing claims, and crash recovery.
+    - `wa_inbox.rs`: Durable WhatsApp inbox queue with the same at-least-once contract, keyed by the WhatsApp message id string.
     - `session.rs`: Chat sessions, scoped conversation turns, thread context queries, and topic summaries.
     - `memory.rs`: Tier-1 persistent user profile facts (key-value memory operations).
     - `provider.rs`: AI provider configurations, model registry, capability probe records, and specialist routes.
   - `routing.rs`: Specialist model role resolution (`ModelRole`: Main, Vision, Video, AudioStt, ImageGeneration, Curator).
   - `capability.rs` / `provider.rs`: Live model probe harness and capability verification (e.g. confirming whether an endpoint actually supports vision or tool calling).
   - `stream.rs`: UTF-8 chunk-safe Server-Sent Events (SSE) streaming decoder.
-  - `tools.rs`: Function calling engine (`web_search` with keyless Exa MCP protocol, Tavily/Brave API, and DuckDuckGo/Wikipedia fallbacks; and `fetch_url`).
+  - `tools.rs` / `tools/search.rs`: Function calling engine. `tools.rs` holds tool schemas, argument validation, and `fetch_url`; `tools/search.rs` holds the `web_search` engine chain (keyless Exa MCP protocol, Tavily/Brave API, DuckDuckGo/Wikipedia fallbacks).
+  - `http.rs`: Shared provider retry policy, retryable status classification, and `Retry-After` handling.
 - `src/document.rs` & `src/document/archive.rs`: In-memory safe extraction of text, archives (ZIP, TAR, TAR.GZ, 7Z), Office files (DOCX, XLSX), and PDF page extraction/rendering.
 - `src/attachments.rs`: Content attachment persistence scoped by chat/thread.
 - `src/timeline.rs`: Real-time streaming draft management with progress spinner and activity state indicators.
+- `src/util.rs`: Shared string helpers, including character-safe truncation.
+- `src/gateway/`:
+  - `mod.rs`: `DeliverySink` contract for plain-text channels. Telegram deliberately does not implement it, because rich blocks, streaming drafts, and interactive buttons cannot be expressed through a flat text interface.
+  - `whatsapp/client.rs`: Connection loop, pairing, ordered intake, durable queueing, and generation dispatch.
+  - `whatsapp/delivery.rs`: Outbound delivery, JID cache, and typing indicators.
+  - `whatsapp/mapper.rs`: JID normalization, id mapping, and owner authorization.
 - `src/parser/`:
   - `markdown.rs`: Converts extended markdown to Telegram Bot API 10.3 `RichBlock` AST representations.
+  - `whatsapp.rs`: Converts markdown to WhatsApp formatting and splits replies on character boundaries.
   - `latex.rs`: Sanitizes mathematical expressions for cross-platform Android and iOS rendering.
   - `rtl.rs`: Detects Right-to-Left (RTL) scripts (Arabic, Hebrew, Persian, Urdu, etc.) and Eastern Arabic numerals, automatically setting layout direction and right-aligned table cells.
   - `terminal.rs`: ANSI terminal rendering for CLI chat and logs.
@@ -247,6 +266,23 @@ When modifying or adding features, you **must** preserve these invariants:
   - `AudioStt`: Returns transcripts to Main; never receives previous conversation history.
   - Specialist outputs are returned to Main as bounded observation turns.
 
+### 7. WhatsApp Single-Owner Boundary
+- Authorization is decided on the **phone number**, never on raw JID text.
+- Both `sender` and `sender_alt` are inspected so LID addressing mode is still recognized.
+- Device suffixes (`:12`) and agent suffixes (`.0`) must never leak into the parsed number; use the structured `Jid.user` field, not the string form.
+- Unauthorized senders are dropped with no reply and no identity trace in the logs.
+- Group chats map to a negative `chat_id`; direct messages map to the positive sender number. History is stored under `chat_id`, and the sender number is passed as `user_id`.
+
+### 8. WhatsApp Credential Handling
+- `whatsapp.db` holds Signal session keys and is treated the same as the secret vault.
+- The file and its `-wal` / `-shm` sidecars are locked to `0o600` on Unix systems.
+
+### 9. WhatsApp Ordering and Durability
+- Events are delivered with `EventDelivery::Ordered`, so messages within a chat are processed in arrival order.
+- Every authorized message is written to `whatsapp_inbox` **before** processing, then executed through the same `execute_with_scoped_retry` engine Telegram uses (panic isolation, bounded retry, quarantine).
+- Generations register with `begin_generation` so application-wide cancellation on shutdown actually reaches WhatsApp, and hold a per-chat `generation_lock` so two generations cannot interleave history writes.
+- On startup, `recover_whatsapp_processing_async()` returns in-flight rows to `pending`. Replayed rows carry text only; media payloads are not persisted, so a media message interrupted mid-flight is quarantined rather than silently replayed without its attachment.
+
 ---
 
 ## 5. Storage & State Layout
@@ -265,13 +301,19 @@ SQLite database location and files default to:
 - `scoped_summaries`: Tier-2 condensed summaries of older topics per chat/thread.
 - `telegram_inbox`: Durable update queue for Telegram intake.
 - `telegram_state`: Offset and webhook state persistence.
+- `whatsapp_inbox`: Durable message queue for WhatsApp intake, keyed by the WhatsApp message id string.
+
+### Other files:
+- **WhatsApp session**: `<base>/whatsapp.db` plus `-wal` / `-shm` sidecars, locked to `0o600` on Unix.
 
 ### Configuration Resolution Order
-Configuration is loaded via `get_config_path()` in `src/main.rs`:
-1. `.env` in current working directory
-2. `~/.xiao.env`
-3. `~/xiao/.env`
-4. `~/XiaoAI/.env`
+Configuration is resolved by `get_config_path()` in `src/main.rs`, in order:
+1. `.env` in the current working directory
+2. `$XDG_CONFIG_HOME` descendants (`xiao/`, `.xiao/`, `xiaoai/`)
+3. `$HOME` or `$USERPROFILE` descendants (`.xiao.env`, `.xiao/`, `.config/xiao/`, and legacy variants)
+4. `%APPDATA%` descendants on Windows
+
+The full effective list lives in `src/main.rs`; treat the code as the source of truth.
 
 ---
 

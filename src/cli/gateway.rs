@@ -74,9 +74,6 @@ pub(crate) async fn run_cli_gateway_menu() {
                     "\x1b[38;5;244m○ Not configured\x1b[0m".to_string()
                 }
             }
-            crate::gateway::whatsapp::WhatsAppStatus::Unconfigured => {
-                "\x1b[38;5;244m○ Unconfigured\x1b[0m".to_string()
-            }
         };
 
         let val_sec = format!(
@@ -249,9 +246,6 @@ async fn run_cli_gateway_whatsapp_submenu() {
             }
             crate::gateway::whatsapp::WhatsAppStatus::Unlinked => {
                 "\x1b[38;5;214m◐ Unlinked\x1b[0m \x1b[38;5;244m(Ready to Pair via QR or Code)\x1b[0m".to_string()
-            }
-            crate::gateway::whatsapp::WhatsAppStatus::Unconfigured => {
-                "\x1b[38;5;244m○ Not configured\x1b[0m".to_string()
             }
         };
 
@@ -444,7 +438,7 @@ pub(crate) async fn run_cli_gateway_hub(action: GatewayCliAction<'_>) {
             println!("    \x1b[1;38;5;45mcheck\x1b[0m, \x1b[1;38;5;45mtest\x1b[0m               \x1b[38;5;250mVerify bot token connectivity (getMe)\x1b[0m");
             println!("    \x1b[1;38;5;45mtoken\x1b[0m \x1b[38;5;245m<TOKEN>\x1b[0m             \x1b[38;5;250mBind and verify Telegram Bot Token\x1b[0m");
             println!("    \x1b[1;38;5;45mowner\x1b[0m, \x1b[1;38;5;45mid\x1b[0m \x1b[38;5;245m<ID>\x1b[0m            \x1b[38;5;250mSet Telegram Owner User ID\x1b[0m");
-            println!("    \x1b[1;38;5;45mwa\x1b[0m \x1b[38;5;245m[pair|code|owner|status]\x1b[0m \x1b[38;5;250mWhatsApp Gateway management\x1b[0m");
+            println!("    \x1b[1;38;5;45mwa\x1b[0m \x1b[38;5;245m[pair|code|owner|status|unlink]\x1b[0m \x1b[38;5;250mWhatsApp Gateway management\x1b[0m");
             println!("    \x1b[1;38;5;45mhelp\x1b[0m, \x1b[1;38;5;45m-h\x1b[0m                  \x1b[38;5;250mShow this help reference\x1b[0m\n");
 
             println!(
