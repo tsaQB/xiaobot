@@ -653,8 +653,8 @@ impl AIChatService {
 
         let primary_failure = match last_provider_error {
             Some(err) => {
-                let fallback =
-                    std::env::var("IMAGE_FALLBACK_PROVIDER").unwrap_or_else(|_| "none".to_string());
+                let fallback = crate::configured_setting("IMAGE_FALLBACK_PROVIDER")
+                    .unwrap_or_else(|| "none".to_string());
                 if !external_image_fallback_enabled(&fallback) {
                     return Err(err);
                 }

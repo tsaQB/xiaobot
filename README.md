@@ -136,6 +136,15 @@ Xiao is an autonomous, single-owner AI gateway designed to run continuously on l
 
 ---
 
+### 6. 🖥️ Xiao Console (WebUI)
+`xiao start` also serves **Xiao Console**, a web dashboard for the owner (Vue 3, embedded in the binary, English and Indonesian, works on a 390 px phone screen):
+
+- **Chat** with Xiao in the same sessions as `xiao chat`, with attachments (pictures, audio, video, documents up to 20 MB), streaming answers, Stop, and downloads of the files Xiao creates.
+- **Every setting** in one place: AI providers, the main model and specialist routes (with capability tests and manual corrections), search keys and cooldowns, the MCP endpoint, long-term memory, Telegram access, WhatsApp pairing (QR code or pairing code, inside the running daemon), the durable queues (retry or dismiss quarantined updates), context usage per conversation, live logs, a database backup and a daemon restart.
+- **Security**: only the owner signs in, with a 6-digit code sent to the owner's private Telegram chat or a backup password (argon2 hash in the vault). Sessions use an HttpOnly, SameSite=Strict cookie; five failed sign-ins in 15 minutes lock that address for 15 minutes; every change needs a same-origin request with the `X-Xiao-Request` header; a strict Content-Security-Policy applies; secrets are never sent to the browser.
+
+By default the console listens on `127.0.0.1:8787` (this machine only). See [Xiao Console (WebUI)](#-xiao-console-webui) below for access from a phone or laptop.
+
 ## 📦 Multi-Platform Installation
 
 Xiao is a single self-contained binary (TLS through `rustls`, SQLite compiled in, no system OpenSSL or SQLite needed). There are no GitHub Releases: CI uploads prebuilt binaries as workflow artifacts for Linux ARM64 (`xiao-linux-arm64-armbian`), Android ARM64 (`xiao-android-arm64`) and Windows x86_64 (`xiao-windows-x86_64`) on every push to `main` and every pull request, after the quality and security jobs pass. Artifacts are zip files downloaded from the workflow run page while signed in to GitHub. Other targets, including Linux x86_64, are built from source (Option D). Choose your deployment environment:
@@ -172,7 +181,7 @@ Ideal for dedicated servers, VPS instances (Ubuntu, Debian, Arch Linux), or home
    Group=xiao
    WorkingDirectory=/var/lib/xiaoai
    ExecStart=/usr/local/bin/xiao start
-   Restart=on-failure
+   Restart=always
    RestartSec=5s
    LimitNOFILE=65535
 
@@ -257,11 +266,15 @@ Run Xiao 24/7 directly on your Android device without requiring root access.
 
 ### Option D: Build from Source
 
-Requirements: **Rust 1.94+** (`cargo`, `rustc`; the WhatsApp crates require 1.94, CI builds with 1.98.0) and a C compiler for the bundled SQLite.
+Requirements: **Rust 1.94+** (`cargo`, `rustc`; the WhatsApp crates require 1.94, CI builds with 1.98.0), a C compiler for the bundled SQLite, and **Node.js 20.19+ or 22.12+** for the WebUI.
 
 ```bash
 git clone https://github.com/tsaQB/xiaobot.git
 cd xiaobot
+
+# Build the WebUI first; build.rs embeds webui/dist into the binary.
+# Without it the console only shows a placeholder page.
+(cd webui && npm ci --ignore-scripts && npm run build)
 
 # Verify compilation
 cargo check --locked
@@ -322,6 +335,30 @@ AI_MODEL=google/gemini-2.0-flash-001
 cargo run --release -- start
 ```
 
+Then open Xiao Console at `http://127.0.0.1:8787` on the same machine (see below for other devices). When Telegram is not configured yet, run `xiao web password` first so there is a way to sign in; the rest of the setup can be finished in the console.
+
+---
+
+## 🖥️ Xiao Console (WebUI)
+
+The console runs inside `xiao start`; there is nothing else to install. `XIAO_WEB_BIND=off` turns it off.
+
+**Where it listens** (`XIAO_WEB_BIND`, changed in the console under *WebUI security*, or with `xiao web bind`; a restart applies it):
+
+| Mode | `XIAO_WEB_BIND` | How to open it |
+| :--- | :--- | :--- |
+| This machine only (default) | `127.0.0.1:8787` | On the server itself, or from another device through a tunnel: `ssh -L 8787:127.0.0.1:8787 user@server`, then `http://127.0.0.1:8787`. A Cloudflare Tunnel with Access works too. |
+| Local network | `0.0.0.0:8787` | `http://<server-lan-ip>:8787` from a phone or laptop on the same network. Only addresses in `XIAO_WEB_ALLOWED_NETWORKS` (default `192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12`) get an answer; loopback is always allowed. Traffic is plain HTTP, so use this only on a trusted home network or put HTTPS (Caddy, Cloudflare Tunnel) in front. |
+
+**Signing in**: sign-in is always required, also from `127.0.0.1`, because tunnels arrive as local connections.
+- *Code on Telegram*: a 6-digit code goes to the owner's private chat and is valid for 5 minutes. Needs `BOT_TOKEN` and `OWNER_USER_ID`, and the owner must have started the bot.
+- *Backup password*: `xiao web password` on the server, or *WebUI security* in the console. It is stored as an argon2 hash under `XIAO_WEB_PASSWORD` in the vault. A password sign-in is announced on Telegram. Code sign-in can only be turned off while a password is set (`XIAO_WEB_TELEGRAM_LOGIN=false`).
+- Sessions last 1, 7 or 30 days (`XIAO_WEB_SESSION_DAYS`). The console lists signed-in devices and can revoke them; `xiao web logout-all` signs out every browser.
+
+**When changes apply**: most settings apply at once (providers and models, specialist routes, search keys, MCP URL, image timeouts, history retention, memory). WhatsApp settings restart only the WhatsApp gateway. `BOT_TOKEN`, `OWNER_USER_ID`, `ALLOWED_CHAT_IDS`, `DEDICATED_CHAT_IDS`, `AI_PROVIDER_CONNECT_TIMEOUT_SECS`, `XIAO_WEB_BIND` and `XIAO_WEB_ALLOWED_NETWORKS` need a restart; the console shows a banner and a *Restart daemon* button. A restart from the console stops the daemon gracefully (queued messages are kept) and exits with status **75**, so run the service with `Restart=always` (or `Restart=on-failure`) for systemd to start it again. A value set in the environment (`.env` or systemd `Environment=`) always wins and is shown as locked.
+
+**Chat**: web chat sessions are the `xiao chat` sessions (same list, same history). Answers stream as they are written; Stop works like Telegram's stop button. Quizzes come back as text, and live photos as a link, because both are Telegram features.
+
 ---
 
 ## 💻 CLI & Terminal Chat
@@ -380,6 +417,10 @@ xiao <subcommand> [arguments]
 | `gateway wa owner <NUM>` | Set the authorized owner phone number (E.164 without the plus sign). |
 | `gateway wa status` | Inspect WhatsApp link status, owner, and session path (alias: `check`). |
 | `gateway wa unlink` | Delete the stored WhatsApp session (alias: `logout`). |
+| `web` | Xiao Console status: address, sign-in methods and whether it answers (alias: `web status`). |
+| `web password` | Set the console's backup password (asked twice, not echoed; `web password rm` removes it). |
+| `web bind <local\|lan\|off\|ADDR:PORT>` | Choose where the console listens (applies after a restart). |
+| `web logout-all` | Sign out every browser. |
 | `version`, `-v`, `--version` | Display the version. |
 | `help`, `-h`, `--help` | Display the command-line help screen. Each hub also accepts `help` (for example `xiao ai help`). |
 
@@ -462,11 +503,16 @@ Settings can be provided via `.env` (or the process environment) or managed thro
 | `WHATSAPP_ENABLED` | `false` | Enables the WhatsApp gateway in the daemon. A linked session also enables it automatically. |
 | `WHATSAPP_OWNER_NUMBER` | *Empty* | Owner phone number in E.164 form without the plus sign. |
 | `WHATSAPP_DEDICATED_GROUPS` | *Empty* | Comma-separated group JIDs (or numeric ids) where Xiao answers every owner message without a mention. |
-| `XIAO_HISTORY_RETENTION` | `2000` | Messages kept per chat/topic in canonical history (older context lives on in the topic summary). `0` disables pruning. Read from the environment only. |
+| `XIAO_HISTORY_RETENTION` | `2000` | Messages kept per chat/topic in canonical history (older context lives on in the topic summary). `0` disables pruning. |
+| `XIAO_WEB_BIND` | `127.0.0.1:8787` | Address of Xiao Console: `host:port`, a bare port (loopback), or `off`. Ports below 1024 are refused. Needs a restart. |
+| `XIAO_WEB_ALLOWED_NETWORKS` | `192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12` | Client networks (CIDR) that may reach the console when it listens beyond loopback. Loopback is always allowed. Needs a restart. |
+| `XIAO_WEB_SESSION_DAYS` | `7` | Length of a console session: `1`, `7` or `30` days. |
+| `XIAO_WEB_TELEGRAM_LOGIN` | `true` | Sign in with a code sent on Telegram. Can be `false` only while a password is set. |
+| `XIAO_WEB_PASSWORD` | *Empty* | Backup password of the console, stored as an argon2 hash in the vault (set it with `xiao web password`). A plain value in the environment also works. |
 | `XIAO_DATA_DIR` | see below | Base directory for the database, secrets, attachments and the WhatsApp session. |
 | `RUST_LOG` | `info` | Log filter (for example `debug` or `xiao=debug`). |
 
-The four timeouts take whole seconds and are capped at 600. Without `XIAO_DATA_DIR`, the data directory is `%APPDATA%\xiaoai` on Windows, otherwise `$XDG_DATA_HOME/xiaoai`, otherwise `~/.local/share/xiaoai`.
+The four timeouts take whole seconds and are capped at 600. Settings saved from the CLI or the console apply without a restart unless noted above. Without `XIAO_DATA_DIR`, the data directory is `%APPDATA%\xiaoai` on Windows, otherwise `$XDG_DATA_HOME/xiaoai`, otherwise `~/.local/share/xiaoai`.
 
 > API keys and tokens set through the CLI (`xiao setup`, `xiao gateway`, `xiao ai`, `xiao search`) are stored in the file vault, never in the SQLite `settings` table. On Unix, a `.env` in the working directory (or a parent directory) is only loaded when it is owned by you and not writable by group or others.
 
@@ -501,6 +547,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 5. **Zero `.unwrap()` Policy**: Handled idiomatically with `?`, pattern matching, or `.expect()` with descriptive invariant explanations in tests.
 6. **WhatsApp Single-Owner Boundary**: Authorization is decided on the phone number, not raw JID text. Both `sender` and `sender_alt` are inspected so LID mode is recognized, and device or agent suffixes never corrupt the match. Unauthorized senders are dropped with no reply and no identity trace in the logs.
 7. **WhatsApp Credential Handling**: `whatsapp.db` holds Signal session keys and is treated the same as the secret vault. The file and its `-wal` and `-shm` sidecars are locked to `0o600` on Unix systems.
+8. **Owner-Only Console**: Xiao Console answers only allowed networks, requires an owner sign-in (Telegram code or argon2 password) for every page, stores only SHA-256 hashes of session tokens, locks an address after five failed sign-ins, refuses cross-site changes, and never sends a secret value to the browser.
 
 ---
 

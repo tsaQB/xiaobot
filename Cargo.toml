@@ -7,6 +7,8 @@ authors = ["Assaqib <264941327+tsaQB@users.noreply.github.com>"]
 description = "xiao - single-owner AI assistant for Telegram and WhatsApp, with Rich Messages, streaming drafts, and OpenAI-compatible providers"
 license = "MIT"
 
+build = "build.rs"
+
 [[bin]]
 name = "xiao"
 path = "src/main.rs"
@@ -45,6 +47,10 @@ whatsapp-rust = { version = "0.7.0", default-features = false, features = [
 qr2term = "0.3"
 anyhow = "1.0"
 async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+argon2 = "0.5"
+sha2 = "0.11"
+qrcode = { version = "0.14", default-features = false }
 
 [profile.release]
 opt-level = 3

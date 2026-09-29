@@ -6,15 +6,20 @@
 
 ## 1. Project Overview
 
-`xiao` is a hardened, single-owner AI assistant built in Rust (2021 edition) that serves **two channels**: Telegram (targeting **Telegram Bot API 10.3**) and WhatsApp multi-device. It supports Rich Messages (AST blocks), streaming drafts with native stop controls, durable inbox queueing with at-least-once recovery on both channels, three-tier long-term memory, and modular OpenAI-compatible multimodal AI routing (Main, Vision, Video, Audio STT, Image Generation, Curator).
+`xiao` is a hardened, single-owner AI assistant built in Rust (2021 edition) that serves **two channels**: Telegram (targeting **Telegram Bot API 10.3**) and WhatsApp multi-device. It supports Rich Messages (AST blocks), streaming drafts with native stop controls, durable inbox queueing with at-least-once recovery on both channels, three-tier long-term memory, and modular OpenAI-compatible multimodal AI routing (Main, Vision, Video, Audio STT, Image Generation, Curator). `xiao start` also serves **Xiao Console**, an owner-only WebUI (Vue 3 in `webui/`, embedded into the binary, axum backend in `src/web/`).
 
 ---
 
 ## 2. Essential Commands
 
 ### Build & Check
-Toolchain: Rust 1.94 or newer (the WhatsApp crates require 1.94; `rust-version` in `Cargo.toml`), CI pins 1.98.0. A C compiler is needed for the bundled SQLite and `ring`.
+Toolchain: Rust 1.94 or newer (the WhatsApp crates require 1.94; `rust-version` in `Cargo.toml`), CI pins 1.98.0. A C compiler is needed for the bundled SQLite and `ring`. The WebUI needs Node.js 20.19+ or 22.12+ (CI uses 24).
+
+`build.rs` embeds `webui/dist/**` into the binary (`$OUT_DIR/webui_assets.rs`). Build the WebUI first; without `webui/dist` a placeholder page is embedded so the crate still compiles.
 ```bash
+# WebUI: install (no install scripts), type check and build into webui/dist
+cd webui && npm ci --ignore-scripts && npm run build && cd ..
+
 # Verify compilation without emitting binaries
 cargo check --locked
 
@@ -124,6 +129,13 @@ cargo run -- gateway wa owner <NUMBER>  # Set the owner phone number
 cargo run -- gateway wa status          # Inspect link status
 cargo run -- gateway wa unlink          # Delete the stored session
 
+# Xiao Console (WebUI inside `xiao start`)
+cargo run -- web                        # address, sign-in methods, whether it answers
+cargo run -- web password               # set the backup password (argon2 hash in the vault)
+cargo run -- web password rm            # remove it (refused while code sign-in is unavailable)
+cargo run -- web bind <local|lan|off|ADDR:PORT>
+cargo run -- web logout-all             # sign out every browser
+
 # Interactive initial setup wizard
 cargo run -- setup
 ```
@@ -213,6 +225,7 @@ cargo run -- setup
   - `storage/`: Modular SQLite (WAL mode) persistence layer and secret store:
     - `secrets.rs`: Atomic filesystem secret vault (`0o600`/`0o700`), opaque file references (`secret://`, not encryption), and application settings.
     - `inbox.rs`: Durable Telegram inbox queue, state transitions, in-flight processing claims, and crash recovery.
+    - `web.rs`: WebUI storage: `web_sessions` (token hashes only), queue counters and quarantine actions (retry resets attempts, dismiss marks completed and scrubs the payload), conversation scopes, memories with dates, session renames, and `VACUUM INTO` backups without browser sessions.
     - `wa_inbox.rs`: Durable WhatsApp inbox queue with the same at-least-once contract, keyed by `chat:sender:message_id`, with batch inserts for the durability hook and cursor-based replay paging.
     - `session.rs`: Chat sessions, scoped conversation turns, thread context queries, and topic summaries.
     - `memory.rs`: Tier-1 persistent user profile facts (key-value memory operations).
@@ -226,6 +239,16 @@ cargo run -- setup
 - `src/attachments.rs`: Content attachment persistence scoped by chat/thread.
 - `src/timeline.rs`: Real-time streaming draft management with progress spinner and activity state indicators. A private draft streams the answer, with a thinking block until the first words arrive; a group placeholder is a real message, so it shows the status as a paragraph (Telegram accepts thinking blocks in drafts only).
 - `src/util.rs`: Shared string helpers, including character-safe truncation.
+- `src/web/`: Xiao Console, the owner-only WebUI served by `xiao start` (`web::start`, called from `run_daemon` before Telegram starts so it also works in web-only mode). The frontend (Vue 3 + Vite + TypeScript) lives in `webui/`; `webui/src/api/types.ts` is the API contract and must stay in step with the handlers.
+  - `mod.rs`: `WebState` (AI service, bind, auth runtime, restart tracker, `WaController`, chat runtime, the attached Telegram link), the network guard (`XIAO_WEB_ALLOWED_NETWORKS`, loopback always allowed), the CSRF guard (mutations need `X-Xiao-Request: 1` and a same-origin `Origin`), security headers (strict CSP without eval, `no-store` on `/api`), and `request_restart` (graceful shutdown, then `main` exits with `RESTART_EXIT_CODE` 75).
+  - `auth.rs`: sign-in with a 6-digit Telegram code (5 minutes, single use, at most 5 tries, resend after 30 s) or the backup password (`XIAO_WEB_PASSWORD`, argon2 via `spawn_blocking`); lockout after 5 failures in 15 minutes per address; session cookie `xiao_session` (HttpOnly, SameSite=Strict, 1/7/30 days) of which only the SHA-256 hash is stored; `require_session` middleware.
+  - `settings.rs`: the settings the WebUI may change (validation and normalization), value sources, environment locks (`env_locks`), secret summaries (`SecretMeta`: set, last four characters, where; never the value) and `RestartTracker` (hashes of the restart-only settings at startup).
+  - `net.rs`: `XIAO_WEB_BIND` parsing (`off`, `host:port`, bare port; ports below 1024 refused), a hand-written CIDR parser and matcher, LAN address detection.
+  - `logs.rs`: `RingLayer`, a tracing layer keeping the last 500 lines for `GET /api/logs` (installed next to the stderr formatter in `init_tracing`).
+  - `wa.rs`: `WaController` starts, stops and pairs the WhatsApp gateway inside the daemon. Each run of `supervise_whatsapp` has its own stop signal that also follows the daemon shutdown; pairing QR codes and pairing codes arrive through `WaHooks` and are rendered as SVG path data (`qr_matrix`).
+  - `chat.rs`: web chat runtime. Web sessions are the `xiao chat` sessions (`thread_id = cli_session_thread_id(id)` in the owner's chat). A generation takes the scope's `generation_lock`, registers with `begin_generation` (Stop and shutdown reach it), streams progress through a `GenerationProgressSink` as SSE, keeps running when the browser leaves, and stores uploads (20 MB each, 30 minutes) and generated files (2 hours) in memory.
+  - `api/*.rs`: the JSON API (`overview`, `ai`, `search` + MCP, `memory`, `channels` (Telegram and WhatsApp), `queue`, `context`, `system` (settings, secrets, restart, backup, logs), `security`, `chat`). Errors are `{error, error_id, code}` (`error.rs`).
+  - `assets.rs` serves the embedded files; `cli.rs` implements `xiao web`.
 - `src/gateway/`:
   - `mod.rs`: `DeliverySink` contract for plain-text channels. Telegram deliberately does not implement it, because rich blocks, streaming drafts, and interactive buttons cannot be expressed through a flat text interface.
   - `whatsapp/client.rs`: Connection loop, pairing, ordered intake, durable queueing, and generation dispatch.
@@ -234,6 +257,7 @@ cargo run -- setup
 - `src/parser/`:
   - `markdown.rs`: Converts extended markdown to Telegram Bot API 10.3 `RichBlock` AST representations. Media tags and media blocks are parsed in `markdown/media.rs`. Inline text is parsed in `markdown/inline.rs`; `markdown/extended.rs` handles highlight (`==x==`, `<mark>`), `<sup>`/`<sub>`, date-times (`<time datetime>`, `<tg-time>`, `tg://time` links) and custom emoji (`<tg-emoji>`, `tg://emoji` links), and flattens them for WhatsApp and the terminal. Tags inside inline code stay literal. `markdown/links.rs` handles in-message navigation: the parser emits placeholders, and `links::resolve` (run once in `parse_markdown_to_rich_blocks`) resolves them against the finished blocks. `[text](#section)` becomes an `anchor_link` to an `anchor` block placed before the matching top-level heading (an exact match wins over one without the numbering); a link without a matching heading keeps only its text. Footnotes (`[^id]` / `[^id]: note`, the note may start on the next line) become `reference_link` / `reference`, numbered by first mention; a `[^…]` without a note, such as the regex class `[^0-9]`, stays literal text, also on WhatsApp and in the terminal.
   - `whatsapp.rs`: Converts markdown to WhatsApp formatting and splits replies on character boundaries.
+  - `web.rs`: `render_media_markup_for_web` turns tool media markup into Markdown for the WebUI chat (pictures stay pictures, audio/video/documents become links, `tg-map` a map link, `attach://` documents are dropped because they are downloaded separately); code is left untouched.
   - `latex.rs`: Sanitizes mathematical expressions for cross-platform Android and iOS rendering.
   - `rtl.rs`: Detects Right-to-Left (RTL) scripts (Arabic, Hebrew, Persian, Urdu, etc.) and Eastern Arabic numerals, automatically setting layout direction and right-aligned table cells.
   - `terminal.rs`: ANSI terminal rendering for CLI chat and logs.
@@ -316,6 +340,14 @@ When modifying or adding features, you **must** preserve these invariants:
 - Unauthorized senders are dropped with no reply and no identity trace in the logs.
 - Group chats map to a negative `chat_id`; direct messages map to the positive sender number. History is stored under `chat_id`, and the sender number is passed as `user_id`.
 
+### 7b. Xiao Console (WebUI)
+- **Owner only**: every page and API call except `/api/auth/*` requires a session; sign-in is always required, also from loopback (tunnels arrive as local connections). Only the owner can receive the Telegram code; the backup password is an argon2 hash in the vault.
+- **Network**: `XIAO_WEB_BIND` defaults to `127.0.0.1:8787`; `off` disables the console. When it listens beyond loopback, clients outside `XIAO_WEB_ALLOWED_NETWORKS` get a bare 403.
+- **Secrets**: never returned to the browser (`SecretMeta` only). Settings the environment overrides are reported as locked and refused on write.
+- **CSRF and CSP**: mutations need `X-Xiao-Request: 1` and a matching `Origin`; the CSP forbids inline scripts and eval, and the frontend renders Markdown to VNodes (never `v-html`).
+- **Invariants still hold**: the MCP URL passes `url_policy::resolve_download_url` before it is saved; provider keys and tokens go through `save_provider_store` / `save_app_setting` (vault); retried Telegram updates go back through the durable queue and the normal worker path.
+- **Restarts**: settings read only at startup (`RESTART_KEYS` in `web/settings.rs`) are tracked; a restart from the console exits with status 75 after the graceful shutdown, so the service must use `Restart=always` or `Restart=on-failure`.
+
 ### 8. WhatsApp Credential Handling
 - `whatsapp.db` holds Signal session keys and is treated the same as the secret vault.
 - The file and its `-wal` / `-shm` sidecars are locked to `0o600` on Unix systems.
@@ -352,6 +384,7 @@ SQLite database location and files default to:
 - `telegram_state`: Long-polling offset.
 - `telegram_latest_prompts`: Latest answered owner message per chat/topic (message id, text hash, claiming update id) for edited-message handling.
 - `whatsapp_inbox`: Durable message queue for WhatsApp intake, keyed by `chat:sender:message_id`; completed rows are kept as dedup tombstones (newest 5000 and anything from the last 14 days).
+- `web_sessions`: Signed-in WebUI browsers (public id, SHA-256 of the token, created/last seen/expiry as Unix seconds, address, user agent).
 
 ### Other files:
 - **WhatsApp session**: `<base>/whatsapp.db` plus `-wal` / `-shm` sidecars, locked to `0o600` on Unix.
@@ -366,6 +399,8 @@ Configuration is resolved by `get_config_path()` in `src/main.rs`, in order:
 
 The full effective list lives in `src/main.rs`; treat the code as the source of truth.
 
+Settings the WebUI changes are saved the same way (`save_app_setting`, secrets in the vault). Image timeouts (`timeout_from_env`), `IMAGE_FALLBACK_PROVIDER` and `XIAO_HISTORY_RETENTION` are read through `configured_setting` on every use, so saved changes apply without a restart.
+
 Individual settings are read with `configured_setting` (and `ai::tools::search`'s `setting` for search keys and the MCP URL): the environment (including `.env`) wins, an empty value counts as unset, and otherwise the value saved by the CLI is used. CLI writes go through `save_env_kv`, which calls `warn_if_environment_overrides` so a saved value that the environment overrides is reported instead of silently ignored.
 
 ---
@@ -376,6 +411,7 @@ Individual settings are read with `configured_setting` (and `ai::tools::search`'
 - **Contract tests**: Two suites include the model and parser sources directly (`#[path]`):
   - `tests/bot_api_10_3_contract.rs`: serialization and wire compatibility against Telegram Bot API 10.3: discriminator fields (e.g., `type: "voice_note"`, `type: "button"`), rich block bounds (`RICH_MESSAGE_MAX_TEXT_CHARS = 32_768`, `RICH_MESSAGE_MAX_BLOCKS = 500`), media group constraints (albums must contain 2 to 10 homogeneous items), update shapes, extended rich-text entities, and in-message navigation.
   - `tests/telegram_multimedia_contract.rs`: multimedia tool arguments (collage, location, document, audio), `InputMedia` wire formats, and rich-message media references.
+- **WebUI**: CI job `webui` runs `npm ci --ignore-scripts`, `vue-tsc`, `vite build` and `npm audit`, then uploads `webui/dist`; every Rust job downloads it before building.
 - **Behavioural tests**: `bot/test_support.rs` provides an in-process fake Telegram Bot API server (`FakeTelegram`) and a fake streaming provider (`FakeProvider`); client, router, guest, inline, quiz and live-photo tests assert on the requests the real code sends. Service-level tests use the process-wide SQLite database, so each test owns a distinct chat id.
 - **Mocking & Isolation**:
   - Tests do not require a live Telegram bot token or active AI provider; network calls in tests use mock HTTP responses or test synthetic structs.

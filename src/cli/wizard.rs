@@ -396,10 +396,21 @@ pub(crate) async fn run_cli_quickstart_wizard(ai_service: &AIChatService) -> Opt
 }
 
 pub(crate) async fn get_or_prompt_token(ai_service: &AIChatService) -> Option<String> {
-    if let Some(token) = get_configured_token() {
-        if ai_service.has_configured_provider(0).await {
-            return Some(token);
+    let token = get_configured_token();
+    if token.is_some() && ai_service.has_configured_provider(0).await {
+        return token;
+    }
+    // Under a service manager nobody can answer the wizard; the missing
+    // pieces can be set in the WebUI instead.
+    if !io::stdin().is_terminal() {
+        if token.is_none() {
+            tracing::warn!("BOT_TOKEN is not set, so Telegram stays off. Set it in the WebUI or with `xiao gateway token`.");
+        } else {
+            tracing::warn!(
+                "No AI provider is configured yet. Add one in the WebUI or with `xiao ai add`."
+            );
         }
+        return token;
     }
     println!("\n  \x1b[38;5;244m○ Gateway or AI Provider is not yet configured.\x1b[0m");
     println!("  \x1b[1;38;2;6;182;212m▸\x1b[0m \x1b[1;37mLaunching Setup Wizard...\x1b[0m\n");

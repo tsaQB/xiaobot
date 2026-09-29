@@ -61,8 +61,10 @@ pub(crate) fn bounded_timeout_secs(raw: Option<&str>, default_secs: u64) -> u64 
         .min(600)
 }
 
+/// A timeout setting from the environment or, when unset there, the value
+/// saved from the CLI or WebUI, so a saved change applies without a restart.
 pub(crate) fn timeout_from_env(key: &str, default_secs: u64) -> Duration {
-    let raw = std::env::var(key).ok();
+    let raw = crate::configured_setting(key);
     Duration::from_secs(bounded_timeout_secs(raw.as_deref(), default_secs))
 }
 

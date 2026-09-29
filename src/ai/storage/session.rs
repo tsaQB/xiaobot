@@ -586,11 +586,11 @@ pub async fn count_scoped_messages_async(chat_id: i64, thread_id: i64) -> usize 
 /// summary, so the table no longer grows without bound.
 pub(crate) const DEFAULT_HISTORY_RETENTION_MESSAGES: usize = 2_000;
 
-/// Retention limit per scope, configurable through `XIAO_HISTORY_RETENTION`.
-/// `0` disables pruning.
+/// Retention limit per scope, configurable through `XIAO_HISTORY_RETENTION`
+/// (environment, or the value saved from the CLI or WebUI). `0` disables
+/// pruning.
 pub(crate) fn history_retention_limit() -> usize {
-    std::env::var("XIAO_HISTORY_RETENTION")
-        .ok()
+    crate::configured_setting("XIAO_HISTORY_RETENTION")
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(DEFAULT_HISTORY_RETENTION_MESSAGES)
 }

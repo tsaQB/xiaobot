@@ -420,6 +420,7 @@ async fn run_cli_whatsapp_pair(phone_login: Option<String>) {
         owner_number,
         phone_login,
         dedicated_groups: crate::get_whatsapp_dedicated_groups(),
+        hooks: None,
     };
     let ai_service = Arc::new(crate::ai::AIChatService::new());
     println!("\n  \x1b[1;37mMengkoneksikan ke server WhatsApp...\x1b[0m");
