@@ -458,6 +458,30 @@ pub(crate) async fn supervise_whatsapp(
     }
 }
 
+/// Keeps trying to start Telegram (with the polling backoff) until it works
+/// or the daemon stops. Used when the token and owner are set but Telegram
+/// could not be reached at start, for example before the network is up:
+/// without the WebUI the daemon used to exit and let the service manager
+/// retry, which would now also take the console down.
+async fn wait_for_telegram(
+    ai_service: &AIChatService,
+    mut shutdown: watch::Receiver<bool>,
+) -> Option<(TelegramBotClient, Arc<ChatRouteScope>, UserLastImagePrompt)> {
+    let mut failures = 0u32;
+    loop {
+        failures = failures.saturating_add(1);
+        let delay = poll_backoff(failures);
+        warn!("Telegram could not be started; trying again in {delay:?}");
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = wait_until_shutdown(&mut shutdown) => return None,
+        }
+        if let Some(telegram) = try_bootstrap_telegram(ai_service).await {
+            return Some(telegram);
+        }
+    }
+}
+
 pub async fn run_daemon(ai_service: Arc<AIChatService>) {
     let wa_enabled = crate::web::wa::WaController::should_run();
 
@@ -501,6 +525,17 @@ pub async fn run_daemon(ai_service: Arc<AIChatService>) {
         info!("Memulai WhatsApp Gateway di background daemon...");
         wa.start(None).await;
     }
+
+    let tg_bootstrap = match tg_bootstrap {
+        None if web.is_some() && crate::web::auth::telegram_configured() => {
+            let telegram = wait_for_telegram(&ai_service, shutdown_rx.clone()).await;
+            if let Some((bot, scope, _)) = telegram.as_ref() {
+                wa.set_alert(Some((bot.clone(), scope.owner_user_id)));
+            }
+            telegram
+        }
+        other => other,
+    };
 
     if let Some((bot, route_scope, user_last_image_prompt)) = tg_bootstrap {
         let (update_tx, update_worker) = spawn_workers(

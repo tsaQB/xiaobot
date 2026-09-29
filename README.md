@@ -500,7 +500,7 @@ Settings can be provided via `.env` (or the process environment) or managed thro
 | `TAVILY_API_KEY` | *Optional* | API key for Tavily search (the legacy name `TAVILY_KEY` is also read). |
 | `EXA_API_KEY` | *Optional* | API key for the Exa REST API (the legacy name `EXA_KEY` is also read). |
 | `EXA_MCP_URL` | `https://mcp.exa.ai/` | Keyless Exa MCP search endpoint (`xiao mcp url` changes it). |
-| `WHATSAPP_ENABLED` | `false` | Enables the WhatsApp gateway in the daemon. A linked session also enables it automatically. |
+| `WHATSAPP_ENABLED` | *Unset* | `true` or `false` turns the WhatsApp gateway in the daemon on or off. When it is not set, a linked session turns it on. |
 | `WHATSAPP_OWNER_NUMBER` | *Empty* | Owner phone number in E.164 form without the plus sign. |
 | `WHATSAPP_DEDICATED_GROUPS` | *Empty* | Comma-separated group JIDs (or numeric ids) where Xiao answers every owner message without a mention. |
 | `XIAO_HISTORY_RETENTION` | `2000` | Messages kept per chat/topic in canonical history (older context lives on in the topic summary). `0` disables pruning. |

@@ -146,9 +146,13 @@ impl WaController {
         WhatsAppGateway::check_status(&crate::get_whatsapp_db_path()) == WhatsAppStatus::Linked
     }
 
-    /// The gateway runs when it is enabled or a session exists.
+    /// `WHATSAPP_ENABLED` decides when it is set; otherwise a linked
+    /// session turns the gateway on.
     pub(crate) fn should_run() -> bool {
-        crate::is_whatsapp_enabled() || Self::linked()
+        match crate::configured_setting("WHATSAPP_ENABLED") {
+            Some(_) => crate::is_whatsapp_enabled(),
+            None => Self::linked(),
+        }
     }
 
     pub(crate) fn state(&self) -> LinkState {

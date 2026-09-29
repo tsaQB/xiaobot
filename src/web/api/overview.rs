@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 use crate::ai::storage::web::{self as store, Inbox};
 use crate::gateway::whatsapp::LinkPhase;
 use crate::web::chat::owner_id;
-use crate::web::settings;
 use crate::web::wa::{phase_name, WaController};
 use crate::web::WebState;
 
@@ -111,7 +110,7 @@ pub(crate) async fn overview(State(state): State<Arc<WebState>>) -> Json<Value> 
             "last_poll_secs": crate::bot::daemon::last_poll_age_secs(),
         },
         "whatsapp": {
-            "enabled": settings::effective_bool("WHATSAPP_ENABLED"),
+            "enabled": WaController::should_run(),
             "linked": linked,
             "phase": phase_name(link.phase),
         },

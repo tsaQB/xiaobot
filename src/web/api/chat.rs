@@ -31,10 +31,16 @@ use super::ok;
 const MESSAGE_LIMIT: usize = 200;
 const MAX_SESSION_NAME_CHARS: usize = 60;
 
+/// The session list from the database. `xiao chat` in another process may
+/// have created or removed sessions, so the daemon's cached copy is dropped.
+async fn fresh_sessions(state: &WebState) -> Vec<crate::ai::storage::ChatSession> {
+    let owner = owner_id();
+    state.ai.user_sessions.write().await.remove(&owner);
+    state.ai.get_sessions(owner).await
+}
+
 async fn session_exists(state: &WebState, id: usize) -> bool {
-    state
-        .ai
-        .get_sessions(owner_id())
+    fresh_sessions(state)
         .await
         .iter()
         .any(|session| session.id == id)
@@ -50,7 +56,7 @@ fn busy_error() -> ApiError {
 /// GET /api/chat/sessions
 pub(crate) async fn sessions(State(state): State<Arc<WebState>>) -> Json<Value> {
     let owner = owner_id();
-    let mut sessions = state.ai.get_sessions(owner).await;
+    let mut sessions = fresh_sessions(&state).await;
     sessions.sort_by_key(|session| std::cmp::Reverse(session.id));
     let stats = store::cli_scope_stats_async(owner).await;
     let list: Vec<Value> = sessions

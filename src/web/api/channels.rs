@@ -20,8 +20,10 @@ use super::ok;
 
 /// getMe answers are cached this long (the bot's settings rarely change).
 const BOT_INFO_TTL: Duration = Duration::from_secs(5 * 60);
+/// A failed getMe is remembered this long, so pages do not wait on it again.
+const BOT_ERROR_TTL: Duration = Duration::from_secs(60);
 
-type BotCache = Option<(Instant, [u8; 32], Value)>;
+type BotCache = Option<(Instant, [u8; 32], Result<Value, String>)>;
 static BOT_INFO: LazyLock<Mutex<BotCache>> = LazyLock::new(|| Mutex::new(None));
 
 /// Calls a Bot API method directly. The URL holds the token, so it is
@@ -69,18 +71,23 @@ pub(crate) async fn cached_bot_info(fresh: bool) -> Result<Value, String> {
     let fingerprint = sha256(token.as_bytes());
     if !fresh {
         if let Ok(cache) = BOT_INFO.lock() {
-            if let Some((at, key, info)) = cache.as_ref() {
-                if *key == fingerprint && at.elapsed() < BOT_INFO_TTL {
-                    return Ok(info.clone());
+            if let Some((at, key, result)) = cache.as_ref() {
+                let ttl = if result.is_ok() {
+                    BOT_INFO_TTL
+                } else {
+                    BOT_ERROR_TTL
+                };
+                if *key == fingerprint && at.elapsed() < ttl {
+                    return result.clone();
                 }
             }
         }
     }
-    let info = bot_info(&telegram_call(&token, "getMe").await?);
+    let result = telegram_call(&token, "getMe").await.map(|me| bot_info(&me));
     if let Ok(mut cache) = BOT_INFO.lock() {
-        *cache = Some((Instant::now(), fingerprint, info.clone()));
+        *cache = Some((Instant::now(), fingerprint, result.clone()));
     }
-    Ok(info)
+    result
 }
 
 /// Checks a new token with getMe; returns the bot's username.
@@ -187,7 +194,7 @@ pub(crate) async fn whatsapp(State(state): State<Arc<WebState>>) -> Json<Value> 
         Value::Null
     };
     Json(json!({
-        "enabled": settings::effective_bool("WHATSAPP_ENABLED"),
+        "enabled": WaController::should_run(),
         "linked": WaController::linked(),
         "phase": phase_name(link.phase),
         "last_error": link.error,
@@ -213,10 +220,12 @@ enum PairModeRequest {
     Code,
 }
 
-/// Records that WhatsApp should run, unless the environment decides.
-fn save_enabled(enabled: bool) {
+/// Saves `WHATSAPP_ENABLED` (`None` clears it, so a later link turns the
+/// gateway on again), unless the environment decides.
+fn save_enabled(enabled: Option<bool>) {
+    let value = enabled.map(|flag| flag.to_string()).unwrap_or_default();
     if settings::env_value("WHATSAPP_ENABLED").is_none()
-        && crate::ai::service::save_app_setting("WHATSAPP_ENABLED", &enabled.to_string()).is_err()
+        && crate::ai::service::save_app_setting("WHATSAPP_ENABLED", &value).is_err()
     {
         tracing::warn!("WHATSAPP_ENABLED could not be saved");
     }
@@ -251,7 +260,7 @@ pub(crate) async fn pair_start(
             (PairMode::Code, Some(digits))
         }
     };
-    save_enabled(true);
+    save_enabled(Some(true));
     state.wa.pair(mode, phone).await;
     // Give WhatsApp a moment to issue the first code, so the page can show
     // it straight away.
@@ -283,7 +292,7 @@ pub(crate) async fn pair_cancel(State(state): State<Arc<WebState>>) -> Json<Valu
 /// POST /api/whatsapp/unlink
 pub(crate) async fn unlink(State(state): State<Arc<WebState>>) -> ApiResult<Value> {
     state.wa.unlink().await.map_err(ApiError::internal)?;
-    save_enabled(false);
+    save_enabled(None);
     tracing::info!("WhatsApp session unlinked from the WebUI");
     Ok(ok())
 }
