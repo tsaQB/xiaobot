@@ -51,7 +51,7 @@ fn busy_error() -> ApiError {
 pub(crate) async fn sessions(State(state): State<Arc<WebState>>) -> Json<Value> {
     let owner = owner_id();
     let mut sessions = state.ai.get_sessions(owner).await;
-    sessions.sort_by(|a, b| b.id.cmp(&a.id));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.id));
     let stats = store::cli_scope_stats_async(owner).await;
     let list: Vec<Value> = sessions
         .iter()
