@@ -581,6 +581,29 @@ fn test_sanitize_and_validate_raster_url_strips_tracking_params() {
 }
 
 #[test]
+fn wiki_file_pages_are_not_images() {
+    // HTML pages about a file, even though the name ends in .jpeg.
+    for page in [
+        "https://commons.wikimedia.org/wiki/File:Great_Wall_of_China.jpeg",
+        "https://en.wikipedia.org/wiki/File:Colosseo_2020.jpg",
+        "https://id.m.wikipedia.org/wiki/Berkas:Borobudur.png",
+    ] {
+        assert_eq!(sanitize_and_validate_raster_url(page), None, "{page}");
+    }
+    // The pictures themselves are still accepted.
+    for picture in [
+        "https://upload.wikimedia.org/wikipedia/commons/2/23/The_Great_Wall_of_China_at_Jinshanling-edit.jpg",
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/d/de/Colosseo_2020.jpg/1000px-Colosseo_2020.jpg",
+        "https://commons.wikimedia.org/wiki/Special:FilePath/Colosseo_2020.jpg",
+    ] {
+        assert!(
+            sanitize_and_validate_raster_url(picture).is_some(),
+            "{picture}"
+        );
+    }
+}
+
+#[test]
 fn test_is_visual_search_query_detection() {
     assert!(is_visual_search_query(
         "Berikan 2 foto pemandangan gunung rinjani"

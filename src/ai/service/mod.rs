@@ -7,6 +7,7 @@ pub mod multimodal;
 pub(crate) mod prompt;
 mod quiz;
 pub mod session;
+mod tool_round;
 
 #[cfg(test)]
 mod tests;
@@ -118,6 +119,64 @@ impl CuratorGate {
     }
 }
 
+/// Counts background work (memory curation) so a short-lived process, such
+/// as a one-shot CLI query, can let it finish instead of cutting it off when
+/// the runtime shuts down.
+#[derive(Clone, Default)]
+pub(crate) struct BackgroundTasks {
+    running: Arc<std::sync::atomic::AtomicUsize>,
+    idle: Arc<tokio::sync::Notify>,
+}
+
+/// Marks one background task as finished when dropped, even on panic.
+struct BackgroundTaskGuard(BackgroundTasks);
+
+impl Drop for BackgroundTaskGuard {
+    fn drop(&mut self) {
+        if self
+            .0
+            .running
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+            == 1
+        {
+            self.0.idle.notify_waiters();
+        }
+    }
+}
+
+impl BackgroundTasks {
+    pub(crate) fn spawn<F>(&self, task: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.running
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let guard = BackgroundTaskGuard(self.clone());
+        tokio::spawn(async move {
+            let _guard = guard;
+            task.await;
+        });
+    }
+
+    /// Waits until no background task is running, at most `timeout`.
+    /// Returns whether everything finished in time.
+    pub(crate) async fn wait_idle(&self, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                // Created before the check so a task finishing in between
+                // still wakes this waiter.
+                let notified = self.idle.notified();
+                if self.running.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+}
+
 #[derive(Clone)]
 pub struct AIChatService {
     pub(crate) client: Client,
@@ -136,6 +195,8 @@ pub struct AIChatService {
     /// Set once the process begins shutting down. Work cancelled because of
     /// shutdown is left in the durable inbox instead of being marked done.
     pub(crate) shutting_down: Arc<std::sync::atomic::AtomicBool>,
+    /// Background curation started by finished generations.
+    pub(crate) background_tasks: BackgroundTasks,
 }
 
 impl AIChatService {
@@ -182,6 +243,7 @@ impl AIChatService {
             model_metadata: Arc::new(RwLock::new(HashMap::new())),
             curator_gate: CuratorGate::default(),
             shutting_down: Arc::default(),
+            background_tasks: BackgroundTasks::default(),
         }
     }
 }
@@ -216,6 +278,7 @@ impl AIChatService {
             model_metadata: Default::default(),
             curator_gate: Default::default(),
             shutting_down: Default::default(),
+            background_tasks: Default::default(),
         }
     }
 }

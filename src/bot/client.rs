@@ -2,6 +2,7 @@ use futures_util::StreamExt;
 use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::time::Duration;
 use tracing::warn;
@@ -9,8 +10,8 @@ use tracing::warn;
 use super::client_raw as raw;
 use super::models::{
     ApiResponse, BotCommand, ChatMember, EphemeralMessageParameters, FileInfo,
-    InlineKeyboardMarkup, InputMedia, InputPollOption, InputRichMessage, ReplyParameters, Update,
-    User,
+    InlineKeyboardMarkup, InputMedia, InputPollOption, InputRichMessage, ReplyParameters,
+    RichBlock, StagedDocument, Update, User,
 };
 use super::transport_policy::{
     fallback_allowed_error, fallback_allowed_response, is_idempotent_method,
@@ -111,6 +112,62 @@ pub(crate) fn sanitize_upload_filename(raw: &str) -> String {
         return "file.bin".to_string();
     }
     crate::util::truncate_chars(trimmed, MAX_UPLOAD_FILENAME_CHARS)
+}
+
+/// Remote media downloaded at the same time for one message.
+const MEDIA_DOWNLOAD_CONCURRENCY: usize = 4;
+
+/// How one `sendRichMessage` attempt ended.
+enum RichAttempt {
+    Sent(Value),
+    /// Telegram answered 400: a simpler form of the message may still work.
+    Rejected(String),
+    /// Any other failure. Another attempt could deliver the message twice.
+    Failed(String),
+}
+
+/// Where a rich message goes; shared by every attempt to deliver it.
+#[derive(Clone, Copy)]
+struct RichTarget<'a> {
+    chat_id: i64,
+    reply_markup: Option<&'a Value>,
+    receiver_user_id: Option<i64>,
+    reply_to_message_id: Option<i64>,
+}
+
+/// A rich message whose remote media was downloaded for upload.
+struct StagedRichMessage {
+    /// The message pointing at the uploads (`attach://file_N`).
+    message: InputRichMessage,
+    downloads: Vec<StagedDocument>,
+    /// Addresses that could not be downloaded, or that returned a web page
+    /// where media was expected. They keep their address in `message`.
+    unresolved: HashSet<String>,
+}
+
+/// Whether a download is a web page (an error or file description page)
+/// rather than media.
+fn is_web_page(content_type: &str, bytes: &[u8]) -> bool {
+    if content_type.to_ascii_lowercase().contains("html") {
+        return true;
+    }
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(64)])
+        .trim_start()
+        .to_ascii_lowercase();
+    head.starts_with("<!doctype html") || head.starts_with("<html")
+}
+
+/// Multipart part for a staged file. A MIME type that does not parse is left
+/// out instead of failing the whole request.
+fn upload_part(file: &StagedDocument) -> Part {
+    let file_name = sanitize_upload_filename(&file.filename);
+    match Part::bytes(file.bytes.clone())
+        .file_name(file_name.clone())
+        .mime_str(&file.mime_type)
+    {
+        Ok(part) => part,
+        Err(_) => Part::bytes(file.bytes.clone()).file_name(file_name),
+    }
 }
 
 enum HttpResponseOutcome {
@@ -1392,7 +1449,7 @@ impl TelegramBotClient {
         &self,
         chat_id: i64,
         rich_message: &InputRichMessage,
-        attached_files: Vec<crate::bot::models::StagedDocument>,
+        attached_files: Vec<StagedDocument>,
         reply_markup: Option<Value>,
         receiver_user_id: Option<i64>,
     ) -> Result<Value, String> {
@@ -1407,19 +1464,23 @@ impl TelegramBotClient {
         .await
     }
 
+    /// Sends a rich message together with staged files and whatever remote
+    /// media can be downloaded for upload. When Telegram refuses it, the
+    /// message is retried in simpler forms rather than lost: first the media
+    /// that could not be downloaded becomes links, then all remote media,
+    /// and finally the text goes out on its own with the staged files sent
+    /// as ordinary documents. Only a 400 leads to another form; any other
+    /// failure is returned, since a retry could deliver the message twice.
     pub async fn send_rich_message_with_media_params(
         &self,
         chat_id: i64,
         rich_message: &InputRichMessage,
-        attached_files: Vec<crate::bot::models::StagedDocument>,
+        attached_files: Vec<StagedDocument>,
         reply_markup: Option<Value>,
         receiver_user_id: Option<i64>,
         reply_to_message_id: Option<i64>,
     ) -> Result<Value, String> {
-        if attached_files.is_empty()
-            && !rich_message.has_media()
-            && rich_message.media.as_ref().is_none_or(|m| m.is_empty())
-        {
+        if attached_files.is_empty() && !rich_message.has_media() {
             return self
                 .send_rich_message(
                     chat_id,
@@ -1430,95 +1491,290 @@ impl TelegramBotClient {
                 )
                 .await;
         }
-        rich_message.validate()?;
-
-        let mut resolved_msg = rich_message.clone();
-        let mut all_attachments: Vec<crate::bot::models::StagedDocument> = attached_files;
-
-        if let Some(ref mut media_items) = resolved_msg.media {
-            for item in media_items.iter_mut() {
-                let target_url = item.media.media_url().to_string();
-                if target_url.starts_with("http://") || target_url.starts_with("https://") {
-                    if let Some((bytes, mime, fname)) = self
-                        .download_media_bytes(&target_url, MAX_TELEGRAM_DOWNLOAD_BYTES)
-                        .await
-                    {
-                        let attach_key = format!("file_{}", all_attachments.len());
-                        item.media.set_media_url(format!("attach://{attach_key}"));
-                        all_attachments.push(crate::bot::models::StagedDocument::new(
-                            attach_key, bytes, mime, fname,
-                        ));
-                    }
-                }
-            }
+        let target = RichTarget {
+            chat_id,
+            reply_markup: reply_markup.as_ref(),
+            receiver_user_id,
+            reply_to_message_id,
+        };
+        if let Err(error) = rich_message.validate() {
+            warn!("Media answer is not a valid rich message ({error}); sending text and files separately.");
+            return self
+                .send_rich_without_uploads(target, rich_message, attached_files)
+                .await;
         }
 
-        if resolved_msg.has_media() {
-            let media_urls = resolved_msg.collect_media_urls();
-            let mut block_replacements = std::collections::HashMap::new();
-            for url in media_urls {
-                if (url.starts_with("http://") || url.starts_with("https://"))
-                    && !block_replacements.contains_key(&url)
+        let staged = self.stage_remote_media(rich_message, &attached_files).await;
+        let uploads: Vec<&StagedDocument> =
+            attached_files.iter().chain(&staged.downloads).collect();
+
+        // Downloaded media goes up with the message; Telegram fetches the
+        // addresses that could not be downloaded here.
+        let mut reason = match self.attempt_rich(target, &staged.message, &uploads).await {
+            RichAttempt::Sent(response) => return Ok(response),
+            RichAttempt::Failed(error) => return Err(error),
+            RichAttempt::Rejected(reason) => reason,
+        };
+
+        if !staged.unresolved.is_empty() {
+            warn!(
+                "Media answer rejected ({reason}); linking {} media that could not be downloaded.",
+                staged.unresolved.len()
+            );
+            let linked = self
+                .inner
+                .convert_media_to_rich_links(&staged.message, &|url| {
+                    staged.unresolved.contains(url)
+                });
+            reason = match self.attempt_rich(target, &linked, &uploads).await {
+                RichAttempt::Sent(response) => return Ok(response),
+                RichAttempt::Failed(error) => return Err(error),
+                RichAttempt::Rejected(reason) => reason,
+            };
+        }
+
+        // An upload was refused (for example a file Telegram cannot process):
+        // all remote media becomes links, the staged files stay.
+        if !staged.downloads.is_empty() {
+            warn!("Media answer rejected ({reason}); linking all remote media.");
+            let linked = self.inner.convert_remote_media_to_rich_links(rich_message);
+            let uploads: Vec<&StagedDocument> = attached_files.iter().collect();
+            reason = match self.attempt_rich(target, &linked, &uploads).await {
+                RichAttempt::Sent(response) => return Ok(response),
+                RichAttempt::Failed(error) => return Err(error),
+                RichAttempt::Rejected(reason) => reason,
+            };
+        }
+
+        warn!("Media answer rejected ({reason}); sending text and files separately.");
+        self.send_rich_without_uploads(target, rich_message, attached_files)
+            .await
+    }
+
+    /// Last resort for a media answer Telegram refused: the text goes out with
+    /// links in place of media (degrading to HTML and plain text if needed),
+    /// and the staged files follow as ordinary documents.
+    async fn send_rich_without_uploads(
+        &self,
+        target: RichTarget<'_>,
+        rich_message: &InputRichMessage,
+        attached_files: Vec<StagedDocument>,
+    ) -> Result<Value, String> {
+        let placeholder = if attached_files.is_empty() {
+            "📎 Lampiran tidak dapat ditampilkan."
+        } else {
+            "📎 Lampiran dikirim terpisah."
+        };
+        let text = self.media_as_links(rich_message, placeholder);
+        let sent = self
+            .send_rich_message(
+                target.chat_id,
+                &text,
+                target.reply_markup.cloned(),
+                target.receiver_user_id,
+                target.reply_to_message_id,
+            )
+            .await?;
+        for file in attached_files {
+            if let Err(error) = self
+                .send_document_bytes(
+                    target.chat_id,
+                    &file.filename,
+                    file.bytes,
+                    Some(&file.mime_type),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            {
+                warn!("A staged file could not be sent separately: {error}");
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Downloads the remote media of `rich_message` for upload, a few at a
+    /// time, and points the message at the uploads. `taken` holds files
+    /// whose attach keys are already in use.
+    async fn stage_remote_media(
+        &self,
+        rich_message: &InputRichMessage,
+        taken: &[StagedDocument],
+    ) -> StagedRichMessage {
+        let mut remote: Vec<String> = Vec::new();
+        for url in rich_message.collect_media_urls() {
+            if raw::is_remote_url(&url) && !remote.contains(&url) {
+                remote.push(url);
+            }
+        }
+        // Only a document may legitimately be a web page.
+        let documents: HashSet<String> = rich_message
+            .blocks
+            .iter()
+            .filter(|block| matches!(block, RichBlock::Document { .. }))
+            .flat_map(RichBlock::get_media_urls)
+            .collect();
+        let fetched: Vec<_> = futures_util::stream::iter(remote)
+            .map(|url| async move {
+                let download = self
+                    .download_media_bytes(&url, MAX_TELEGRAM_DOWNLOAD_BYTES)
+                    .await;
+                (url, download)
+            })
+            .buffered(MEDIA_DOWNLOAD_CONCURRENCY)
+            .collect()
+            .await;
+
+        let mut staged = StagedRichMessage {
+            message: rich_message.clone(),
+            downloads: Vec::new(),
+            unresolved: HashSet::new(),
+        };
+        let mut replacements = HashMap::new();
+        let mut next_key = 0usize;
+        for (url, download) in fetched {
+            match download {
+                Some((bytes, content_type, file_name))
+                    if documents.contains(&url) || !is_web_page(&content_type, &bytes) =>
                 {
-                    if let Some((bytes, mime, fname)) = self
-                        .download_media_bytes(&url, MAX_TELEGRAM_DOWNLOAD_BYTES)
-                        .await
-                    {
-                        let attach_key = format!("file_{}", all_attachments.len());
-                        all_attachments.push(crate::bot::models::StagedDocument::new(
-                            attach_key.clone(),
-                            bytes,
-                            mime,
-                            fname,
-                        ));
-                        block_replacements.insert(url, format!("attach://{attach_key}"));
-                    }
+                    let attach_key = loop {
+                        let key = format!("file_{next_key}");
+                        next_key += 1;
+                        if !taken
+                            .iter()
+                            .chain(&staged.downloads)
+                            .any(|file| file.attach_key == key)
+                        {
+                            break key;
+                        }
+                    };
+                    replacements.insert(url, format!("attach://{attach_key}"));
+                    staged.downloads.push(StagedDocument::new(
+                        attach_key,
+                        bytes,
+                        content_type,
+                        file_name,
+                    ));
+                }
+                _ => {
+                    staged.unresolved.insert(url);
                 }
             }
-            if !block_replacements.is_empty() {
-                resolved_msg.replace_media_urls(&|u| block_replacements.get(u).cloned());
-            }
         }
+        if !replacements.is_empty() {
+            staged
+                .message
+                .replace_media_urls(&|url| replacements.get(url).cloned());
+        }
+        staged
+    }
 
-        if all_attachments.is_empty() {
-            return self
-                .send_rich_message(
-                    chat_id,
-                    rich_message,
-                    reply_markup,
+    /// One `sendRichMessage` attempt: multipart with `uploads`, or plain JSON
+    /// when there is nothing to upload.
+    async fn attempt_rich(
+        &self,
+        target: RichTarget<'_>,
+        rich_message: &InputRichMessage,
+        uploads: &[&StagedDocument],
+    ) -> RichAttempt {
+        if uploads.is_empty() {
+            self.attempt_rich_json(target, rich_message).await
+        } else {
+            self.attempt_rich_multipart(target, rich_message, uploads)
+                .await
+        }
+    }
+
+    async fn attempt_rich_json(
+        &self,
+        target: RichTarget<'_>,
+        rich_message: &InputRichMessage,
+    ) -> RichAttempt {
+        let rich_json = match serde_json::to_value(rich_message) {
+            Ok(value) => value,
+            Err(error) => return RichAttempt::Failed(error.to_string()),
+        };
+        // Any `media` list is already part of `rich_message`.
+        let mut payload = json!({
+            "chat_id": target.chat_id,
+            "rich_message": rich_json,
+        });
+        if let Some(reply_markup) = target.reply_markup {
+            payload["reply_markup"] = reply_markup.clone();
+        }
+        if let Some(receiver_user_id) = target.receiver_user_id {
+            payload["ephemeral_message_parameters"] =
+                serde_json::to_value(EphemeralMessageParameters {
                     receiver_user_id,
-                    reply_to_message_id,
-                )
-                .await;
+                    callback_query_id: Self::current_delivery_context().callback_query_id,
+                    replace_callback_query_message: None,
+                })
+                .unwrap_or(json!({}));
         }
+        if let Some(reply_to_message_id) = target.reply_to_message_id {
+            payload["reply_parameters"] =
+                serde_json::to_value(ReplyParameters::new(reply_to_message_id))
+                    .unwrap_or(json!({}));
+        }
+        Self::apply_delivery_context(&mut payload, true);
+        Self::rich_attempt(self.post_json_raw("sendRichMessage", payload).await)
+    }
 
+    async fn attempt_rich_multipart(
+        &self,
+        target: RichTarget<'_>,
+        rich_message: &InputRichMessage,
+        uploads: &[&StagedDocument],
+    ) -> RichAttempt {
         // `media` travels inside `rich_message` (InputRichMessage.media);
         // sendRichMessage has no top-level `media` parameter.
-        let rich_json = serde_json::to_string(&resolved_msg).map_err(|error| error.to_string())?;
+        let rich_json = match serde_json::to_string(rich_message) {
+            Ok(value) => value,
+            Err(error) => return RichAttempt::Failed(error.to_string()),
+        };
+        let result = self
+            .post_multipart("sendRichMessage", || {
+                let mut form = Form::new()
+                    .text("chat_id", target.chat_id.to_string())
+                    .text("rich_message", rich_json.clone());
+                if let Some(reply_markup) = target.reply_markup {
+                    form = form.text("reply_markup", reply_markup.to_string());
+                }
+                form = self.apply_form_delivery_context(
+                    form,
+                    true,
+                    target.receiver_user_id,
+                    target.reply_to_message_id,
+                )?;
+                for file in uploads {
+                    form = form.part(file.attach_key.clone(), upload_part(file));
+                }
+                Ok(form)
+            })
+            .await;
+        Self::rich_attempt(result)
+    }
 
-        self.post_multipart("sendRichMessage", || {
-            let mut form = Form::new()
-                .text("chat_id", chat_id.to_string())
-                .text("rich_message", rich_json.clone());
-            if let Some(ref reply_markup) = reply_markup {
-                form = form.text("reply_markup", reply_markup.to_string());
+    fn rich_attempt(result: Result<Value, String>) -> RichAttempt {
+        match result {
+            Ok(response) if response.get("ok").and_then(Value::as_bool) == Some(true) => {
+                RichAttempt::Sent(response)
             }
-            form = self.apply_form_delivery_context(
-                form,
-                true,
-                receiver_user_id,
-                reply_to_message_id,
-            )?;
-            for doc in &all_attachments {
-                let part = Part::bytes(doc.bytes.clone())
-                    .file_name(sanitize_upload_filename(&doc.filename))
-                    .mime_str(&doc.mime_type)
-                    .map_err(|error| error.to_string())?;
-                form = form.part(doc.attach_key.clone(), part);
+            Ok(response) if fallback_allowed_response(&response) => RichAttempt::Rejected(
+                response
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+            ),
+            Ok(response) => {
+                RichAttempt::Failed(Self::telegram_api_error("sendRichMessage", &response))
             }
-            Ok(form)
-        })
-        .await
+            Err(error) if fallback_allowed_error(&error) => RichAttempt::Rejected(error),
+            Err(error) => RichAttempt::Failed(error),
+        }
     }
 
     pub async fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<Value, String> {
@@ -1786,208 +2042,69 @@ impl TelegramBotClient {
         receiver_user_id: Option<i64>,
         reply_to_message_id: Option<i64>,
     ) -> Result<Value, String> {
+        let target = RichTarget {
+            chat_id,
+            reply_markup: reply_markup.as_ref(),
+            receiver_user_id,
+            reply_to_message_id,
+        };
         let validation = rich_message.validate();
         if validation.is_ok() {
-            let rich_json = serde_json::to_value(rich_message).map_err(|e| e.to_string())?;
-            // Any `media` list is already part of `rich_message`.
-            let mut payload = json!({
-                "chat_id": chat_id,
-                "rich_message": rich_json,
-            });
-            if let Some(ref rm) = reply_markup {
-                payload["reply_markup"] = rm.clone();
-            }
-            if let Some(recv) = receiver_user_id {
-                payload["ephemeral_message_parameters"] =
-                    serde_json::to_value(EphemeralMessageParameters {
-                        receiver_user_id: recv,
-                        callback_query_id: Self::current_delivery_context().callback_query_id,
-                        replace_callback_query_message: None,
-                    })
-                    .unwrap_or(json!({}));
-            }
-            if let Some(rep) = reply_to_message_id {
-                payload["reply_parameters"] =
-                    serde_json::to_value(ReplyParameters::new(rep)).unwrap_or(json!({}));
-            }
-            Self::apply_delivery_context(&mut payload, true);
-
-            match self.post_json_raw("sendRichMessage", payload).await {
-                Ok(res) if res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) => {
-                    return Ok(res);
-                }
-                Ok(res) if !fallback_allowed_response(&res) => {
-                    return Err(Self::telegram_api_error("sendRichMessage", &res));
-                }
-                Ok(res) => {
-                    let desc = res
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown");
+            match self.attempt_rich_json(target, rich_message).await {
+                RichAttempt::Sent(response) => return Ok(response),
+                RichAttempt::Failed(error) => return Err(error),
+                RichAttempt::Rejected(reason) => {
                     tracing::info!(
-                        "Telegram rejected Rich Message ({desc}); checking multipart resolution."
+                        "Telegram rejected Rich Message ({reason}); checking multipart resolution."
                     );
-                }
-                Err(error) if !fallback_allowed_error(&error) => {
-                    return Err(error);
-                }
-                Err(error) => {
-                    tracing::info!(
-                        "Rich Message request failed ({error}); checking multipart resolution."
-                    );
-                }
-            }
-
-            // Multipart resolution for media requiring upload
-            let mut multipart_msg = rich_message.clone();
-            let mut attachments = Vec::new();
-
-            if let Some(ref mut media_items) = multipart_msg.media {
-                for item in media_items.iter_mut() {
-                    let target_url = item.media.media_url().to_string();
-                    if target_url.starts_with("http://") || target_url.starts_with("https://") {
-                        if let Some((bytes, mime, fname)) = self
-                            .download_media_bytes(&target_url, MAX_TELEGRAM_DOWNLOAD_BYTES)
-                            .await
-                        {
-                            let attach_key = format!("file_{}", attachments.len());
-                            item.media.set_media_url(format!("attach://{attach_key}"));
-                            attachments.push((attach_key, bytes, mime, fname));
-                        }
-                    }
-                }
-            }
-
-            if multipart_msg.has_media() {
-                let media_urls = multipart_msg.collect_media_urls();
-                let mut block_replacements = std::collections::HashMap::new();
-                for url in media_urls {
-                    if (url.starts_with("http://") || url.starts_with("https://"))
-                        && !block_replacements.contains_key(&url)
-                    {
-                        if let Some((bytes, mime, fname)) = self
-                            .download_media_bytes(&url, MAX_TELEGRAM_DOWNLOAD_BYTES)
-                            .await
-                        {
-                            let attach_key = format!("file_{}", attachments.len());
-                            attachments.push((attach_key.clone(), bytes, mime, fname));
-                            block_replacements.insert(url, format!("attach://{attach_key}"));
-                        }
-                    }
-                }
-                if !block_replacements.is_empty() {
-                    multipart_msg.replace_media_urls(&|u| block_replacements.get(u).cloned());
-                }
-            }
-
-            if !attachments.is_empty() {
-                let rich_json_str =
-                    serde_json::to_string(&multipart_msg).map_err(|e| e.to_string())?;
-
-                match self
-                    .post_multipart("sendRichMessage", || {
-                        let mut form = Form::new()
-                            .text("chat_id", chat_id.to_string())
-                            .text("rich_message", rich_json_str.clone());
-                        if let Some(ref rm) = reply_markup {
-                            form = form.text("reply_markup", rm.to_string());
-                        }
-                        form = self.apply_form_delivery_context(
-                            form,
-                            true,
-                            receiver_user_id,
-                            reply_to_message_id,
-                        )?;
-                        for (attach_key, bytes, mime, fname) in &attachments {
-                            let part = Part::bytes(bytes.clone())
-                                .file_name(sanitize_upload_filename(fname))
-                                .mime_str(mime)
-                                .map_err(|e| e.to_string())?;
-                            form = form.part(attach_key.clone(), part);
-                        }
-                        Ok(form)
-                    })
-                    .await
-                {
-                    Ok(res) if res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) => {
-                        tracing::info!("Multipart sendRichMessage succeeded seamlessly.");
-                        return Ok(res);
-                    }
-                    Ok(res) if !fallback_allowed_response(&res) => {
-                        return Err(Self::telegram_api_error("sendRichMessage", &res));
-                    }
-                    Ok(res) => {
-                        let desc = res
-                            .get("description")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown");
-                        tracing::warn!(
-                            "Multipart sendRichMessage rejected ({desc}); falling back to zero-download link conversion."
-                        );
-                    }
-                    Err(err) if !fallback_allowed_error(&err) => {
-                        return Err(err);
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            "Multipart sendRichMessage request failed ({err}); falling back to zero-download link conversion."
-                        );
-                    }
                 }
             }
 
             if rich_message.has_media() {
+                // Upload what can be downloaded here. Telegram already failed
+                // to fetch something, so the addresses that cannot be
+                // downloaded either become links straight away.
+                let staged = self.stage_remote_media(rich_message, &[]).await;
+                if !staged.downloads.is_empty() {
+                    let linked;
+                    let message = if staged.unresolved.is_empty() {
+                        &staged.message
+                    } else {
+                        linked = self
+                            .inner
+                            .convert_media_to_rich_links(&staged.message, &|url| {
+                                staged.unresolved.contains(url)
+                            });
+                        &linked
+                    };
+                    let uploads: Vec<&StagedDocument> = staged.downloads.iter().collect();
+                    match self.attempt_rich_multipart(target, message, &uploads).await {
+                        RichAttempt::Sent(response) => {
+                            tracing::info!("Multipart sendRichMessage succeeded seamlessly.");
+                            return Ok(response);
+                        }
+                        RichAttempt::Failed(error) => return Err(error),
+                        RichAttempt::Rejected(reason) => {
+                            tracing::warn!(
+                                "Multipart sendRichMessage rejected ({reason}); falling back to zero-download link conversion."
+                            );
+                        }
+                    }
+                }
+
                 let converted_msg = self.inner.convert_remote_media_to_rich_links(rich_message);
-                if let Ok(rich_json) = serde_json::to_value(&converted_msg) {
-                    let mut retry_payload = json!({
-                        "chat_id": chat_id,
-                        "rich_message": rich_json,
-                    });
-                    if let Some(ref rm) = reply_markup {
-                        retry_payload["reply_markup"] = rm.clone();
+                match self.attempt_rich_json(target, &converted_msg).await {
+                    RichAttempt::Sent(response) => {
+                        tracing::info!(
+                            "Zero-download link conversion sendRichMessage succeeded seamlessly."
+                        );
+                        return Ok(response);
                     }
-                    if let Some(recv) = receiver_user_id {
-                        retry_payload["ephemeral_message_parameters"] =
-                            serde_json::to_value(EphemeralMessageParameters {
-                                receiver_user_id: recv,
-                                callback_query_id: Self::current_delivery_context()
-                                    .callback_query_id,
-                                replace_callback_query_message: None,
-                            })
-                            .unwrap_or(json!({}));
-                    }
-                    if let Some(rep) = reply_to_message_id {
-                        retry_payload["reply_parameters"] =
-                            serde_json::to_value(ReplyParameters::new(rep)).unwrap_or(json!({}));
-                    }
-                    Self::apply_delivery_context(&mut retry_payload, true);
-                    match self.post_json_raw("sendRichMessage", retry_payload).await {
-                        Ok(res) if res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) => {
-                            tracing::info!(
-                                "Zero-download link conversion sendRichMessage succeeded seamlessly."
-                            );
-                            return Ok(res);
-                        }
-                        Ok(res) if !fallback_allowed_response(&res) => {
-                            return Err(Self::telegram_api_error("sendRichMessage", &res));
-                        }
-                        Ok(res) => {
-                            let desc = res
-                                .get("description")
-                                .and_then(Value::as_str)
-                                .unwrap_or("unknown");
-                            tracing::warn!(
-                                "Zero-download sendRichMessage retry rejected ({desc}); degrading to safe HTML."
-                            );
-                        }
-                        Err(err) if !fallback_allowed_error(&err) => {
-                            return Err(err);
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                "Zero-download sendRichMessage retry request failed ({err}); degrading to safe HTML."
-                            );
-                        }
+                    RichAttempt::Failed(error) => return Err(error),
+                    RichAttempt::Rejected(reason) => {
+                        tracing::warn!(
+                            "Zero-download sendRichMessage retry rejected ({reason}); degrading to safe HTML."
+                        );
                     }
                 }
             }

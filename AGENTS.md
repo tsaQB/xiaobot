@@ -176,7 +176,7 @@ cargo run -- setup
   - `status.rs`: Dashboard and diagnostic system status rendering.
   - `gateway.rs`: Telegram and WhatsApp gateway management (bot token, owner, QR/code pairing, link status).
   - `wizard.rs`: Interactive setup and onboarding quickstart.
-  - `chat.rs`: Terminal chat REPL, smart one-shot queries, and multi-session manager (`/sessions`, `/switch`, `/rm`, `/new`). Each CLI session has its own history scope (`thread_id = cli_session_thread_id(session_id)`, a negative id), separate from the Telegram private chat.
+  - `chat.rs`: Terminal chat REPL, smart one-shot queries, and multi-session manager (`/sessions`, `/switch`, `/rm`, `/new`). Each CLI session has its own history scope (`thread_id = cli_session_thread_id(session_id)`, a negative id), separate from the Telegram private chat. A one-shot query and leaving the REPL wait up to 30 seconds for background memory curation, so the process does not exit in the middle of it.
   - `memory.rs`: Tier-1 persistent memory management (`xiao memory`).
   - `context.rs`: Token usage and sliding-window breakdown inspector (`xiao context`).
   - `search.rs`: Web search engine hub and retrieval keys (`xiao search`).
@@ -193,8 +193,8 @@ cargo run -- setup
   - `inline.rs`: Inline mode (`inline_query` → one placeholder result with a keyboard → `chosen_inline_result` → stateless generation → inline edit).
   - `media.rs`: Downloads and reads the file a message carries (photo or live-photo clip, sticker, voice, audio, video, video note, document) into `MessageMedia`, reporting problems instead of messaging the chat; shared by ordinary chats and guest mode.
   - `image_flow.rs`: Multi-step conversational image generation pipeline, prompt extraction, and structured fallback cards.
-  - `client.rs`: The single Telegram Bot API client (every network call, retries, Rich → HTML → plain fallback chain, draft preparation, file downloads). Behavioural tests live in `client/tests.rs` and run against the fake server in `test_support.rs`.
-  - `client/raw.rs` / `client/raw/render.rs`: Transport-independent helpers the client delegates to: per-task delivery context, bounded SSRF-safe media downloads, remote-media-to-link conversion, text chunking, and the HTML/plain-text fallback renderers. (It no longer duplicates the Bot API calls.)
+  - `client.rs`: The single Telegram Bot API client (every network call, retries, Rich → HTML → plain fallback chain, draft preparation, file downloads). An answer with media goes out in stages: remote media is downloaded (4 at a time) and uploaded with the message, and Telegram fetches the addresses that could not be downloaded (or returned a web page). If Telegram rejects the message, those addresses become links, then every remote picture does, and as a last resort the text is sent on its own, with links in place of media, and the staged files follow as documents. Only a 400 leads to the next stage: any other error is returned at once, since resending could deliver the answer twice. Behavioural tests live in `client/tests.rs` and run against the fake server in `test_support.rs`.
+  - `client/raw.rs` / `client/raw/render.rs`: Transport-independent helpers the client delegates to: per-task delivery context, bounded SSRF-safe media downloads, remote-media-to-link conversion (all remote media, or only selected addresses, so the pictures that load stay in a collage or slideshow), text chunking, and the HTML/plain-text fallback renderers. (It no longer duplicates the Bot API calls.)
   - `models.rs` / `models/base.rs`: Type-safe Telegram API models, rich message block definitions (`RichBlock`), and validation bounds. `models/extras.rs` holds the reply, checklist and inline-mode objects (`TextQuote`, `Checklist`, `InlineQuery`, `ChosenInlineResult`); `models/rich_text.rs` turns received rich messages into readable text.
   - `transport_policy.rs`: Retry backoff logic, HTTP 429 rate limit parsing, and Bad Request fallback gates.
   - `url_policy.rs`: Outbound SSRF firewall preventing requests to private, loopback, link-local, and SIIT/NAT64 translated IP ranges.
@@ -203,7 +203,8 @@ cargo run -- setup
     - `session.rs`: Session state transitions, active generation tracking, and cancellation signals.
     - `context.rs`: Token budget estimation, sliding-window message context assembly, and conversation trimming.
     - `prompt.rs`: System prompt assembly; long-term memory and summaries are sanitized, capped and fenced as untrusted data.
-    - `generation.rs`: Streaming SSE lifecycle, provider HTTP dispatch, retry backoff, tool execution loops, and the shared `race_with_cancel` cancellation helper.
+    - `generation.rs`: Streaming SSE lifecycle, provider HTTP dispatch, retry backoff, the tool execution loop, and the shared `race_with_cancel` cancellation helper.
+    - `tool_round.rs`: Limits of that loop. The model may call tools in up to `MAX_TOOL_ROUNDS` (5) rounds, and one more request without tools follows so it always gets to write the answer. A generation runs at most `MAX_RESEARCH_CALLS` (10) `web_search`/`fetch_url` calls, 3 at a time, and all tool output shares one token budget (`ToolResultBudget`). A quiz or live photo that was already sent is not sent again, a reply that only confirms the quizzes are done (`QUIZ_DONE_REPLY`) is not shown, and tool steps that never ran are named in a notice asking the user to reply "lanjutkan".
     - `quiz.rs`: The `create_quiz` tool: preamble, native quiz with one or several correct answers, question/option/explanation pictures, description, shuffled options, revoting, open period (zero or negative means no limit) with results hidden until close (only with an open period), and a retry without pictures when Telegram cannot load them.
     - `live_photo.rs`: The `send_live_photo` tool. Live photos cannot be sent by URL, so both files are downloaded with `download_media_bytes` (SSRF-safe, bounded), the MP4 duration is checked (at most 10 seconds) before the photo is fetched, and the files are uploaded with `sendLivePhoto`. The call runs under `race_with_cancel`, so Stop and shutdown interrupt it, and only a successful send counts as delivered media.
     - `curator.rs`: Background memory curation: profile fact extraction and older-history summarization.
@@ -219,11 +220,11 @@ cargo run -- setup
   - `routing.rs`: Specialist model role resolution (`ModelRole`: Main, Vision, Video, AudioStt, ImageGeneration, Curator).
   - `capability.rs` / `provider.rs`: Live model probe harness and capability verification (e.g. confirming whether an endpoint actually supports vision or tool calling).
   - `stream.rs`: UTF-8 chunk-safe Server-Sent Events (SSE) streaming decoder.
-  - `tools.rs` / `tools/search.rs`: Function calling engine. `tools.rs` holds tool schemas, argument validation, and `fetch_url`; `tools/search.rs` holds the `web_search` engine chain (keyless Exa MCP protocol, Tavily/Brave API, DuckDuckGo/Wikipedia fallbacks).
+  - `tools.rs` / `tools/search.rs`: Function calling engine. `tools.rs` holds tool schemas, argument validation, and `fetch_url`; `tools/search.rs` holds the `web_search` engine chain: Brave → Tavily → Exa API (each only with a key) → keyless Exa MCP → DuckDuckGo, and Wikipedia when all of them fail. An engine that just failed is skipped for a while (Exa MCP: 10 minutes after a 429, or its `Retry-After`, and 2 minutes after other failures; DuckDuckGo: 10 minutes after a failure, block or captcha). DuckDuckGo ads are dropped. A picture search with fewer than 3 images is topped up from Wikipedia and Wikimedia Commons, and the verified images are listed before the text results.
   - `http.rs`: Shared provider retry policy, retryable status classification, and `Retry-After` handling.
 - `src/document.rs` & `src/document/archive.rs`: In-memory safe extraction of text, archives (ZIP, TAR, TAR.GZ, 7Z), Office files (DOCX, XLSX), and PDF page extraction/rendering.
 - `src/attachments.rs`: Content attachment persistence scoped by chat/thread.
-- `src/timeline.rs`: Real-time streaming draft management with progress spinner and activity state indicators.
+- `src/timeline.rs`: Real-time streaming draft management with progress spinner and activity state indicators. A private draft streams the answer, with a thinking block until the first words arrive; a group placeholder is a real message, so it shows the status as a paragraph (Telegram accepts thinking blocks in drafts only).
 - `src/util.rs`: Shared string helpers, including character-safe truncation.
 - `src/gateway/`:
   - `mod.rs`: `DeliverySink` contract for plain-text channels. Telegram deliberately does not implement it, because rich blocks, streaming drafts, and interactive buttons cannot be expressed through a flat text interface.
@@ -253,7 +254,7 @@ When modifying or adding features, you **must** preserve these invariants:
 
 ### 3. Outbound SSRF & Network Security
 - **Rule**: Any remote fetch of a URL that came from a user, a model, or a web page must go through `bot::url_policy::fetch_public_url` (or, for single-hop downloads without redirects, `resolve_download_url` plus a pinned client). `fetch_public_url` re-validates every redirect hop with `resolve_redirect_hop`, pins the connection to the vetted IP, bypasses ambient proxies, and bounds the body.
-- **Users**: `fetch_url` (`ai::tools::fetch_web_content`), the DuckDuckGo result scraper, and `client/raw.rs::download_media_bytes` (the Telegram media re-upload downloader, the `send_live_photo` tool, and picture links in inline questions). Generated-image downloads (`service/image.rs::download_generated_image`) use `resolve_download_url` with a pinned client and no redirects.
+- **Users**: `fetch_url` (`ai::tools::fetch_web_content`), the DuckDuckGo result scraper (including the result pages it reads for pictures when a picture search found none), and `client/raw.rs::download_media_bytes` (the Telegram media re-upload downloader, the `send_live_photo` tool, and picture links in inline questions). Generated-image downloads (`service/image.rs::download_generated_image`) use `resolve_download_url` with a pinned client and no redirects.
 - **Blocked**: Loopback (`127.0.0.0/8`, `::1`), RFC 1918 private subnets, link-local addresses, SIIT/NAT64-mapped IPv6, and unsafe URI schemes.
 
 ### 4. Secret Isolation
@@ -275,7 +276,7 @@ When modifying or adding features, you **must** preserve these invariants:
   - This is an intentional operational trade-off of at-least-once processing semantics: Xiao guarantees zero message loss over exactly-once execution.
 - **Crash Recovery**: On startup, `recover_telegram_processing_async()` resets any in-flight `processing` updates back to `pending` to guarantee at-least-once recovery across process restarts, while quarantining updates with `attempts >= 2` (`quarantine_telegram_update_async` works on `pending` rows too). Stop updates and inline queries from before a restart are acknowledged, not replayed.
 - **Native Stop Priority**: `stopped_message_generation` updates bypass worker mailboxes and execute immediately (in their own task, so a panic cannot take down the poll loop) to cancel in-flight generation tokens with zero latency. When the user stops a private-chat answer, the partial text is sent as a real message, because Bot API drafts disappear after ~30 seconds.
-- **Drafts Are Ephemeral**: `sendRichMessageDraft` is only a temporary preview. Every generation, including failed or interrupted ones, must end with a real `sendRichMessage` (`timeline::finalize_answer_with_media`); drafts never carry uploads or URL media (`TelegramBotClient::prepare_draft_message`).
+- **Drafts Are Ephemeral**: `sendRichMessageDraft` is only a temporary preview. Every generation, including failed or interrupted ones, must end with a real `sendRichMessage` (`timeline::finalize_answer_with_media`); drafts never carry uploads or URL media (`TelegramBotClient::prepare_draft_message`). Thinking blocks are accepted in drafts only, so a group placeholder, which is a real message, shows its status as a paragraph.
 - **Retry Safety**: Timeouts are retried only for idempotent methods (`transport_policy::is_idempotent_method`); a timed-out `send*` is reported rather than risking a duplicate message.
 
 ### 6. Specialist Context Isolation

@@ -424,3 +424,119 @@ async fn multipart_rich_message_has_no_duplicate_media_field() {
         "media list stays inside rich_message"
     );
 }
+
+/// A staged file plus a picture no one can download (loopback is refused by
+/// the URL policy, so it stays a remote address Telegram has to fetch).
+fn answer_with_unreachable_photo() -> (InputRichMessage, crate::bot::models::StagedDocument) {
+    let rich = InputRichMessage::new(vec![
+        RichBlock::Paragraph {
+            text: Value::String("Hasil pencarian".to_string()),
+        },
+        RichBlock::Photo {
+            photo: json!({"type": "photo", "media": "https://127.0.0.1/x.jpg"}),
+            caption: None,
+        },
+    ]);
+    let attachment = crate::bot::models::StagedDocument::new(
+        "file_0",
+        b"isi laporan".to_vec(),
+        "text/plain",
+        "laporan.txt",
+    );
+    (rich, attachment)
+}
+
+/// When Telegram cannot fetch a picture, the answer goes out again with that
+/// picture as a link, and the staged file is still attached.
+#[tokio::test]
+async fn media_answer_links_a_picture_telegram_cannot_fetch() {
+    let fake = FakeTelegram::start(Arc::new(|request, index| {
+        if request.method == "sendRichMessage" && index == 0 {
+            api_error(400, "Bad Request: failed to get HTTP URL content")
+        } else {
+            ok_message(1)
+        }
+    }))
+    .await;
+    let (rich, attachment) = answer_with_unreachable_photo();
+    fake.client
+        .send_rich_message_with_media_params(5, &rich, vec![attachment], None, None, Some(9))
+        .await
+        .expect("the answer is delivered with the picture as a link");
+
+    let requests = fake.requests();
+    assert_eq!(fake.methods(), ["sendRichMessage", "sendRichMessage"]);
+    let retry = &requests[1].raw_body;
+    assert!(
+        retry.contains("name=\"file_0\""),
+        "the file is still attached"
+    );
+    assert!(retry.contains("https://127.0.0.1/x.jpg") && retry.contains("Lihat Foto"));
+    assert!(
+        !retry.contains("\"photo\""),
+        "the picture is a link now: {retry}"
+    );
+    assert!(retry.contains("name=\"reply_parameters\""), "still a reply");
+}
+
+/// If Telegram refuses every rich form, the text is still delivered and the
+/// staged file follows as an ordinary document.
+#[tokio::test]
+async fn media_answer_sends_text_and_files_separately_as_last_resort() {
+    let fake = FakeTelegram::start(Arc::new(|request, _| match request.method.as_str() {
+        "sendRichMessage" => api_error(400, "Bad Request: can't parse rich message"),
+        _ => ok_message(1),
+    }))
+    .await;
+    let (rich, attachment) = answer_with_unreachable_photo();
+    fake.client
+        .send_rich_message_with_media_params(5, &rich, vec![attachment], None, None, None)
+        .await
+        .expect("text and file are delivered separately");
+
+    let methods = fake.methods();
+    assert_eq!(methods.last().map(String::as_str), Some("sendDocument"));
+    let requests = fake.requests();
+    let text = requests
+        .iter()
+        .find(|request| request.method == "sendMessage")
+        .expect("the text goes out as a normal message");
+    let text = text.json["text"].as_str().unwrap_or_default();
+    assert!(text.contains("Hasil pencarian"), "{text}");
+    assert!(text.contains("https://127.0.0.1/x.jpg"), "{text}");
+    let document = requests
+        .last()
+        .expect("the staged file is sent after the text");
+    assert!(document.raw_body.contains("laporan.txt"));
+    assert!(document.raw_body.contains("isi laporan"));
+}
+
+/// Only a 400 leads to another form of the message: any other failure is
+/// returned at once, since resending could deliver the answer twice.
+#[tokio::test]
+async fn media_answer_does_not_retry_after_a_non_400_error() {
+    let fake = FakeTelegram::start(Arc::new(|_, _| {
+        api_error(403, "Forbidden: bot was blocked by the user")
+    }))
+    .await;
+    let (rich, attachment) = answer_with_unreachable_photo();
+    let error = fake
+        .client
+        .send_rich_message_with_media_params(5, &rich, vec![attachment], None, None, None)
+        .await
+        .expect_err("a 403 is reported");
+    assert!(error.contains("403"), "{error}");
+    assert_eq!(fake.methods(), ["sendRichMessage"]);
+}
+
+#[test]
+fn web_pages_are_not_mistaken_for_media() {
+    assert!(is_web_page("text/html; charset=utf-8", b"\xff\xd8"));
+    assert!(is_web_page(
+        "application/octet-stream",
+        b"\n  <!DOCTYPE html><html><body>File:Cat.jpg</body></html>"
+    ));
+    assert!(is_web_page("", b"<HTML><head></head></HTML>"));
+    assert!(!is_web_page("image/jpeg", b"\xff\xd8\xff\xe0JFIF"));
+    assert!(!is_web_page("application/pdf", b"%PDF-1.7"));
+}

@@ -449,20 +449,7 @@ impl ExecutionTimeline {
         };
 
         let is_group = matches!(self.inner.mode, TimelineMode::GroupProgressive);
-        let mut blocks = Vec::new();
-        if !is_group && !partial.trim().is_empty() {
-            // The model streams Markdown into private drafts. Feed the accumulated
-            // answer through the semantic parser.
-            blocks.extend(parse_streaming_markdown_to_rich_blocks(&partial));
-        }
-
-        // When blocks is empty (in groups, or in private drafts before the answer starts),
-        // display the live activity/status block with emoji (e.g. 🧩 Thinking, 🔎 Searching, 🪶 Writing).
-        if blocks.is_empty() {
-            blocks.push(RichBlock::Thinking {
-                text: Value::String(status),
-            });
-        }
+        let blocks = progress_blocks(&partial, status, is_group);
         let mut rich_message = InputRichMessage::new(blocks);
         crate::parser::rtl::apply_rtl_direction(&mut rich_message, &partial);
 
@@ -763,6 +750,30 @@ impl GenerationProgressSink for ExecutionTimeline {
     }
 }
 
+/// What a progress update shows. A private draft streams the answer as it is
+/// written, with a thinking block until the first words arrive. A group
+/// placeholder is a real message and only shows the status, as a paragraph:
+/// Telegram accepts thinking blocks in drafts only
+/// (`RICH_MESSAGE_BLOCK_UNSUPPORTED` anywhere else).
+fn progress_blocks(partial: &str, status: String, is_group: bool) -> Vec<RichBlock> {
+    let text = Value::String(status);
+    if is_group {
+        return vec![RichBlock::Paragraph { text }];
+    }
+    // The model streams Markdown into private drafts. Feed the accumulated
+    // answer through the semantic parser.
+    let blocks = if partial.trim().is_empty() {
+        Vec::new()
+    } else {
+        parse_streaming_markdown_to_rich_blocks(partial)
+    };
+    if blocks.is_empty() {
+        // Live activity with emoji (e.g. 🧩 Thinking, 🔎 Searching, 🪶 Writing).
+        return vec![RichBlock::Thinking { text }];
+    }
+    blocks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,15 +801,7 @@ mod tests {
     #[test]
     fn streaming_draft_omits_thinking_header_when_answer_starts() {
         let partial = "Xiao adalah saya sendiri—asisten AI yang sedang kamu ajak mengobrol!";
-        let mut blocks = Vec::new();
-        if !partial.trim().is_empty() {
-            blocks.extend(parse_streaming_markdown_to_rich_blocks(partial));
-        }
-        if blocks.is_empty() {
-            blocks.push(RichBlock::Thinking {
-                text: Value::String("🪶 Writing\n8s".to_string()),
-            });
-        }
+        let blocks = progress_blocks(partial, "🪶 Writing\n8s".to_string(), false);
         assert!(!blocks
             .iter()
             .any(|b| matches!(b, RichBlock::Thinking { .. })));
@@ -809,16 +812,7 @@ mod tests {
 
     #[test]
     fn streaming_draft_shows_thinking_header_when_answer_empty() {
-        let partial = "";
-        let mut blocks = Vec::new();
-        if !partial.trim().is_empty() {
-            blocks.extend(parse_streaming_markdown_to_rich_blocks(partial));
-        }
-        if blocks.is_empty() {
-            blocks.push(RichBlock::Thinking {
-                text: Value::String("🧩 Thinking\n3s".to_string()),
-            });
-        }
+        let blocks = progress_blocks(" ", "🧩 Thinking\n3s".to_string(), false);
         assert_eq!(blocks.len(), 1);
         assert!(matches!(blocks[0], RichBlock::Thinking { .. }));
     }
@@ -826,19 +820,15 @@ mod tests {
     #[test]
     fn group_placeholder_only_shows_status_without_streaming_partial_answer() {
         let partial = "Jawaban lengkap yang sedang di-generate oleh model...";
-        let is_group = true;
-        let mut blocks = Vec::new();
-        if !is_group && !partial.trim().is_empty() {
-            blocks.extend(parse_streaming_markdown_to_rich_blocks(partial));
-        }
-        if blocks.is_empty() {
-            blocks.push(RichBlock::Thinking {
+        let blocks = progress_blocks(partial, "🪶 Writing\n5s •••".to_string(), true);
+        // A group placeholder is a real message: only the status, and as a
+        // paragraph, since Telegram accepts thinking blocks in drafts only.
+        assert_eq!(
+            blocks,
+            vec![RichBlock::Paragraph {
                 text: Value::String("🪶 Writing\n5s •••".to_string()),
-            });
-        }
-        // In group mode, blocks must ONLY contain RichBlock::Thinking and NO partial text blocks
-        assert_eq!(blocks.len(), 1);
-        assert!(matches!(blocks[0], RichBlock::Thinking { .. }));
+            }]
+        );
     }
 
     #[test]

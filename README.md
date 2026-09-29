@@ -40,7 +40,7 @@ Xiao is an autonomous, single-owner AI gateway designed to run continuously on l
 - **Three-Tier Long-Term Memory**: Tier 1 (Autonomous profile facts), Tier 2 (Sliding-window topic summaries), and Tier 3 (Full thread-scoped turns).
 - **Specialist Context Isolation**: Routes queries across `Main`, `Vision`, `Video`, `Audio STT`, `Image Generation`, and `Curator`. Specialist models only receive transient media payloads, preventing token context exhaustion and preserving privacy.
 - **In-Memory Document & Anti-Bomb Inspection**: Safe extraction of PDF, DOCX, XLSX, text, code, and archives (ZIP, TAR, 7Z) with strict memory quotas and anti-zip-bomb limits.
-- **Autonomous Tool Calling**: Built-in `web_search` (Brave → Tavily → Exa API when keys are configured, then keyless Exa MCP → DuckDuckGo, with Wikipedia for verified images), SSRF-hardened `fetch_url`, and tools for quizzes, photos, collages, slideshows, audio, voice notes, live photos, locations, documents and archives.
+- **Autonomous Tool Calling**: Built-in `web_search` (Brave → Tavily → Exa API when keys are configured, then keyless Exa MCP → DuckDuckGo, and Wikipedia when every engine fails; an engine that just failed is skipped for a few minutes, and picture searches are topped up with verified images from Wikipedia and Wikimedia Commons), SSRF-hardened `fetch_url`, and tools for quizzes, photos, collages, slideshows, audio, voice notes, live photos, locations, documents and archives. One answer may use tools in up to 5 rounds (at most 10 searches or page fetches, 3 at a time); steps that could not run are named in the answer. A picture Telegram cannot load is sent as a link instead of failing the whole answer.
 
 ---
 
@@ -410,6 +410,7 @@ xiao "Analyze the concurrency guarantees of SQLite in WAL mode"
 # Or:
 xiao chat "Analyze the concurrency guarantees of SQLite in WAL mode"
 ```
+Before exiting, a one-shot query (and leaving the REPL) waits up to 30 seconds for background memory curation to finish.
 
 ---
 

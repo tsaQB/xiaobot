@@ -8,15 +8,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use url::Url;
 
-static RE_DDG_TITLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<a class="result__url"[^>]*href="(?P<url>[^"]+)"[^>]*>"#)
-        .expect("valid static regex")
-});
-static RE_DDG_SNIPPET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<a class="result__snippet"[^>]*>(?P<snippet>.*?)</a>"#)
-        .expect("valid static regex")
-});
-
 static RE_HTML_SCRIPT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)<script.*?</script>").expect("valid static regex"));
 static RE_HTML_STYLE: LazyLock<Regex> =
@@ -224,6 +215,15 @@ pub fn sanitize_and_validate_raster_url(url_str: &str) -> Option<String> {
     }
 
     let path = parsed.path().to_ascii_lowercase();
+
+    // `/wiki/File:X.jpg` on Wikipedia or Commons is the HTML page about the
+    // file, not the picture (which lives on upload.wikimedia.org).
+    let is_wiki_host = ["wikipedia.org", "wikimedia.org", "wikidata.org"]
+        .iter()
+        .any(|domain| host_lower == *domain || host_lower.ends_with(&format!(".{domain}")));
+    if is_wiki_host && path.starts_with("/wiki/") && !path.starts_with("/wiki/special:filepath/") {
+        return None;
+    }
 
     // DuckDuckGo proxy unwrapping: if URL is /iu/?u=<encoded_url>, unwrap and validate target
     if (host_lower == "duckduckgo.com" || host_lower.ends_with(".duckduckgo.com"))
@@ -487,7 +487,7 @@ pub fn get_tools_definition() -> Value {
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "Cari informasi terkini, fakta ensiklopedia, atau gambar/foto dari internet menggunakan mesin pencari. Jika pengguna meminta foto/gambar, mesin pencari akan menyertakan URL raster terverifikasi (.jpg, .jpeg, .png, .webp) yang siap digunakan untuk tool multimedia (send_photo, send_collage, send_slideshow).",
+                "description": "Cari informasi terkini, fakta ensiklopedia, atau gambar/foto dari internet menggunakan mesin pencari. Jika query memuat kata foto/gambar/photo/image, hasilnya diawali daftar URL gambar raster terverifikasi (.jpg, .jpeg, .png, .webp) yang siap dipakai untuk send_photo, send_collage, send_slideshow, atau gambar kuis. Untuk beberapa topik, panggil tool ini beberapa kali sekaligus dalam satu giliran.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -521,7 +521,7 @@ pub fn get_tools_definition() -> Value {
             "type": "function",
             "function": {
                 "name": "create_quiz",
-                "description": "Buat kuis interaktif native Telegram (mode kuis) dengan 2-12 pilihan ganda. Kuis boleh punya lebih dari satu jawaban benar, bergambar (gambar soal dan/atau gambar per pilihan), dan pilihannya boleh diacak. Gunakan parameter preamble jika ingin menyajikan pengantar, konteks bacaan/studi kasus, atau potongan kode panjang sebelum kuis.",
+                "description": "Buat kuis interaktif native Telegram (mode kuis) dengan 2-12 pilihan ganda. Satu panggilan membuat satu kuis; untuk beberapa kuis, panggil tool ini sekali per kuis, sebaiknya sekaligus dalam satu giliran. Kuis boleh punya lebih dari satu jawaban benar, bergambar (gambar soal dan/atau gambar per pilihan), dan pilihannya boleh diacak. Gunakan parameter preamble jika ingin menyajikan pengantar, konteks bacaan/studi kasus, atau potongan kode panjang sebelum kuis.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -910,27 +910,35 @@ pub async fn fetch_web_content(url: &str) -> Result<String, String> {
     let (html, final_url) = fetch_public_html(url, Duration::from_secs(15), MAX_FETCH_HTML_BYTES)
         .await
         .map_err(|error| format!("Gagal mengunduh halaman web: {error}"))?;
-    let mut cleaned = clean_html_to_text(&html);
+    let cleaned = clean_html_to_text(&html);
 
     if cleaned.is_empty() {
         return Err("Halaman web tidak menghasilkan konten teks yang dapat dibaca.".to_string());
     }
 
-    let extracted_images = extract_raster_images_from_html(&html, Some(&final_url));
-    if !extracted_images.is_empty() {
-        let max_imgs = extracted_images.into_iter().take(6).collect::<Vec<_>>();
-        cleaned.push_str(&format_verified_images_section(&max_imgs));
-    }
-
     let max_len = 8000;
-    if cleaned.chars().nth(max_len).is_some() {
+    let text = if cleaned.chars().nth(max_len).is_some() {
         let truncated: String = cleaned.chars().take(max_len).collect();
-        Ok(format!(
-            "{}\n\n[...Konten web dipotong karena melebihi batas panjang teks xiao...]",
-            truncated
-        ))
+        format!(
+            "{truncated}\n\n[...Konten web dipotong karena melebihi batas panjang teks xiao...]"
+        )
     } else {
-        Ok(cleaned)
+        cleaned
+    };
+
+    // The picture list goes first: a long page is cut at the end, and so is
+    // the tool result that carries it.
+    let images: Vec<String> = extract_raster_images_from_html(&html, Some(&final_url))
+        .into_iter()
+        .take(6)
+        .collect();
+    if images.is_empty() {
+        Ok(text)
+    } else {
+        Ok(format!(
+            "{}\n\n{text}",
+            format_verified_images_section(&images).trim()
+        ))
     }
 }
 

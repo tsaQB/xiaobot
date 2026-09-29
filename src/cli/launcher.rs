@@ -72,7 +72,7 @@ pub(crate) async fn run_cli_launcher(ai_service: &Arc<AIChatService>) {
         // 3. Search Engine Status
         let (search_engine_name, _) = crate::ai::tools::get_search_engine_status();
         let search_str = if search_engine_name.starts_with("Exa MCP") {
-            "\x1b[38;2;139;92;246m◈\x1b[0m \x1b[1;37mExa MCP\x1b[0m \x1b[38;5;245m(Keyless)\x1b[0m \x1b[38;5;240m→\x1b[0m \x1b[38;5;248mDuckDuckGo / Wikipedia\x1b[0m".to_string()
+            "\x1b[38;2;139;92;246m◈\x1b[0m \x1b[1;37mExa MCP\x1b[0m \x1b[38;5;245m(Keyless)\x1b[0m \x1b[38;5;240m→\x1b[0m \x1b[38;5;248mDuckDuckGo\x1b[0m \x1b[38;5;240m→\x1b[0m \x1b[38;5;248mWikipedia\x1b[0m".to_string()
         } else {
             format!("\x1b[38;2;16;185;129m●\x1b[0m \x1b[1;37m{search_engine_name}\x1b[0m")
         };

@@ -148,6 +148,26 @@ impl FakeProvider {
         }
     }
 
+    /// A provider that answers the n-th chat request with `replies[n]`, each a
+    /// raw SSE body (see [`sse_text`] and [`sse_tool_call`]). The last reply
+    /// is repeated for any further request.
+    pub async fn scripted(replies: Vec<String>) -> Self {
+        let (address, requests, server) = serve(Arc::new(move |_, index| {
+            let body = replies
+                .get(index)
+                .or_else(|| replies.last())
+                .cloned()
+                .unwrap_or_default();
+            (200, "text/event-stream", body)
+        }))
+        .await;
+        Self {
+            endpoint: format!("http://{address}/v1"),
+            requests,
+            server,
+        }
+    }
+
     /// A provider configuration pointing at this server.
     pub fn config(&self) -> crate::ai::storage::ProviderConfig {
         crate::ai::storage::ProviderConfig {
@@ -177,6 +197,23 @@ impl Drop for FakeProvider {
     fn drop(&mut self) {
         self.server.abort();
     }
+}
+
+/// SSE body of a streamed text answer.
+pub fn sse_text(text: &str) -> String {
+    let chunk = serde_json::json!({"choices": [{"delta": {"content": text}}]});
+    format!("data: {chunk}\n\ndata: [DONE]\n\n")
+}
+
+/// SSE body of a single streamed tool call.
+pub fn sse_tool_call(id: &str, name: &str, arguments: &Value) -> String {
+    let chunk = serde_json::json!({"choices": [{"delta": {"tool_calls": [{
+        "index": 0,
+        "id": id,
+        "type": "function",
+        "function": {"name": name, "arguments": arguments.to_string()}
+    }]}}]});
+    format!("data: {chunk}\n\ndata: [DONE]\n\n")
 }
 
 pub fn ok_message(message_id: i64) -> (u16, Value) {

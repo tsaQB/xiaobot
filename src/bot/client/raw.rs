@@ -11,7 +11,7 @@
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use super::models::{InputRichMessage, RichBlock};
+use super::models::{InputRichMessage, RichBlock, RichBlockCaption};
 
 #[derive(Debug, Clone, Default)]
 pub struct TelegramDeliveryContext {
@@ -143,201 +143,142 @@ impl TelegramBotClient {
         &self,
         rich_message: &InputRichMessage,
     ) -> InputRichMessage {
+        self.convert_media_to_rich_links(rich_message, &|_| true)
+    }
+
+    /// Like [`Self::convert_remote_media_to_rich_links`], but only for the
+    /// remote addresses `selected` accepts. Uploads (`attach://`) and file
+    /// ids never become links, since a link to them opens nothing. A collage
+    /// or slideshow keeps the items that stay media and links the others in
+    /// a paragraph after it.
+    pub fn convert_media_to_rich_links(
+        &self,
+        rich_message: &InputRichMessage,
+        selected: &dyn Fn(&str) -> bool,
+    ) -> InputRichMessage {
+        let linked = |url: &str| is_remote_url(url) && selected(url);
         let mut converted = rich_message.clone();
-        for block in &mut converted.blocks {
-            match block {
-                RichBlock::Photo { photo, caption } => {
-                    let url = photo
-                        .get("media")
-                        .and_then(Value::as_str)
-                        .or_else(|| photo.as_str())
-                        .unwrap_or("");
-                    if url.starts_with("http://") || url.starts_with("https://") {
-                        let cap = caption
-                            .as_ref()
-                            .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| "Lihat Foto".to_string());
-                        *block = RichBlock::Paragraph {
-                            text: Value::Array(vec![
-                                json!("🖼️ "),
-                                json!({
-                                    "type": "url",
-                                    "text": cap,
-                                    "url": url,
-                                }),
-                            ]),
-                        };
-                    }
-                }
-                RichBlock::Video { video, caption } => {
-                    let url = video
-                        .get("media")
-                        .and_then(Value::as_str)
-                        .or_else(|| video.as_str())
-                        .unwrap_or("");
-                    if url.starts_with("http://") || url.starts_with("https://") {
-                        let cap = caption
-                            .as_ref()
-                            .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| "Tonton Video".to_string());
-                        *block = RichBlock::Paragraph {
-                            text: Value::Array(vec![
-                                json!("🎬 "),
-                                json!({
-                                    "type": "url",
-                                    "text": cap,
-                                    "url": url,
-                                }),
-                            ]),
-                        };
-                    }
-                }
-                RichBlock::Audio { audio, caption } => {
-                    let url = audio
-                        .get("media")
-                        .and_then(Value::as_str)
-                        .or_else(|| audio.as_str())
-                        .unwrap_or("");
-                    if url.starts_with("http://") || url.starts_with("https://") {
-                        let cap = caption
-                            .as_ref()
-                            .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| "Putar Audio".to_string());
-                        *block = RichBlock::Paragraph {
-                            text: Value::Array(vec![
-                                json!("🎵 "),
-                                json!({
-                                    "type": "url",
-                                    "text": cap,
-                                    "url": url,
-                                }),
-                            ]),
-                        };
-                    }
-                }
-                RichBlock::Animation { animation, caption } => {
-                    let url = animation
-                        .get("media")
-                        .and_then(Value::as_str)
-                        .or_else(|| animation.as_str())
-                        .unwrap_or("");
-                    if url.starts_with("http://") || url.starts_with("https://") {
-                        let cap = caption
-                            .as_ref()
-                            .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| "Animasi".to_string());
-                        *block = RichBlock::Paragraph {
-                            text: Value::Array(vec![
-                                json!("🎞️ "),
-                                json!({
-                                    "type": "url",
-                                    "text": cap,
-                                    "url": url,
-                                }),
-                            ]),
-                        };
-                    }
-                }
-                RichBlock::Document { document, caption } => {
-                    let url = document
-                        .get("media")
-                        .and_then(Value::as_str)
-                        .or_else(|| document.as_str())
-                        .unwrap_or("");
-                    if url.starts_with("http://") || url.starts_with("https://") {
-                        let cap = caption
-                            .as_ref()
-                            .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| "Dokumen".to_string());
-                        *block = RichBlock::Paragraph {
-                            text: Value::Array(vec![
-                                json!("📄 "),
-                                json!({
-                                    "type": "url",
-                                    "text": cap,
-                                    "url": url,
-                                }),
-                            ]),
-                        };
-                    }
-                }
-                RichBlock::Collage {
-                    blocks: items,
-                    caption,
-                } => {
-                    let cap_str = caption
-                        .as_ref()
-                        .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "Galeri Foto".to_string());
-                    let mut text_parts = vec![json!(format!("🖼️ [{cap_str}]: "))];
-                    let mut count = 0;
-                    for item in items.iter() {
-                        let sub_url = item
-                            .get("photo")
-                            .and_then(|p| p.get("media"))
-                            .and_then(Value::as_str)
-                            .or_else(|| item.get("media").and_then(Value::as_str))
-                            .unwrap_or("");
-                        if !sub_url.is_empty() {
-                            if count > 0 {
-                                text_parts.push(json!(" • "));
-                            }
-                            count += 1;
-                            text_parts.push(json!({
-                                "type": "url",
-                                "text": format!("Foto #{count}"),
-                                "url": sub_url,
-                            }));
-                        }
-                    }
-                    *block = RichBlock::Paragraph {
-                        text: Value::Array(text_parts),
-                    };
-                }
-                RichBlock::Slideshow {
-                    blocks: items,
-                    caption,
-                } => {
-                    let cap_str = caption
-                        .as_ref()
-                        .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "Slideshow".to_string());
-                    let mut text_parts = vec![json!(format!("🖼️ [{cap_str}]: "))];
-                    let mut count = 0;
-                    for item in items.iter() {
-                        let sub_url = item
-                            .get("photo")
-                            .and_then(|p| p.get("media"))
-                            .and_then(Value::as_str)
-                            .or_else(|| item.get("media").and_then(Value::as_str))
-                            .unwrap_or("");
-                        if !sub_url.is_empty() {
-                            if count > 0 {
-                                text_parts.push(json!(" • "));
-                            }
-                            count += 1;
-                            text_parts.push(json!({
-                                "type": "url",
-                                "text": format!("Slide #{count}"),
-                                "url": sub_url,
-                            }));
-                        }
-                    }
-                    *block = RichBlock::Paragraph {
-                        text: Value::Array(text_parts),
-                    };
-                }
-                _ => {}
+        let mut blocks = Vec::with_capacity(converted.blocks.len());
+        for block in std::mem::take(&mut converted.blocks) {
+            match self.media_block_as_links(&block, &linked) {
+                Some(replacement) => blocks.extend(replacement),
+                None => blocks.push(block),
             }
         }
+        converted.blocks = blocks;
         converted
+    }
+
+    /// The blocks that replace `block` when some of its media is linked, or
+    /// `None` when it stays as it is.
+    fn media_block_as_links(
+        &self,
+        block: &RichBlock,
+        linked: &dyn Fn(&str) -> bool,
+    ) -> Option<Vec<RichBlock>> {
+        let (media, caption, emoji, label) = match block {
+            RichBlock::Photo { photo, caption } => (photo, caption, "🖼️ ", "Lihat Foto"),
+            RichBlock::Video { video, caption } => (video, caption, "🎬 ", "Tonton Video"),
+            RichBlock::Audio { audio, caption } => (audio, caption, "🎵 ", "Putar Audio"),
+            RichBlock::Animation { animation, caption } => (animation, caption, "🎞️ ", "Animasi"),
+            RichBlock::Document { document, caption } => (document, caption, "📄 ", "Dokumen"),
+            RichBlock::Collage { blocks, caption } => {
+                return self.gallery_as_links(blocks, caption, false, linked);
+            }
+            RichBlock::Slideshow { blocks, caption } => {
+                return self.gallery_as_links(blocks, caption, true, linked);
+            }
+            _ => return None,
+        };
+        let url = media_address(media);
+        if !linked(url) {
+            return None;
+        }
+        let text = Some(self.rich_caption_to_plain(caption))
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| label.to_string());
+        Some(vec![RichBlock::Paragraph {
+            text: Value::Array(vec![
+                json!(emoji),
+                json!({
+                    "type": "url",
+                    "text": text,
+                    "url": url,
+                }),
+            ]),
+        }])
+    }
+
+    fn gallery_as_links(
+        &self,
+        items: &[Value],
+        caption: &Option<RichBlockCaption>,
+        is_slideshow: bool,
+        linked: &dyn Fn(&str) -> bool,
+    ) -> Option<Vec<RichBlock>> {
+        let (links, kept): (Vec<_>, Vec<_>) = items
+            .iter()
+            .enumerate()
+            .partition(|(_, item)| linked(gallery_item_address(item)));
+        if links.is_empty() {
+            return None;
+        }
+        let heading = if kept.is_empty() {
+            let title = Some(self.rich_caption_to_plain(caption))
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| {
+                    if is_slideshow {
+                        "Slideshow".to_string()
+                    } else {
+                        "Galeri Foto".to_string()
+                    }
+                });
+            format!("🖼️ [{title}]: ")
+        } else {
+            "🖼️ Lainnya: ".to_string()
+        };
+        let mut text = vec![json!(heading)];
+        for (position, (index, item)) in links.iter().enumerate() {
+            if position > 0 {
+                text.push(json!(" • "));
+            }
+            let noun = if is_slideshow {
+                "Slide"
+            } else if item.get("video").is_some() {
+                "Video"
+            } else {
+                "Foto"
+            };
+            text.push(json!({
+                "type": "url",
+                "text": format!("{noun} #{}", index + 1),
+                "url": gallery_item_address(item),
+            }));
+        }
+
+        let mut blocks = Vec::with_capacity(2);
+        match kept.as_slice() {
+            [] => {}
+            [(_, item)] => blocks.push(gallery_item_as_block(item, caption.clone())),
+            _ => {
+                let items = kept.iter().map(|(_, item)| (*item).clone()).collect();
+                blocks.push(if is_slideshow {
+                    RichBlock::Slideshow {
+                        blocks: items,
+                        caption: caption.clone(),
+                    }
+                } else {
+                    RichBlock::Collage {
+                        blocks: items,
+                        caption: caption.clone(),
+                    }
+                });
+            }
+        }
+        blocks.push(RichBlock::Paragraph {
+            text: Value::Array(text),
+        });
+        Some(blocks)
     }
 
     // HTML Rendering Helpers & Chunking
@@ -387,6 +328,43 @@ impl TelegramBotClient {
         }
 
         chunks
+    }
+}
+
+/// Whether `url` is an address Telegram (or a browser) can fetch, as opposed
+/// to an upload reference (`attach://`) or a file id.
+pub(crate) fn is_remote_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// The address of a media object: its `media` field, or the value itself
+/// when it is a plain string.
+fn media_address(media: &Value) -> &str {
+    media
+        .get("media")
+        .and_then(Value::as_str)
+        .or_else(|| media.as_str())
+        .unwrap_or("")
+}
+
+/// The address of one collage or slideshow item.
+fn gallery_item_address(item: &Value) -> &str {
+    item.get("photo")
+        .or_else(|| item.get("video"))
+        .map_or_else(|| media_address(item), media_address)
+}
+
+/// A lone collage or slideshow item as a photo or video block of its own.
+fn gallery_item_as_block(item: &Value, caption: Option<RichBlockCaption>) -> RichBlock {
+    if let Some(video) = item.get("video") {
+        return RichBlock::Video {
+            video: video.clone(),
+            caption,
+        };
+    }
+    RichBlock::Photo {
+        photo: item.get("photo").cloned().unwrap_or_else(|| item.clone()),
+        caption,
     }
 }
 

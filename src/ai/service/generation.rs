@@ -1,5 +1,6 @@
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{error, warn};
@@ -13,6 +14,10 @@ use super::multimodal::{
     media_data_url, native_audio_input_part, resolved_audio_persistence_mime,
     resolved_runtime_media_mime, select_audio_execution_mode, AudioExecutionMode,
     SpecialistObservationInput,
+};
+use super::tool_round::{
+    follow_up_prompt, has_tool_call_markup, is_quiz_done_reply, live_photo_key, quiz_question_key,
+    run_research_calls, unexecuted_tools_notice, RoundState, ToolResultBudget, MAX_TOOL_ROUNDS,
 };
 use super::{provider_url, AIChatService, ActiveGenerations};
 use crate::ai::capability::model_metadata_key;
@@ -156,6 +161,34 @@ pub(crate) fn bound_tool_result(result: &str) -> String {
     let mut bounded = truncate_chars(result, MAX_TOOL_RESULT_CHARS);
     bounded.push_str("\n\n[Hasil tool dipotong Xiao agar muat di context window model.]");
     bounded
+}
+
+/// Stages a media tag once. Tools stay available after media is staged, so a
+/// repeated call must not put the same photo or file in the answer twice.
+fn stage_media_tag(staged: &mut Vec<String>, tag: String, ready_message: String) -> String {
+    if staged.contains(&tag) {
+        return format!(
+            "Media ini sudah disiapkan sebelumnya ({tag}); jangan panggil ulang tool yang sama."
+        );
+    }
+    staged.push(tag);
+    ready_message
+}
+
+/// Stages a generated file once; an identical repeat is reported instead.
+fn stage_document(staged: &mut Vec<StagedDocument>, document: StagedDocument) -> Option<String> {
+    if let Some(existing) = staged
+        .iter()
+        .find(|doc| doc.filename == document.filename && doc.bytes == document.bytes)
+    {
+        return Some(format!(
+            "Berkas '{}' dengan isi yang sama sudah disiapkan ({}); jangan buat ulang.",
+            existing.filename,
+            existing.markdown_tag()
+        ));
+    }
+    staged.push(document);
+    None
 }
 
 pub(crate) fn push_bounded(target: &mut String, chunk: &str, max_bytes: usize) -> bool {
@@ -1081,9 +1114,25 @@ impl AIChatService {
         let mut has_started_answer = false;
         let mut staged_media_tags: Vec<String> = Vec::new();
         let mut staged_documents: Vec<StagedDocument> = Vec::new();
-        let mut has_executed_multimedia_or_quiz = false;
+        let mut media_staged = false;
+        let mut quizzes_sent = 0usize;
+        let mut quiz_history_summary: Option<String> = None;
+        let mut sent_quiz_questions: HashSet<String> = HashSet::new();
+        let mut sent_live_photos: HashSet<String> = HashSet::new();
+        let mut research_calls = 0usize;
+        // Tool calls the model made that were never run; the user is told.
+        let mut unexecuted_tools: Vec<String> = Vec::new();
+        let mut provider_failed_late = false;
+        let mut tool_budget = ToolResultBudget::new(
+            resolved_capability
+                .context_limit
+                .saturating_sub(reserved_tokens)
+                .saturating_sub(used_history_tokens),
+        );
 
-        for turn in 0..3 {
+        // Rounds 0..MAX_TOOL_ROUNDS may call tools; the last request has none,
+        // so the model always gets a turn to write the answer.
+        for turn in 0..=MAX_TOOL_ROUNDS {
             accumulated_raw.clear();
             accumulated_reasoning.clear();
             let mut accumulated_tool_calls: Vec<PendingToolCall> = Vec::new();
@@ -1092,8 +1141,8 @@ impl AIChatService {
             let mut stream_done = false;
             has_started_answer = false;
 
-            let is_final_turn = turn >= 2;
-            if supports_tools && !has_executed_multimedia_or_quiz && !is_final_turn {
+            let can_run_tools = turn < MAX_TOOL_ROUNDS;
+            if supports_tools && can_run_tools {
                 payload["tools"] = crate::ai::tools::tools_definition_for(guest_mode);
             } else if let Some(obj) = payload.as_object_mut() {
                 obj.remove("tools");
@@ -1177,6 +1226,21 @@ impl AIChatService {
                         }
                     }
                 }
+            }
+
+            // Quizzes, media or files from earlier rounds are already done;
+            // a later provider failure must not throw them away.
+            let has_earlier_output =
+                quizzes_sent > 0 || media_staged || !staged_documents.is_empty();
+            if has_earlier_output
+                && response
+                    .as_ref()
+                    .is_none_or(|resp| !resp.status().is_success())
+            {
+                warn!("Provider failed after earlier tool output; delivering what is ready");
+                accumulated_raw.clear();
+                provider_failed_late = true;
+                break;
             }
 
             let Some(resp) = response else {
@@ -1411,11 +1475,41 @@ impl AIChatService {
                 }
             }
 
-            if turn < 2 && !accumulated_tool_calls.is_empty() && !cancelled {
+            if !can_run_tools && !cancelled {
+                // The model still wanted tools after its last tool round (or
+                // wrote tool markup Xiao could not parse). Say so instead of
+                // silently answering with whatever text preceded the call.
+                if !accumulated_tool_calls.is_empty() {
+                    unexecuted_tools.extend(
+                        accumulated_tool_calls
+                            .iter()
+                            .map(|call| call.name.trim().to_string()),
+                    );
+                } else if has_tool_call_markup(&accumulated_raw) {
+                    unexecuted_tools.push(String::new());
+                }
+            } else if accumulated_tool_calls.is_empty()
+                && !cancelled
+                && has_tool_call_markup(&accumulated_raw)
+            {
+                unexecuted_tools.push(String::new());
+            }
+
+            if can_run_tools && !accumulated_tool_calls.is_empty() && !cancelled {
+                // Searches and page reads of this round run concurrently.
+                let (mut research_results, research_cancelled) = run_research_calls(
+                    &accumulated_tool_calls,
+                    &mut research_calls,
+                    cancel_rx,
+                    sink,
+                )
+                .await;
+                if research_cancelled {
+                    cancelled = true;
+                    break;
+                }
                 let mut tool_results = Vec::new();
-                let mut quiz_sent = false;
-                let mut quiz_history_summary: Option<String> = None;
-                for tc in accumulated_tool_calls.iter() {
+                for (call_index, tc) in accumulated_tool_calls.iter().enumerate() {
                     let name = tc.name.trim();
                     let tool_id = if tc.id.is_empty() {
                         "call_default".to_string()
@@ -1429,99 +1523,82 @@ impl AIChatService {
                         // that calls anything else gets a refusal, never a side
                         // effect in someone else's chat.
                         format!("Tool `{name}` tidak tersedia saat Xiao dipanggil sebagai tamu. Jawab dengan teks saja.")
-                    } else if name == "web_search" {
-                        if let Some(s) = sink {
-                            s.on_action("Searching", Some(ProgressActivity::Searching));
-                        }
-                        let parsed_query = serde_json::from_str::<Value>(&tc.arguments)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("query")
-                                    .and_then(Value::as_str)
-                                    .map(|s| s.to_string())
-                            })
-                            .unwrap_or_else(|| tc.arguments.clone());
-
-                        match race_with_cancel(
-                            cancel_rx,
-                            crate::ai::tools::execute_web_search(&parsed_query),
-                        )
-                        .await
-                        {
-                            Raced::Completed(res) => res,
-                            Raced::Cancelled => {
-                                cancelled = true;
-                                "Pencarian dibatalkan.".to_string()
-                            }
-                        }
-                    } else if name == "fetch_url" {
-                        if let Some(s) = sink {
-                            s.on_action("Fetching", Some(ProgressActivity::Fetching));
-                        }
-                        let parsed_url = serde_json::from_str::<Value>(&tc.arguments)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("url").and_then(Value::as_str).map(|s| s.to_string())
-                            })
-                            .unwrap_or_else(|| tc.arguments.clone());
-
-                        match race_with_cancel(
-                            cancel_rx,
-                            crate::ai::tools::fetch_web_content(&parsed_url),
-                        )
-                        .await
-                        {
-                            Raced::Completed(res) => {
-                                res.unwrap_or_else(|e| format!("Gagal membaca URL: {e}"))
-                            }
-                            Raced::Cancelled => {
-                                cancelled = true;
-                                "Pengambilan web dibatalkan.".to_string()
-                            }
-                        }
+                    } else if let Some(research) =
+                        research_results.get_mut(call_index).and_then(Option::take)
+                    {
+                        research
                     } else if name == "create_quiz" {
                         if let Some(s) = sink {
                             s.on_action("Quiz", Some(ProgressActivity::Quiz));
                         }
-                        let outcome = super::quiz::run_create_quiz(
-                            bot.as_ref(),
-                            chat_id,
-                            reply_to_message_id,
-                            &tc.arguments,
-                        )
-                        .await;
-                        quiz_sent |= outcome.sent;
-                        if let Some(summary) = outcome.history_summary {
-                            match &mut quiz_history_summary {
-                                Some(existing) => {
-                                    existing.push_str("\n\n---\n\n");
-                                    existing.push_str(&summary);
-                                }
-                                None => quiz_history_summary = Some(summary),
-                            }
-                        }
-                        outcome.result
-                    } else if name == "send_live_photo" {
-                        if let Some(s) = sink {
-                            s.on_action("Live photo", Some(ProgressActivity::Drawing));
-                        }
-                        // Downloads and the upload can take a while, so Stop
-                        // and shutdown must be able to interrupt them.
-                        match race_with_cancel(
-                            cancel_rx,
-                            super::live_photo::run_send_live_photo(
+                        let question_key = quiz_question_key(&tc.arguments);
+                        if question_key
+                            .as_ref()
+                            .is_some_and(|key| sent_quiz_questions.contains(key))
+                        {
+                            "Kuis dengan pertanyaan ini sudah terkirim; jangan kirim ulang."
+                                .to_string()
+                        } else {
+                            let outcome = super::quiz::run_create_quiz(
                                 bot.as_ref(),
                                 chat_id,
                                 reply_to_message_id,
                                 &tc.arguments,
-                            ),
-                        )
-                        .await
+                            )
+                            .await;
+                            if outcome.sent {
+                                quizzes_sent += 1;
+                                if let Some(key) = question_key {
+                                    sent_quiz_questions.insert(key);
+                                }
+                            }
+                            if let Some(summary) = outcome.history_summary {
+                                match &mut quiz_history_summary {
+                                    Some(existing) => {
+                                        existing.push_str("\n\n---\n\n");
+                                        existing.push_str(&summary);
+                                    }
+                                    None => quiz_history_summary = Some(summary),
+                                }
+                            }
+                            outcome.result
+                        }
+                    } else if name == "send_live_photo" {
+                        if let Some(s) = sink {
+                            s.on_action("Live photo", Some(ProgressActivity::Drawing));
+                        }
+                        let photo_key = live_photo_key(&tc.arguments);
+                        if photo_key
+                            .as_ref()
+                            .is_some_and(|key| sent_live_photos.contains(key))
                         {
-                            Raced::Completed(res) => res,
-                            Raced::Cancelled => {
-                                cancelled = true;
-                                "Pengiriman live photo dibatalkan.".to_string()
+                            "Live photo ini sudah terkirim; jangan kirim ulang.".to_string()
+                        } else {
+                            // Downloads and the upload can take a while, so Stop
+                            // and shutdown must be able to interrupt them.
+                            match race_with_cancel(
+                                cancel_rx,
+                                super::live_photo::run_send_live_photo(
+                                    bot.as_ref(),
+                                    chat_id,
+                                    reply_to_message_id,
+                                    &tc.arguments,
+                                ),
+                            )
+                            .await
+                            {
+                                Raced::Completed(res) => {
+                                    if res.starts_with(super::live_photo::LIVE_PHOTO_SENT) {
+                                        if let Some(key) = photo_key {
+                                            sent_live_photos.insert(key);
+                                        }
+                                    }
+                                    res
+                                }
+                                Raced::Cancelled => {
+                                    cancelled = true;
+                                    "Pengiriman live photo dibatalkan.".to_string()
+                                }
                             }
                         }
                     } else if name == "send_photo" {
@@ -1543,8 +1620,8 @@ impl AIChatService {
                                         } else {
                                             format!(r#"<img src="{}"/>"#, args.url)
                                         };
-                                        staged_media_tags.push(tag.clone());
-                                        format!("Foto telah disiapkan. Tag media: {tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah-tengah teks penjelasan pada posisi yang paling relevan (misal di bawah heading atau di antara paragraf), atau biarkan Xiao menampilkannya secara otomatis. Sekarang berikan penjelasan naratif yang lengkap dan jelas.")
+                                        let ready = format!("Foto telah disiapkan. Tag media: {tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah-tengah teks penjelasan pada posisi yang paling relevan (misal di bawah heading atau di antara paragraf), atau biarkan Xiao menampilkannya secara otomatis.");
+                                        stage_media_tag(&mut staged_media_tags, tag, ready)
                                     }
                                     Err(validation_err) => {
                                         format!("Validasi foto gagal: {validation_err}")
@@ -1583,8 +1660,8 @@ impl AIChatService {
                                         let collage_tag = format!(
                                             r#"<tg-collage{caption_attr}>{img_tags}</tg-collage>"#
                                         );
-                                        staged_media_tags.push(collage_tag.clone());
-                                        format!("Album kolase foto telah disiapkan. Tag media: {collage_tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah-tengah penjelasan pada bagian yang paling sesuai. Sekarang berikan penjelasan naratif yang lengkap dan jelas.")
+                                        let ready = format!("Album kolase foto telah disiapkan. Tag media: {collage_tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah-tengah penjelasan pada bagian yang paling sesuai.");
+                                        stage_media_tag(&mut staged_media_tags, collage_tag, ready)
                                     }
                                     Err(validation_err) => {
                                         format!("Validasi kolase foto gagal: {validation_err}")
@@ -1623,8 +1700,12 @@ impl AIChatService {
                                         let slideshow_tag = format!(
                                             r#"<tg-slideshow{caption_attr}>{img_tags}</tg-slideshow>"#
                                         );
-                                        staged_media_tags.push(slideshow_tag.clone());
-                                        format!("Tayangan slide interaktif telah disiapkan. Tag media: {slideshow_tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah-tengah penjelasan pada bagian yang paling sesuai. Sekarang berikan penjelasan naratif yang lengkap dan jelas.")
+                                        let ready = format!("Tayangan slide interaktif telah disiapkan. Tag media: {slideshow_tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah-tengah penjelasan pada bagian yang paling sesuai.");
+                                        stage_media_tag(
+                                            &mut staged_media_tags,
+                                            slideshow_tag,
+                                            ready,
+                                        )
                                     }
                                     Err(validation_err) => {
                                         format!("Validasi tayangan slide gagal: {validation_err}")
@@ -1671,8 +1752,8 @@ impl AIChatService {
                                         };
                                         let audio_tag =
                                             format!(r#"<audio src="{}"{extra}/>"#, args.url);
-                                        staged_media_tags.push(audio_tag.clone());
-                                        format!("Audio telah disiapkan. Tag media: {audio_tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah penjelasan teks pada posisi yang relevan. Sekarang berikan penjelasan naratif yang lengkap dan jelas.")
+                                        let ready = format!("Audio telah disiapkan. Tag media: {audio_tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah penjelasan teks pada posisi yang relevan.");
+                                        stage_media_tag(&mut staged_media_tags, audio_tag, ready)
                                     }
                                     Err(validation_err) => {
                                         format!("Validasi audio gagal: {validation_err}")
@@ -1696,8 +1777,8 @@ impl AIChatService {
                                         let title =
                                             args.caption.as_deref().unwrap_or("Pesan Suara");
                                         let voice_tag = format!("[rekaman: {title}]({})", args.url);
-                                        staged_media_tags.push(voice_tag.clone());
-                                        format!("Pesan suara telah disiapkan. Tag media: {voice_tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah penjelasan teks pada posisi yang relevan. Sekarang berikan penjelasan naratif yang lengkap dan jelas.")
+                                        let ready = format!("Pesan suara telah disiapkan. Tag media: {voice_tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah penjelasan teks pada posisi yang relevan.");
+                                        stage_media_tag(&mut staged_media_tags, voice_tag, ready)
                                     }
                                     Err(validation_err) => {
                                         format!("Validasi pesan suara gagal: {validation_err}")
@@ -1728,8 +1809,8 @@ impl AIChatService {
                                             r#"<tg-map lat="{}" lon="{}" zoom="13"{title_attr}/>"#,
                                             args.latitude, args.longitude
                                         );
-                                        staged_media_tags.push(map_tag.clone());
-                                        format!("Peta lokasi telah disiapkan. Tag media: {map_tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah penjelasan teks pada posisi yang relevan. Sekarang berikan penjelasan naratif yang lengkap dan jelas.")
+                                        let ready = format!("Peta lokasi telah disiapkan. Tag media: {map_tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah penjelasan teks pada posisi yang relevan.");
+                                        stage_media_tag(&mut staged_media_tags, map_tag, ready)
                                     }
                                     Err(validation_err) => {
                                         format!("Validasi lokasi gagal: {validation_err}")
@@ -1755,8 +1836,8 @@ impl AIChatService {
                                             args.file_name.as_deref().unwrap_or("Dokumen");
                                         let doc_tag =
                                             format!("[document: {file_name}]({})", args.url);
-                                        staged_media_tags.push(doc_tag.clone());
-                                        format!("Dokumen telah disiapkan. Tag media: {doc_tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah penjelasan teks pada posisi yang relevan. Sekarang berikan penjelasan naratif yang lengkap dan jelas.")
+                                        let ready = format!("Dokumen telah disiapkan. Tag media: {doc_tag}\nAnda DAPAT menyematkan tag media ini langsung di tengah penjelasan teks pada posisi yang relevan.");
+                                        stage_media_tag(&mut staged_media_tags, doc_tag, ready)
                                     }
                                     Err(validation_err) => {
                                         format!("Validasi dokumen gagal: {validation_err}")
@@ -1793,14 +1874,11 @@ impl AIChatService {
                                             final_filename,
                                         );
                                         let doc_tag = staged_doc.markdown_tag();
-                                        staged_documents.push(staged_doc);
-
-                                        format!(
-                                            "Dokumen '{}' telah berhasil disiapkan di memori. Tag media Telegram: {}\nWAJIB sematkan tag media {} ini langsung di dalam teks jawaban/penjelasan Anda pada posisi yang paling relevan. Berikan penjelasan naratif yang lengkap dan jelas mengenai dokumen ini kepada pengguna.",
-                                            staged_documents.last().map(|d| d.filename.as_str()).unwrap_or(""),
-                                            doc_tag,
-                                            doc_tag
-                                        )
+                                        let doc_filename = staged_doc.filename.clone();
+                                        stage_document(&mut staged_documents, staged_doc)
+                                            .unwrap_or_else(|| format!(
+                                                "Dokumen '{doc_filename}' telah berhasil disiapkan di memori. Tag media Telegram: {doc_tag}\nWAJIB sematkan tag media {doc_tag} ini langsung di dalam teks jawaban/penjelasan Anda pada posisi yang paling relevan, dan jelaskan isi dokumen ini kepada pengguna."
+                                            ))
                                     }
                                     Err(validation_err) => {
                                         format!("Validasi dokumen gagal: {validation_err}")
@@ -1832,15 +1910,12 @@ impl AIChatService {
                                                     args.filename,
                                                 );
                                                 let doc_tag = staged_doc.markdown_tag();
-                                                staged_documents.push(staged_doc);
-
-                                                format!(
-                                                    "Arsip ZIP '{}' yang memuat {} file telah berhasil dibuat di memori. Tag media Telegram: {}\nWAJIB sematkan tag media {} ini langsung di dalam teks jawaban/penjelasan Anda pada posisi yang paling relevan. Jelaskan daftar berkas yang ada di dalamnya secara rapi kepada pengguna.",
-                                                    staged_documents.last().map(|d| d.filename.as_str()).unwrap_or(""),
-                                                    args.files.len(),
-                                                    doc_tag,
-                                                    doc_tag
-                                                )
+                                                let zip_filename = staged_doc.filename.clone();
+                                                let file_count = args.files.len();
+                                                stage_document(&mut staged_documents, staged_doc)
+                                                    .unwrap_or_else(|| format!(
+                                                        "Arsip ZIP '{zip_filename}' yang memuat {file_count} file telah berhasil dibuat di memori. Tag media Telegram: {doc_tag}\nWAJIB sematkan tag media {doc_tag} ini langsung di dalam teks jawaban/penjelasan Anda pada posisi yang paling relevan. Jelaskan daftar berkas yang ada di dalamnya secara rapi kepada pengguna."
+                                                    ))
                                             }
                                             Err(zip_err) => {
                                                 format!("Gagal membuat berkas ZIP arsip: {zip_err}")
@@ -1869,74 +1944,6 @@ impl AIChatService {
                     break;
                 }
 
-                if quiz_sent {
-                    let attachment_refs = persist_runtime_attachments(
-                        chat_id,
-                        thread_id,
-                        document_images.as_deref(),
-                        image_bytes.as_deref(),
-                        mime_type,
-                        audio_bytes.as_deref(),
-                        audio_mime,
-                        doc_name,
-                        video_bytes.as_deref(),
-                        video_mime,
-                    )
-                    .await;
-
-                    let user_message_content = encode_user_content(
-                        canonical_persisted_prompt(
-                            canonical_history_prompt.as_deref(),
-                            &clean_prompt,
-                        ),
-                        attachment_refs,
-                    );
-                    let user_content_str =
-                        serialize_user_content(&user_message_content, &clean_prompt);
-                    let assistant_content = quiz_history_summary
-                        .unwrap_or_else(|| "[Kuis Native Telegram]".to_string());
-                    if !save_scoped_turn_async(
-                        chat_id,
-                        thread_id,
-                        user_id,
-                        user_content_str,
-                        assistant_content.clone(),
-                    )
-                    .await
-                    {
-                        warn!("Quiz turn was not persisted to history");
-                    }
-
-                    let service_clone = self.clone();
-                    let prompt_for_bg = clean_prompt.clone();
-                    tokio::spawn(async move {
-                        service_clone
-                            .process_background_memory_turn(
-                                user_id,
-                                chat_id,
-                                thread_id,
-                                &prompt_for_bg,
-                                &assistant_content,
-                            )
-                            .await;
-                    });
-
-                    if let Some(s) = sink {
-                        s.on_complete();
-                    }
-
-                    return (
-                        if !accumulated_reasoning.is_empty() {
-                            Some(accumulated_reasoning.trim().to_string())
-                        } else {
-                            None
-                        },
-                        "[QUIZ_SENT]".to_string(),
-                        Vec::new(),
-                        false,
-                    );
-                }
-
                 let tool_calls_json = tool_results
                     .iter()
                     .map(|(id, name, args, _)| {
@@ -1961,50 +1968,29 @@ impl AIChatService {
                     messages.push(json!({
                         "role": "tool",
                         "tool_call_id": id,
-                        "content": bound_tool_result(res)
+                        "content": tool_budget.bound(res)
                     }));
                 }
 
-                let has_quiz_or_media = tool_results.iter().any(|(_, name, _, res)| {
-                    name == "create_quiz"
-                        // A failed live photo must leave the model free to
-                        // retry with other URLs.
-                        || (name == "send_live_photo"
-                            && res.starts_with(super::live_photo::LIVE_PHOTO_SENT))
-                        || name == "send_photo"
-                        || name == "send_collage"
-                        || name == "send_slideshow"
-                        || name == "send_audio"
-                        || name == "send_voice"
-                        || name == "send_location"
-                        || name == "send_document"
-                        || name == "create_document"
-                });
-                if has_quiz_or_media {
-                    has_executed_multimedia_or_quiz = true;
-                }
+                media_staged |= !staged_media_tags.is_empty()
+                    || !staged_documents.is_empty()
+                    || !sent_live_photos.is_empty();
 
-                let follow_up_prompt = if has_executed_multimedia_or_quiz {
-                    "Berdasarkan media yang telah disiapkan di atas, berikan penjelasan naratif yang kaya, informatif, dan lengkap untuk menjawab pertanyaan pengguna."
-                } else if turn >= 1 {
-                    "Berdasarkan seluruh hasil pencarian dan informasi di atas, berikan penjelasan naratif yang lengkap, informatif, dan jelas untuk menjawab pertanyaan pengguna. Jika ada tautan foto/gambar atau sumber terverifikasi, sertakan tautan tersebut."
+                let rounds_left = if supports_tools {
+                    MAX_TOOL_ROUNDS.saturating_sub(turn + 1)
                 } else {
-                    "Berdasarkan hasil pencarian dan informasi di atas, jika pengguna meminta foto/gambar/logo dan Anda menemukan URL gambar raster terverifikasi (.jpg, .png, .webp) di bagian [URL Foto/Gambar Raster Terverifikasi], Anda WAJIB memanggil tool multimedia resmi (seperti send_photo untuk satu gambar, atau send_collage / send_slideshow untuk beberapa gambar) menggunakan URL tersebut agar media tampil langsung di gelembung pesan Telegram. Jika tidak ada URL gambar raster yang valid, berikan penjelasan naratif yang lengkap dan jelas beserta tautan sumber yang relevan."
+                    0
                 };
                 messages.push(json!({
                     "role": "user",
-                    "content": follow_up_prompt
+                    "content": follow_up_prompt(&RoundState {
+                        rounds_left,
+                        guest_mode,
+                        media_staged,
+                        quizzes_sent,
+                    })
                 }));
-
                 payload["messages"] = json!(messages);
-                let next_is_final = turn >= 1;
-                if has_executed_multimedia_or_quiz || next_is_final {
-                    if let Some(obj) = payload.as_object_mut() {
-                        obj.remove("tools");
-                    }
-                } else if supports_tools {
-                    payload["tools"] = crate::ai::tools::tools_definition_for(guest_mode);
-                }
 
                 if let Some(s) = sink {
                     s.on_action("Summarizing", Some(ProgressActivity::Summarizing));
@@ -2024,6 +2010,11 @@ impl AIChatService {
         } else {
             extracted_thinking
         };
+        // After native quizzes the model is asked to reply only with a short
+        // confirmation; that reply is not an answer to show.
+        if quizzes_sent > 0 && is_quiz_done_reply(&answer_text) {
+            answer_text.clear();
+        }
 
         if !staged_documents.is_empty() {
             let mut missing_tags = Vec::new();
@@ -2091,6 +2082,52 @@ impl AIChatService {
             }
         }
 
+        if !cancelled {
+            let mut notices = Vec::new();
+            if !unexecuted_tools.is_empty() {
+                notices.push(unexecuted_tools_notice(&unexecuted_tools));
+            }
+            if provider_failed_late {
+                notices.push("_⚠️ Provider AI berhenti merespons sebelum jawaban selesai; hasil yang sudah siap tetap dikirim. Balas \"lanjutkan\" untuk meneruskan._".to_string());
+            }
+            for notice in notices {
+                if answer_text.trim().is_empty() {
+                    answer_text = notice;
+                } else {
+                    answer_text.push_str("\n\n");
+                    answer_text.push_str(&notice);
+                }
+            }
+        }
+
+        let turn_record = TurnRecord {
+            chat_id,
+            thread_id,
+            user_id,
+            document_images: document_images.as_deref(),
+            image_bytes: image_bytes.as_deref(),
+            mime_type,
+            audio_bytes: audio_bytes.as_deref(),
+            audio_mime,
+            doc_name,
+            video_bytes: video_bytes.as_deref(),
+            video_mime,
+            canonical_prompt: canonical_history_prompt.as_deref(),
+            clean_prompt: &clean_prompt,
+        };
+
+        if quizzes_sent > 0 && !cancelled && answer_text.trim().is_empty() {
+            // The native quizzes are the whole answer.
+            let summary = quiz_history_summary
+                .take()
+                .unwrap_or_else(|| "[Kuis Native Telegram]".to_string());
+            self.record_turn(&turn_record, summary).await;
+            if let Some(s) = sink {
+                s.on_complete();
+            }
+            return (thinking_text, "[QUIZ_SENT]".to_string(), Vec::new(), false);
+        }
+
         if cancelled {
             if answer_text.trim().is_empty() {
                 answer_text = GENERATION_STOPPED_NOTICE.to_string();
@@ -2149,7 +2186,11 @@ impl AIChatService {
         // Cancelled/interrupted output is presentation-only. Do not make a
         // partial answer canonical history: retry/follow-up context must only
         // see completed assistant turns.
+        // Quizzes that already reached the chat are still recorded.
         if cancelled || stream_interrupted {
+            if let Some(summary) = quiz_history_summary.filter(|_| !guest_mode) {
+                self.record_turn(&turn_record, summary).await;
+            }
             return (thinking_text, answer_text, staged_documents, cancelled);
         }
 
@@ -2159,53 +2200,78 @@ impl AIChatService {
             return (thinking_text, answer_text, staged_documents, cancelled);
         }
 
-        // Persist runtime attachments to storage
+        let assistant_content = match quiz_history_summary {
+            Some(summary) => format!("{summary}\n\n---\n\n{answer_text}"),
+            None => answer_text.clone(),
+        };
+        self.record_turn(&turn_record, assistant_content).await;
+
+        (thinking_text, answer_text, staged_documents, cancelled)
+    }
+
+    /// Stores the exchange (with its attachments) in history and starts
+    /// background memory curation for it.
+    async fn record_turn(&self, record: &TurnRecord<'_>, assistant_content: String) {
         let attachment_refs = persist_runtime_attachments(
-            chat_id,
-            thread_id,
-            document_images.as_deref(),
-            image_bytes.as_deref(),
-            mime_type,
-            audio_bytes.as_deref(),
-            audio_mime,
-            doc_name,
-            video_bytes.as_deref(),
-            video_mime,
+            record.chat_id,
+            record.thread_id,
+            record.document_images,
+            record.image_bytes,
+            record.mime_type,
+            record.audio_bytes,
+            record.audio_mime,
+            record.doc_name,
+            record.video_bytes,
+            record.video_mime,
         )
         .await;
-
         let user_message_content = encode_user_content(
-            canonical_persisted_prompt(canonical_history_prompt.as_deref(), &clean_prompt),
-            attachment_refs.clone(),
+            canonical_persisted_prompt(record.canonical_prompt, record.clean_prompt),
+            attachment_refs,
         );
-        let user_content_str = serialize_user_content(&user_message_content, &clean_prompt);
+        let user_content_str = serialize_user_content(&user_message_content, record.clean_prompt);
         if !save_scoped_turn_async(
-            chat_id,
-            thread_id,
-            user_id,
+            record.chat_id,
+            record.thread_id,
+            record.user_id,
             user_content_str,
-            answer_text.clone(),
+            assistant_content.clone(),
         )
         .await
         {
             warn!("Conversation turn was not persisted to history");
         }
 
-        let service_clone = self.clone();
-        let prompt_for_bg = clean_prompt.clone();
-        let answer_for_bg = answer_text.clone();
-        tokio::spawn(async move {
-            service_clone
+        let service = self.clone();
+        let prompt = record.clean_prompt.to_string();
+        let (user_id, chat_id, thread_id) = (record.user_id, record.chat_id, record.thread_id);
+        self.background_tasks.spawn(async move {
+            service
                 .process_background_memory_turn(
                     user_id,
                     chat_id,
                     thread_id,
-                    &prompt_for_bg,
-                    &answer_for_bg,
+                    &prompt,
+                    &assistant_content,
                 )
                 .await;
         });
-
-        (thinking_text, answer_text, staged_documents, cancelled)
     }
+}
+
+/// What [`AIChatService::record_turn`] stores for one exchange.
+struct TurnRecord<'a> {
+    chat_id: i64,
+    thread_id: i64,
+    user_id: i64,
+    document_images: Option<&'a [Vec<u8>]>,
+    image_bytes: Option<&'a [u8]>,
+    mime_type: Option<&'a str>,
+    audio_bytes: Option<&'a [u8]>,
+    audio_mime: Option<&'a str>,
+    doc_name: Option<&'a str>,
+    video_bytes: Option<&'a [u8]>,
+    video_mime: Option<&'a str>,
+    canonical_prompt: Option<&'a str>,
+    clean_prompt: &'a str,
 }

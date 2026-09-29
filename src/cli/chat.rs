@@ -1,6 +1,7 @@
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::ai::service::{GenerationInput, ModelRole};
 use crate::ai::AIChatService;
@@ -108,6 +109,7 @@ pub(crate) async fn run_cli_chat(ai_service: &AIChatService, initial_prompt: Opt
     if let Some(prompt) = initial_prompt.filter(|p| !p.trim().is_empty()) {
         let thread_id = active_session_thread(ai_service, user_id).await;
         execute_cli_chat_turn(ai_service, user_id, thread_id, &prompt, &model_name, false).await;
+        wait_for_background_work(ai_service).await;
         return;
     }
 
@@ -363,6 +365,24 @@ pub(crate) async fn run_cli_chat(ai_service: &AIChatService, initial_prompt: Opt
 
         let thread_id = active_session_thread(ai_service, user_id).await;
         execute_cli_chat_turn(ai_service, user_id, thread_id, trimmed, &model_name, true).await;
+    }
+    wait_for_background_work(ai_service).await;
+}
+
+/// How long the CLI waits on exit for memory curation of the last answers.
+const BACKGROUND_WORK_GRACE: Duration = Duration::from_secs(30);
+
+/// Lets memory curation started by the last answers finish before the
+/// process exits; the runtime would otherwise drop it half way. Bounded, so
+/// a slow curator model cannot hold the terminal.
+async fn wait_for_background_work(ai_service: &AIChatService) {
+    let tasks = &ai_service.background_tasks;
+    if tasks.wait_idle(Duration::from_millis(200)).await {
+        return;
+    }
+    println!("  \x1b[38;5;244m◌ Updating long-term memory…\x1b[0m");
+    if !tasks.wait_idle(BACKGROUND_WORK_GRACE).await {
+        println!("  \x1b[38;5;244mMemory update did not finish in time and was skipped.\x1b[0m");
     }
 }
 

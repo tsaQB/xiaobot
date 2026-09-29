@@ -203,3 +203,77 @@ async fn media_download_refuses_private_targets_before_any_request() {
         );
     }
 }
+
+fn collage_item(media: &str) -> Value {
+    serde_json::json!({"type": "photo", "photo": {"type": "photo", "media": media}})
+}
+
+/// Only the selected remote pictures of a collage become links; uploads and
+/// file ids stay in the collage, since neither is an address anyone can open.
+#[test]
+fn convert_media_to_rich_links_links_only_selected_gallery_items() {
+    let client = TelegramBotClient;
+    let msg = InputRichMessage::new(vec![RichBlock::Collage {
+        blocks: vec![
+            collage_item("attach://file_0"),
+            collage_item("https://example.com/1.jpg"),
+            collage_item("https://example.com/2.jpg"),
+            collage_item("AgACAgPHOTOID"),
+        ],
+        caption: Some(RichBlockCaption::new(Value::String("Album".to_string()))),
+    }]);
+
+    let converted = client.convert_media_to_rich_links(&msg, &|url| url.ends_with("/1.jpg"));
+    assert_eq!(converted.blocks.len(), 2);
+    let RichBlock::Collage { blocks, caption } = &converted.blocks[0] else {
+        panic!("the pictures that still load stay a collage");
+    };
+    assert_eq!(blocks.len(), 3);
+    assert!(caption.is_some(), "the collage keeps its caption");
+    let links = serde_json::to_string(&converted.blocks[1]).expect("serialize links paragraph");
+    assert!(links.contains("🖼️ Lainnya: "), "{links}");
+    assert!(links.contains("Foto #2") && links.contains("https://example.com/1.jpg"));
+    assert!(
+        !links.contains("2.jpg"),
+        "unselected pictures are not linked"
+    );
+
+    let converted = client.convert_remote_media_to_rich_links(&msg);
+    let RichBlock::Collage { blocks, .. } = &converted.blocks[0] else {
+        panic!("uploads and file ids stay a collage");
+    };
+    assert_eq!(blocks.len(), 2);
+    let links = serde_json::to_string(&converted.blocks[1]).expect("serialize links paragraph");
+    assert!(
+        links.contains("Foto #2") && links.contains("Foto #3"),
+        "{links}"
+    );
+    assert!(!links.contains("attach://") && !links.contains("AgACAgPHOTOID"));
+}
+
+/// A gallery left with one picture becomes a single photo block.
+#[test]
+fn convert_media_to_rich_links_turns_lone_gallery_item_into_a_photo() {
+    let client = TelegramBotClient;
+    let msg = InputRichMessage::new(vec![RichBlock::Slideshow {
+        blocks: vec![
+            collage_item("attach://file_0"),
+            collage_item("https://example.com/1.jpg"),
+        ],
+        caption: None,
+    }]);
+    let converted = client.convert_remote_media_to_rich_links(&msg);
+    assert_eq!(converted.blocks.len(), 2);
+    let RichBlock::Photo { photo, .. } = &converted.blocks[0] else {
+        panic!("a lone slide becomes a photo block");
+    };
+    assert_eq!(photo["media"], "attach://file_0");
+    let links = serde_json::to_string(&converted.blocks[1]).expect("serialize links paragraph");
+    assert!(links.contains("Slide #2"), "{links}");
+
+    let untouched = client.convert_media_to_rich_links(&msg, &|_| false);
+    assert_eq!(
+        untouched.blocks, msg.blocks,
+        "nothing selected, nothing changed"
+    );
+}

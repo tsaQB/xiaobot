@@ -1,5 +1,48 @@
 use super::*;
 
+/// Final reply of a model that has sent every requested quiz.
+const QUIZ_DONE_SSE: &str =
+    "data: {\"choices\":[{\"delta\":{\"content\":\"SELESAI\"}}]}\n\ndata: [DONE]\n\n";
+
+/// Accepts one provider request and answers it with `sse`.
+async fn serve_one_sse(listener: &tokio::net::TcpListener, sse: &str) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut socket, _) = listener.accept().await.expect("accept ai request");
+    let mut bytes = Vec::new();
+    loop {
+        let mut buf = [0u8; 4096];
+        let n = socket.read(&mut buf).await.expect("read ai request");
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+        if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&bytes[..end]);
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            if bytes.len() >= end + 4 + length {
+                break;
+            }
+        }
+    }
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}",
+        sse.len()
+    );
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .expect("write sse");
+    let _ = socket.shutdown().await;
+}
+
 #[test]
 fn test_create_quiz_sanitization_and_validation() {
     use crate::ai::tools::CreateQuizArgs;
@@ -176,6 +219,8 @@ async fn test_create_quiz_without_preamble_sends_single_bubble_and_emits_sink() 
             .await
             .expect("write sse");
         let _ = socket.shutdown().await;
+        // Xiao asks once more after a quiz, in case more were requested.
+        serve_one_sse(&ai_listener, QUIZ_DONE_SSE).await;
     });
 
     let bot_client = crate::bot::client::TelegramBotClient::with_base_url(
@@ -392,6 +437,8 @@ async fn test_create_quiz_with_preamble_sends_two_connected_messages() {
             .await
             .expect("write sse");
         let _ = socket.shutdown().await;
+        // Xiao asks once more after a quiz, in case more were requested.
+        serve_one_sse(&ai_listener, QUIZ_DONE_SSE).await;
     });
 
     let bot_client = crate::bot::client::TelegramBotClient::with_base_url(
@@ -588,6 +635,8 @@ async fn test_create_quiz_in_forum_topic_preserves_thread_id() {
             .await
             .expect("write sse");
         let _ = socket.shutdown().await;
+        // Xiao asks once more after a quiz, in case more were requested.
+        serve_one_sse(&ai_listener, QUIZ_DONE_SSE).await;
     });
 
     let bot_client = crate::bot::client::TelegramBotClient::with_base_url(
@@ -1344,4 +1393,151 @@ async fn test_create_archive_staging_and_auto_append() {
     // 3. Verify auto-append logic
     assert!(answer.contains("[document: bundle.zip](attach://doc_0)"));
     assert!(answer.contains("Berikut adalah berkas bundle project Anda."));
+}
+
+fn plain_input<'a>(
+    prompt: &'a str,
+    bot: Option<crate::bot::client::TelegramBotClient>,
+) -> GenerationInput<'a> {
+    GenerationInput {
+        prompt,
+        canonical_prompt: None,
+        media_to_main: true,
+        sink: None,
+        image_bytes: None,
+        document_images: None,
+        mime_type: None,
+        doc_text: None,
+        doc_name: None,
+        audio_bytes: None,
+        audio_mime: None,
+        video_bytes: None,
+        video_mime: None,
+        video_duration: None,
+        bot,
+        reply_to_message_id: None,
+        guest_mode: false,
+    }
+}
+
+fn last_message_text(request: &Value) -> String {
+    request["messages"]
+        .as_array()
+        .and_then(|messages| messages.last())
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[tokio::test]
+async fn tool_rounds_are_capped_and_skipped_calls_are_reported() {
+    use crate::ai::service::tool_round::MAX_TOOL_ROUNDS;
+    use crate::bot::test_support::{sse_tool_call, FakeProvider};
+
+    // A model that never stops asking for the same map.
+    let provider = FakeProvider::scripted(vec![sse_tool_call(
+        "call_map",
+        "send_location",
+        &json!({"latitude": -7.6079, "longitude": 110.2038, "title": "Borobudur"}),
+    )])
+    .await;
+    let service = isolated_service(provider.config());
+    let snapshot = service.generation_model_snapshot().await;
+    let (_cancel, mut receiver) = watch::channel(false);
+
+    let (_thinking, answer, _docs, cancelled) = service
+        .generate_response_with_snapshot(
+            7101,
+            0,
+            7101,
+            plain_input("Tunjukkan peta Borobudur", None),
+            &snapshot,
+            &mut receiver,
+        )
+        .await;
+
+    assert!(!cancelled);
+    let requests = provider.chat_requests();
+    assert_eq!(
+        requests.len(),
+        MAX_TOOL_ROUNDS + 1,
+        "tool rounds plus one answer turn"
+    );
+    assert!(requests[..MAX_TOOL_ROUNDS]
+        .iter()
+        .all(|request| request.get("tools").is_some()));
+    assert!(
+        requests[MAX_TOOL_ROUNDS].get("tools").is_none(),
+        "the answer turn offers no tools"
+    );
+    assert!(last_message_text(&requests[MAX_TOOL_ROUNDS]).contains("Tool tidak tersedia lagi"));
+    assert!(last_message_text(&requests[1]).contains("sisa putaran tool"));
+    assert_eq!(
+        answer.matches("<tg-map").count(),
+        1,
+        "a repeated call is staged once: {answer}"
+    );
+    assert!(
+        answer.contains("`send_location`"),
+        "the skipped call is reported: {answer}"
+    );
+}
+
+#[tokio::test]
+async fn quizzes_can_be_sent_over_several_rounds_without_duplicates() {
+    use crate::bot::test_support::{
+        ok_message, sse_text, sse_tool_call, FakeProvider, FakeTelegram,
+    };
+
+    let quiz = |id: &str, question: &str| {
+        sse_tool_call(
+            id,
+            "create_quiz",
+            &json!({"question": question, "options": ["A", "B"], "correct_option_ids": [0]}),
+        )
+    };
+    let provider = FakeProvider::scripted(vec![
+        quiz("q1", "Soal pertama?"),
+        quiz("q1_again", "  soal   PERTAMA? "),
+        quiz("q2", "Soal kedua?"),
+        sse_text("SELESAI"),
+    ])
+    .await;
+    let telegram = FakeTelegram::start(std::sync::Arc::new(|_, index| {
+        ok_message(500 + i64::try_from(index).unwrap_or(0))
+    }))
+    .await;
+    let service = isolated_service(provider.config());
+    let snapshot = service.generation_model_snapshot().await;
+    let (_cancel, mut receiver) = watch::channel(false);
+
+    let (_thinking, answer, _docs, cancelled) = service
+        .generate_response_with_snapshot(
+            7102,
+            0,
+            7102,
+            plain_input("Buatkan 2 kuis", Some(telegram.client.clone())),
+            &snapshot,
+            &mut receiver,
+        )
+        .await;
+
+    assert!(!cancelled);
+    assert_eq!(answer, "[QUIZ_SENT]");
+    assert_eq!(
+        telegram.methods(),
+        vec!["sendPoll".to_string(), "sendPoll".to_string()],
+        "the repeated question is not sent again"
+    );
+    let requests = provider.chat_requests();
+    assert_eq!(requests.len(), 4);
+    assert!(last_message_text(&requests[1]).contains("1 kuis sudah terkirim"));
+
+    let history = crate::ai::storage::load_scoped_messages_async(7102, 0, 10).await;
+    let assistant = history
+        .iter()
+        .find(|message| message.role == "assistant")
+        .map(|message| message.content.to_string())
+        .unwrap_or_default();
+    assert!(assistant.contains("Soal pertama?") && assistant.contains("Soal kedua?"));
 }

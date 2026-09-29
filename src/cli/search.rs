@@ -315,7 +315,7 @@ async fn run_interactive_search_menu() {
             "\x1b[38;5;252mBrave: {} \x1b[38;5;244m·\x1b[0m \x1b[38;5;252mTavily: {} \x1b[38;5;244m·\x1b[0m \x1b[38;5;252mExa: {}\x1b[0m",
             brave_status, tavily_status, exa_status
         );
-        let fallback_val = "\x1b[38;5;250mDuckDuckGo \u{2192} Wikipedia Knowledge Base\x1b[0m";
+        let fallback_val = "\x1b[38;5;250mExa MCP \u{2192} DuckDuckGo \u{2192} Wikipedia\x1b[0m";
 
         let hud_rows = [
             ("ACTIVE ENGINE", search_engine_str.as_str()),
@@ -433,7 +433,7 @@ pub(crate) async fn run_cli_search_hub(
                     .unwrap_or_else(|| "\x1b[38;5;244m(not set)\x1b[0m".to_string())
             );
             println!(
-                "    \x1b[38;5;245mKeyless Fallbacks:\x1b[0m \x1b[38;5;252mDuckDuckGo \u{2192} Wikipedia\x1b[0m\n"
+                "    \x1b[38;5;245mKeyless Fallbacks:\x1b[0m \x1b[38;5;252mExa MCP \u{2192} DuckDuckGo \u{2192} Wikipedia\x1b[0m\n"
             );
 
             println!("\x1b[38;5;244mSubcommands:\x1b[0m");
@@ -486,7 +486,8 @@ pub(crate) async fn run_cli_search_hub(
                 println!("    1. Brave Search  (\x1b[1;37mxiao search brave <KEY>\x1b[0m)");
                 println!("    2. Tavily Search (\x1b[1;37mxiao search tavily <KEY>\x1b[0m)");
                 println!("    3. Exa REST API  (\x1b[1;37mxiao search exa <KEY>\x1b[0m)");
-                println!("    4. Exa MCP / DuckDuckGo fallback (Keyless)\n");
+                println!("    4. Exa MCP \u{2192} DuckDuckGo \u{2192} Wikipedia (keyless)");
+                println!("       An engine that just failed is skipped for a few minutes.\n");
             } else {
                 println!();
             }
