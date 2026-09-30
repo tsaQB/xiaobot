@@ -1,5 +1,5 @@
 /*
- * Xiao Console API contract.
+ * Xiao WebUI API contract.
  *
  * Every endpoint lives under `/api` and speaks JSON unless noted. Requests
  * that change anything (POST, PUT, PATCH, DELETE) must send the header
@@ -23,6 +23,7 @@ export type Lang = 'id' | 'en'
 
 export type PageId =
   | 'home'
+  | 'quickstart'
   | 'chat'
   | 'ai'
   | 'search'
@@ -116,6 +117,7 @@ export type SettingKey =
   | 'XIAO_WEB_ALLOWED_NETWORKS' // restart, comma separated CIDRs
   | 'XIAO_WEB_SESSION_DAYS' // new sign-ins, "1" | "7" | "30"
   | 'XIAO_WEB_TELEGRAM_LOGIN' // live, "true" | "false" (false only while a password is set)
+  | 'XIAO_LOG_LEVEL' // live, "error" | "warn" | "info" | "debug" | "trace" (RUST_LOG in the environment wins)
 
 /** When a change takes effect. */
 export type Effect = 'live' | 'restart' | 'gateway' | 'locked' | 'readonly'
@@ -148,6 +150,22 @@ export interface AuthState {
   owner_id: string | null
   /** Only when authenticated: when this session ends. */
   session_expires: string | null
+  /**
+   * No way to sign in exists yet (no password, and Telegram code sign-in is
+   * unavailable). The first password is created with POST /api/auth/setup
+   * and the one-time setup code the daemon prints in its terminal/journal.
+   */
+  setup_required: boolean
+}
+
+/**
+ * POST /api/auth/setup → Ok and a session cookie. Only while
+ * `setup_required`. The code looks like "1234-5678" (dash optional);
+ * wrong codes count towards the sign-in lockout. Password: 8+ characters.
+ */
+export interface SetupRequest {
+  code: string
+  password: string
 }
 
 /** POST /api/auth/code/send → a 6-digit code goes to the owner's private chat. */
@@ -205,10 +223,47 @@ export interface AttentionItem {
 }
 
 /** GET /api/overview */
+/** First-run checklist shown by the quickstart. */
+export interface SetupChecklist {
+  /** An AI provider exists. */
+  provider: boolean
+  /** Bot token and owner id are set. */
+  telegram: boolean
+  /** Telegram polling runs in this daemon. */
+  telegram_running: boolean
+  /** A backup password is set. */
+  password: boolean
+  /** WhatsApp is linked. */
+  whatsapp: boolean
+  /** At least one search API key is set. */
+  search_key: boolean
+  /** The essentials are done: a provider, a channel (Telegram or WhatsApp) and a way to sign in. */
+  complete: boolean
+}
+
+/** One day of activity, oldest first in `Overview.activity`. */
+export interface ActivityDay {
+  /** YYYY-MM-DD in the server's time zone. */
+  date: string
+  /** Owner messages stored in any conversation. */
+  prompts: number
+  /** Answers stored. */
+  answers: number
+  /** Telegram updates received. */
+  telegram: number
+  /** WhatsApp messages received. */
+  whatsapp: number
+}
+
 export interface Overview {
   system: SystemSummary
+  setup: SetupChecklist
+  /** The last 7 days including today, oldest first. */
+  activity: ActivityDay[]
   telegram: {
     configured: boolean
+    /** Polling runs in this daemon (it may still be waiting for its first poll). */
+    running: boolean
     online: boolean
     username: string | null
     owner_id: string | null
@@ -436,10 +491,19 @@ export interface EngineView {
   name: string
   /** Needs an API key. */
   keyed: boolean
-  /** off = no key; cool = skipped for now after a failure; on = tried in order. */
+  /** The owner's switch (PUT /api/search/engines/:id). */
+  enabled: boolean
+  /** Usable at all: keyless, or its key is set. */
+  available: boolean
+  /** off = switched off or no key; cool = skipped for now after a failure; on = tried in order. */
   state: 'on' | 'off' | 'cool'
   /** Seconds left in the cooldown when state is `cool`. */
   cooldown_secs: number | null
+}
+
+/** PUT /api/search/engines/:id → Ok. Only enabled engines (with a key when needed) are tried. */
+export interface EngineToggleRequest {
+  enabled: boolean
 }
 
 /** GET /api/search */
@@ -567,7 +631,9 @@ export interface TelegramState {
   /** From getMe; null when the token is missing or Telegram did not answer. */
   bot: BotInfo | null
   bot_error: string | null
-  /** The daemon is polling. */
+  /** Telegram polling runs in this daemon. It starts by itself once the token and owner are set. */
+  running: boolean
+  /** Running and polled within the last 90 s. */
   online: boolean
   last_poll_secs: number | null
   /** getUpdates long-poll timeout in seconds. */
@@ -615,6 +681,8 @@ export interface PairingView {
   phone: string | null
   /** Seconds the current QR or code stays valid. */
   expires_in: number | null
+  /** Seconds before an unfinished pairing stops by itself (3-minute limit). */
+  stops_in: number | null
   /** Linking finished; the gateway is online. */
   done: boolean
   error: string | null
@@ -787,7 +855,10 @@ export interface SystemState {
     attachments_bytes: number
     /** e.g. "xiao.service (systemd)"; null when not under a service manager. */
     service: string | null
+    /** Effective log filter. */
     rust_log: string
+    /** Level chosen with XIAO_LOG_LEVEL (ignored while RUST_LOG is set in the environment). */
+    log_level: 'error' | 'warn' | 'info' | 'debug' | 'trace'
   }
   settings: SettingRow[]
   env_locks: EnvLocks
@@ -811,8 +882,10 @@ export interface SecretWriteResult extends WriteResult {
 }
 
 /* DELETE /api/secrets/:key → WriteResult
- * POST /api/system/restart → Ok; the daemon stops gracefully and exits with
- *   code 75 so systemd starts it again. Poll /api/auth/state until it answers.
+ * POST /api/system/restart → Ok; the daemon stops gracefully and starts
+ *   again (under systemd it exits with code 75 and systemd starts it; from a
+ *   terminal it restarts in the same process). Poll /api/auth/state until it
+ *   answers again.
  * GET /api/system/backup → the SQLite database as a download (no secrets). */
 
 /* ------------------------------------------------------------------ */

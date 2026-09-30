@@ -866,8 +866,9 @@ mod search;
 #[allow(unused_imports)]
 pub(crate) use search::search_exa_mcp;
 pub use search::{
-    execute_web_search, get_brave_key, get_configured_mcp_url, get_exa_key,
-    get_search_engine_status, get_tavily_key, reset_search_cooldowns, search_cooldowns,
+    disabled_search_engines, execute_web_search, get_brave_key, get_configured_mcp_url,
+    get_exa_key, get_search_engine_status, get_tavily_key, reset_search_cooldowns,
+    search_cooldowns, search_disabled_value, SEARCH_ENGINE_IDS,
 };
 
 const MAX_FETCH_HTML_BYTES: usize = 2 * 1024 * 1024;

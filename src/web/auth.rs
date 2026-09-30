@@ -136,6 +136,22 @@ pub(crate) fn telegram_login_available() -> bool {
     telegram_configured() && settings::effective_bool("XIAO_WEB_TELEGRAM_LOGIN")
 }
 
+/// Nobody can sign in yet: no password, and no Telegram code sign-in. The
+/// first password is then created with the one-time setup code.
+pub(crate) fn setup_required() -> bool {
+    !password_is_set() && !telegram_login_available()
+}
+
+/// "1234-5678"
+fn new_setup_code() -> String {
+    let number = rand::thread_rng().gen_range(0..100_000_000u32);
+    format!("{:04}-{:04}", number / 10_000, number % 10_000)
+}
+
+fn digits_of(raw: &str) -> String {
+    raw.chars().filter(char::is_ascii_digit).collect()
+}
+
 pub(crate) fn telegram_configured() -> bool {
     crate::get_configured_token().is_some() && crate::get_configured_owner_id().is_some()
 }
@@ -169,9 +185,48 @@ struct PendingCode {
 pub(crate) struct AuthRuntime {
     failures: Mutex<HashMap<IpAddr, FailureLog>>,
     code: Mutex<Option<PendingCode>>,
+    /// One-time code for creating the first password.
+    setup_code: Mutex<Option<String>>,
 }
 
 impl AuthRuntime {
+    /// When nobody can sign in yet, creates the one-time setup code and
+    /// prints it where only the server's owner sees it: the terminal running
+    /// `xiao start`, or the service journal. Printed once per code.
+    pub(crate) fn announce_setup_code(&self) {
+        if !setup_required() {
+            return;
+        }
+        let code = {
+            let Ok(mut slot) = self.setup_code.lock() else {
+                return;
+            };
+            if slot.is_some() {
+                return;
+            }
+            let code = new_setup_code();
+            *slot = Some(code.clone());
+            code
+        };
+        println!("\n  \x1b[1;33m🔑 WebUI setup code: {code}\x1b[0m");
+        println!("  \x1b[38;5;244mOpen the WebUI and use this code to create the first password.\x1b[0m\n");
+        warn!("WebUI first sign-in: setup code {code}. Open the WebUI and use it to create the password.");
+    }
+
+    /// Uses up the setup code when `code` matches it.
+    fn take_setup_code(&self, code: &str) -> bool {
+        let Ok(mut slot) = self.setup_code.lock() else {
+            return false;
+        };
+        let matches = slot.as_deref().is_some_and(|expected| {
+            ct_eq(digits_of(expected).as_bytes(), digits_of(code).as_bytes())
+        });
+        if matches {
+            *slot = None;
+        }
+        matches
+    }
+
     fn check_lock(&self, ip: IpAddr) -> Result<(), ApiError> {
         let Ok(mut failures) = self.failures.lock() else {
             return Ok(());
@@ -430,8 +485,13 @@ pub(crate) async fn auth_state(
     let session = session_from_headers(&headers).await;
     let authenticated = session.is_some();
     let owner = crate::get_configured_owner_id().filter(|_| authenticated);
+    let setup = setup_required();
+    if setup {
+        state.auth.announce_setup_code();
+    }
     Json(json!({
         "authenticated": authenticated,
+        "setup_required": setup,
         "telegram_login": telegram_login_available(),
         "password_login": password_is_set(),
         "bot_username": state.bot_username(),
@@ -472,7 +532,7 @@ pub(crate) async fn code_send(
         ));
     }
     let text = format!(
-        "🔐 Kode masuk Xiao Console: {code}\nBerlaku 5 menit. Jangan bagikan kode ini. Abaikan pesan ini bila Anda tidak sedang masuk (permintaan dari {ip}).\n\nXiao Console sign-in code: {code} (valid for 5 minutes)."
+        "🔐 Kode masuk WebUI Xiao: {code}\nBerlaku 5 menit. Jangan bagikan kode ini. Abaikan pesan ini bila Anda tidak sedang masuk (permintaan dari {ip}).\n\nXiao WebUI sign-in code: {code} (valid for 5 minutes)."
     );
     let bot = crate::bot::client::TelegramBotClient::new(token);
     match bot.send_message(owner, &text, None, None, None, None).await {
@@ -548,7 +608,7 @@ pub(crate) async fn password_login(
     if let Some((bot, owner)) = state.telegram_client() {
         tokio::spawn(async move {
             let text = format!(
-                "🔐 Xiao Console: masuk dengan kata sandi dari {ip} ({device}). Bila bukan Anda, buka Keamanan WebUI dan keluarkan semua perangkat."
+                "🔐 WebUI Xiao: masuk dengan kata sandi dari {ip} ({device}). Bila bukan Anda, buka Keamanan WebUI dan keluarkan semua perangkat."
             );
             if bot
                 .send_message(owner, &text, None, None, None, None)
@@ -560,6 +620,43 @@ pub(crate) async fn password_login(
         });
     }
     Ok(response)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SetupRequest {
+    code: String,
+    password: String,
+}
+
+/// POST /api/auth/setup: creates the first password with the setup code.
+pub(crate) async fn setup(
+    State(state): State<Arc<WebState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<SetupRequest>,
+) -> Result<Response, ApiError> {
+    let ip = peer.ip().to_canonical();
+    state.auth.check_lock(ip)?;
+    if !setup_required() {
+        return Err(ApiError::conflict(
+            "A way to sign in already exists. Sign in instead.",
+            "Cara masuk sudah ada. Silakan masuk.",
+        ));
+    }
+    validate_new_password(&body.password)?;
+    if !state.auth.take_setup_code(&body.code) {
+        state.auth.record_failure(ip);
+        return Err(ApiError::bad_code());
+    }
+    let password = body.password;
+    let hash = tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    crate::ai::service::save_app_setting("XIAO_WEB_PASSWORD", &hash).map_err(ApiError::internal)?;
+    state.auth.clear_failures(ip);
+    info!("WebUI first password created with the setup code");
+    start_session(ip, &headers, "the setup code").await
 }
 
 /// POST /api/auth/logout
@@ -585,6 +682,20 @@ mod tests {
 
     fn ip(raw: &str) -> IpAddr {
         raw.parse().expect("test address")
+    }
+
+    #[test]
+    fn setup_codes_look_right_and_compare_digits_only() {
+        let code = new_setup_code();
+        assert_eq!(code.len(), 9);
+        assert_eq!(code.as_bytes()[4], b'-');
+        let auth = AuthRuntime::default();
+        if let Ok(mut slot) = auth.setup_code.lock() {
+            *slot = Some("1234-5678".to_string());
+        }
+        assert!(!auth.take_setup_code("1234-5679"));
+        assert!(auth.take_setup_code(" 12345678 "), "the dash is optional");
+        assert!(!auth.take_setup_code("1234-5678"), "the code works once");
     }
 
     #[test]

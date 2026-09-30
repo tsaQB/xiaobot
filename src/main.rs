@@ -272,8 +272,10 @@ fn init_tracing() {
     use tracing_subscriber::util::SubscriberInitExt;
     static TRACING_INIT: Once = Once::new();
     TRACING_INIT.call_once(|| {
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        // RUST_LOG wins; otherwise the level saved from the WebUI. The filter
+        // sits behind a reload handle so the WebUI can change it live.
+        let (filter, handle) = tracing_subscriber::reload::Layer::new(web::logs::startup_filter());
+        web::logs::install_reload_handle(handle);
         // Logs go to stderr so they never interleave with the CLI spinner or
         // with answers printed to stdout (`xiao "question" > answer.txt`).
         // The ring layer keeps the latest lines for the WebUI log page.
@@ -398,11 +400,22 @@ async fn main() {
             return;
         }
         Some("start") => {
-            crate::bot::daemon::run_daemon(ai_service).await;
-            if web::restart_requested() {
-                // Asked from the WebUI: a non-zero status makes systemd
-                // (Restart=on-failure or always) start the daemon again.
-                std::process::exit(web::RESTART_EXIT_CODE);
+            let mut service = ai_service;
+            loop {
+                crate::bot::daemon::run_daemon(Arc::clone(&service)).await;
+                if !web::restart_requested() {
+                    break;
+                }
+                if web::under_service_manager() {
+                    // A non-zero status makes systemd (Restart=on-failure or
+                    // always) start a fresh process, which also picks up a
+                    // newly installed binary.
+                    std::process::exit(web::RESTART_EXIT_CODE);
+                }
+                // From a terminal nobody would start it again: restart here.
+                web::clear_restart_request();
+                tracing::info!("Restarting the daemon");
+                service = Arc::new(AIChatService::new());
             }
         }
         Some(unknown) => {

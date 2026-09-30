@@ -6,7 +6,7 @@
 
 ## 1. Project Overview
 
-`xiao` is a hardened, single-owner AI assistant built in Rust (2021 edition) that serves **two channels**: Telegram (targeting **Telegram Bot API 10.3**) and WhatsApp multi-device. It supports Rich Messages (AST blocks), streaming drafts with native stop controls, durable inbox queueing with at-least-once recovery on both channels, three-tier long-term memory, and modular OpenAI-compatible multimodal AI routing (Main, Vision, Video, Audio STT, Image Generation, Curator). `xiao start` also serves **Xiao Console**, an owner-only WebUI (Vue 3 in `webui/`, embedded into the binary, axum backend in `src/web/`).
+`xiao` is a hardened, single-owner AI assistant built in Rust (2021 edition) that serves **two channels**: Telegram (targeting **Telegram Bot API 10.3**) and WhatsApp multi-device. It supports Rich Messages (AST blocks), streaming drafts with native stop controls, durable inbox queueing with at-least-once recovery on both channels, three-tier long-term memory, and modular OpenAI-compatible multimodal AI routing (Main, Vision, Video, Audio STT, Image Generation, Curator). `xiao start` also serves the **Xiao WebUI**, an owner-only dashboard (Vue 3 in `webui/`, embedded into the binary, axum backend in `src/web/`).
 
 ---
 
@@ -129,7 +129,7 @@ cargo run -- gateway wa owner <NUMBER>  # Set the owner phone number
 cargo run -- gateway wa status          # Inspect link status
 cargo run -- gateway wa unlink          # Delete the stored session
 
-# Xiao Console (WebUI inside `xiao start`)
+# Xiao WebUI (inside `xiao start`)
 cargo run -- web                        # address, sign-in methods, whether it answers
 cargo run -- web password               # set the backup password (argon2 hash in the vault)
 cargo run -- web password rm            # remove it (refused while code sign-in is unavailable)
@@ -187,7 +187,7 @@ cargo run -- setup
   - `launcher.rs`: Control Center interactive hub (`xiao menu`).
   - `status.rs`: Dashboard and diagnostic system status rendering.
   - `gateway.rs`: Telegram and WhatsApp gateway management (bot token, owner, QR/code pairing, link status).
-  - `wizard.rs`: Interactive setup and onboarding quickstart.
+  - `wizard.rs`: Interactive setup and onboarding quickstart. `get_or_prompt_token` opens it only while no AI provider exists and a terminal is attached; otherwise a missing bot token just keeps Telegram off.
   - `chat.rs`: Terminal chat REPL, smart one-shot queries, and multi-session manager (`/sessions`, `/switch`, `/rm`, `/new`). Each CLI session has its own history scope (`thread_id = cli_session_thread_id(session_id)`, a negative id), separate from the Telegram private chat. A one-shot query and leaving the REPL wait up to 30 seconds for background memory curation, so the process does not exit in the middle of it.
   - `memory.rs`: Tier-1 persistent memory management (`xiao memory`).
   - `context.rs`: Token usage and sliding-window breakdown inspector (`xiao context`).
@@ -197,7 +197,7 @@ cargo run -- setup
   - `ai_hub.rs`: Provider, model catalog, and multimodal specialist routing (`xiao ai`).
   - `help.rs`: Global CLI help screen.
 - `src/bot/`:
-  - `daemon.rs`: Bot initialization, Telegram connection handshake, command clearing (`pure zero-slash`), concurrent WhatsApp gateway spawn, and long-polling loop with graceful shutdown.
+  - `daemon.rs`: Bot initialization (with the WebUI running, Telegram starts by itself once the bot token and owner are set, and a failed start is retried with backoff), Telegram connection handshake, command clearing (`pure zero-slash`), concurrent WhatsApp gateway spawn, and long-polling loop with graceful shutdown.
   - `worker.rs`: Keyed per-scope mailboxes (`ScopeKey`), worker concurrency limits, durable inbox queue replay, and bounded retry with panic isolation.
   - `router.rs`: Incoming update routing (new and edited messages), media and document classification, context overflow policies, and AI chat dispatch. End-to-end routing tests live in `router/flow_tests.rs`.
   - `inbound.rs`: Message kinds beyond text and classic media: stickers, locations/venues, live photos, forwarded rich messages, checklists and polls; reply context (`reply_context`, `reply_author`); and the edited-message window and text fingerprint.
@@ -233,19 +233,19 @@ cargo run -- setup
   - `routing.rs`: Specialist model role resolution (`ModelRole`: Main, Vision, Video, AudioStt, ImageGeneration, Curator).
   - `capability.rs` / `provider.rs`: Live model probe harness and capability verification (e.g. confirming whether an endpoint actually supports vision or tool calling).
   - `stream.rs`: UTF-8 chunk-safe Server-Sent Events (SSE) streaming decoder.
-  - `tools.rs` / `tools/search.rs`: Function calling engine. `tools.rs` holds tool schemas, argument validation, and `fetch_url`; `tools/search.rs` holds the `web_search` engine chain: Brave → Tavily → Exa API (each only with a key) → keyless Exa MCP → DuckDuckGo, and Wikipedia when all of them fail. An engine that just failed is skipped for a while (Exa MCP: 10 minutes after a 429, or its `Retry-After`, and 2 minutes after other failures; DuckDuckGo: 10 minutes after a failure, block or captcha). DuckDuckGo ads are dropped. A picture search with fewer than 3 images is topped up from Wikipedia and Wikimedia Commons, and the verified images are listed before the text results.
+  - `tools.rs` / `tools/search.rs`: Function calling engine. `tools.rs` holds tool schemas, argument validation, and `fetch_url`; `tools/search.rs` holds the `web_search` engine chain: Brave → Tavily → Exa API (each only with a key) → keyless Exa MCP → DuckDuckGo, and Wikipedia when all of them fail. Engines listed in `XIAO_SEARCH_DISABLED` are skipped (all are on by default). An engine that just failed is skipped for a while (Exa MCP: 10 minutes after a 429, or its `Retry-After`, and 2 minutes after other failures; DuckDuckGo: 10 minutes after a failure, block or captcha). DuckDuckGo ads are dropped. A picture search with fewer than 3 images is topped up from Wikipedia and Wikimedia Commons, and the verified images are listed before the text results.
   - `http.rs`: Shared provider retry policy, retryable status classification, and `Retry-After` handling.
 - `src/document.rs` & `src/document/archive.rs`: In-memory safe extraction of text, archives (ZIP, TAR, TAR.GZ, 7Z), Office files (DOCX, XLSX), and PDF page extraction/rendering.
 - `src/attachments.rs`: Content attachment persistence scoped by chat/thread.
 - `src/timeline.rs`: Real-time streaming draft management with progress spinner and activity state indicators. A private draft streams the answer, with a thinking block until the first words arrive; a group placeholder is a real message, so it shows the status as a paragraph (Telegram accepts thinking blocks in drafts only).
 - `src/util.rs`: Shared string helpers, including character-safe truncation.
-- `src/web/`: Xiao Console, the owner-only WebUI served by `xiao start` (`web::start`, called from `run_daemon` before Telegram starts so it also works in web-only mode). The frontend (Vue 3 + Vite + TypeScript) lives in `webui/`; `webui/src/api/types.ts` is the API contract and must stay in step with the handlers.
-  - `mod.rs`: `WebState` (AI service, bind, auth runtime, restart tracker, `WaController`, chat runtime, the attached Telegram link), the network guard (`XIAO_WEB_ALLOWED_NETWORKS`, loopback always allowed), the CSRF guard (mutations need `X-Xiao-Request: 1` and a same-origin `Origin`), security headers (strict CSP without eval, `no-store` on `/api`), and `request_restart` (graceful shutdown, then `main` exits with `RESTART_EXIT_CODE` 75).
-  - `auth.rs`: sign-in with a 6-digit Telegram code (5 minutes, single use, at most 5 tries, resend after 30 s) or the backup password (`XIAO_WEB_PASSWORD`, argon2 via `spawn_blocking`); lockout after 5 failures in 15 minutes per address; session cookie `xiao_session` (HttpOnly, SameSite=Strict, 1/7/30 days) of which only the SHA-256 hash is stored; `require_session` middleware.
+- `src/web/`: the Xiao WebUI, the owner-only dashboard served by `xiao start` (`web::start`, called from `run_daemon` before Telegram starts so it also works in web-only mode). The frontend (Vue 3 + Vite + TypeScript) lives in `webui/`; `webui/src/api/types.ts` is the API contract and must stay in step with the handlers.
+  - `mod.rs`: `WebState` (AI service, bind, auth runtime, restart tracker, `WaController`, chat runtime, the attached Telegram link), the network guard (`XIAO_WEB_ALLOWED_NETWORKS`, loopback always allowed), the CSRF guard (mutations need `X-Xiao-Request: 1` and a same-origin `Origin`), security headers (strict CSP without eval, `no-store` on `/api`), and `request_restart` (graceful shutdown; under systemd `main` exits with `RESTART_EXIT_CODE` 75, otherwise it runs `run_daemon` again in the same process after `stop_server` released the address).
+  - `auth.rs`: first-run setup (while no password and no Telegram code sign-in exist, a one-time setup code is printed to the terminal and the log, and `POST /api/auth/setup` creates the first password with it), sign-in with a 6-digit Telegram code (5 minutes, single use, at most 5 tries, resend after 30 s) or the backup password (`XIAO_WEB_PASSWORD`, argon2 via `spawn_blocking`); lockout after 5 failures in 15 minutes per address; session cookie `xiao_session` (HttpOnly, SameSite=Strict, 1/7/30 days) of which only the SHA-256 hash is stored; `require_session` middleware.
   - `settings.rs`: the settings the WebUI may change (validation and normalization), value sources, environment locks (`env_locks`), secret summaries (`SecretMeta`: set, last four characters, where; never the value) and `RestartTracker` (hashes of the restart-only settings at startup).
   - `net.rs`: `XIAO_WEB_BIND` parsing (`off`, `host:port`, bare port; ports below 1024 refused), a hand-written CIDR parser and matcher, LAN address detection.
-  - `logs.rs`: `RingLayer`, a tracing layer keeping the last 500 lines for `GET /api/logs` (installed next to the stderr formatter in `init_tracing`).
-  - `wa.rs`: `WaController` starts, stops and pairs the WhatsApp gateway inside the daemon. Each run of `supervise_whatsapp` has its own stop signal that also follows the daemon shutdown; pairing QR codes and pairing codes arrive through `WaHooks` and are rendered as SVG path data (`qr_matrix`).
+  - `logs.rs`: `RingLayer`, a tracing layer keeping the last 500 lines for `GET /api/logs` (installed next to the stderr formatter in `init_tracing`), and the reloadable filter: `XIAO_LOG_LEVEL` applies at once unless `RUST_LOG` is set.
+  - `wa.rs`: `WaController` starts, stops and pairs the WhatsApp gateway inside the daemon. Each run of `supervise_whatsapp` has its own stop signal that also follows the daemon shutdown; pairing QR codes and pairing codes arrive through `WaHooks` and are rendered as SVG path data (`qr_matrix`). An unlinked run stops pairing after 3 minutes (`PAIR_LIMIT`). `WHATSAPP_ENABLED` decides when set; unset, a linked session turns the gateway on.
   - `chat.rs`: web chat runtime. Web sessions are the `xiao chat` sessions (`thread_id = cli_session_thread_id(id)` in the owner's chat). A generation takes the scope's `generation_lock`, registers with `begin_generation` (Stop and shutdown reach it), streams progress through a `GenerationProgressSink` as SSE, keeps running when the browser leaves, and stores uploads (20 MB each, 30 minutes) and generated files (2 hours) in memory.
   - `api/*.rs`: the JSON API (`overview`, `ai`, `search` + MCP, `memory`, `channels` (Telegram and WhatsApp), `queue`, `context`, `system` (settings, secrets, restart, backup, logs), `security`, `chat`). Errors are `{error, error_id, code}` (`error.rs`).
   - `assets.rs` serves the embedded files; `cli.rs` implements `xiao web`.
@@ -340,13 +340,13 @@ When modifying or adding features, you **must** preserve these invariants:
 - Unauthorized senders are dropped with no reply and no identity trace in the logs.
 - Group chats map to a negative `chat_id`; direct messages map to the positive sender number. History is stored under `chat_id`, and the sender number is passed as `user_id`.
 
-### 7b. Xiao Console (WebUI)
+### 7b. Xiao WebUI
 - **Owner only**: every page and API call except `/api/auth/*` requires a session; sign-in is always required, also from loopback (tunnels arrive as local connections). Only the owner can receive the Telegram code; the backup password is an argon2 hash in the vault.
-- **Network**: `XIAO_WEB_BIND` defaults to `127.0.0.1:8787`; `off` disables the console. When it listens beyond loopback, clients outside `XIAO_WEB_ALLOWED_NETWORKS` get a bare 403.
+- **Network**: `XIAO_WEB_BIND` defaults to `127.0.0.1:8787`; `off` disables the WebUI. When it listens beyond loopback, clients outside `XIAO_WEB_ALLOWED_NETWORKS` get a bare 403.
 - **Secrets**: never returned to the browser (`SecretMeta` only). Settings the environment overrides are reported as locked and refused on write.
 - **CSRF and CSP**: mutations need `X-Xiao-Request: 1` and a matching `Origin`; the CSP forbids inline scripts and eval, and the frontend renders Markdown to VNodes (never `v-html`).
 - **Invariants still hold**: the MCP URL passes `url_policy::resolve_download_url` before it is saved; provider keys and tokens go through `save_provider_store` / `save_app_setting` (vault); retried Telegram updates go back through the durable queue and the normal worker path.
-- **Restarts**: settings read only at startup (`RESTART_KEYS` in `web/settings.rs`) are tracked; a restart from the console exits with status 75 after the graceful shutdown, so the service must use `Restart=always` or `Restart=on-failure`.
+- **Restarts**: settings read only at startup (`RESTART_KEYS` in `web/settings.rs`) are tracked; a restart from the WebUI shuts down gracefully, then exits with status 75 under systemd (the service must use `Restart=always` or `Restart=on-failure`) or runs the daemon again in the same process when started from a terminal.
 
 ### 8. WhatsApp Credential Handling
 - `whatsapp.db` holds Signal session keys and is treated the same as the secret vault.

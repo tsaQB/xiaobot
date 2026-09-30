@@ -2,7 +2,8 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, ApiError, errorMessage } from '../api/client'
-import type { CodeSent, Ok } from '../api/types'
+import type { CodeSent, Ok, SetupRequest } from '../api/types'
+import Brandmark from '../components/Brandmark.vue'
 import BusyButton from '../components/BusyButton.vue'
 import Icon from '../components/Icon.vue'
 import Rich from '../components/Rich'
@@ -27,6 +28,15 @@ const loadingState = ref(false)
 const st = computed(() => auth.state)
 const tgLogin = computed(() => !!st.value?.telegram_login)
 const pwLogin = computed(() => !!st.value?.password_login)
+const setupRequired = computed(() => !!st.value?.setup_required)
+
+/* First run: the one-time setup code from the terminal/journal and the first password. */
+const setupCode = ref('')
+const setupPw1 = ref('')
+const setupPw2 = ref('')
+const setupCodeInput = ref<HTMLInputElement | null>(null)
+const setupPwInput = ref<HTMLInputElement | null>(null)
+const setupNote = ref<string | null>(null)
 
 const left = computed(() => Math.max(0, Math.ceil((expiresAt.value - now.value) / 1000)))
 const leftText = computed(() => `${Math.floor(left.value / 60)}:${String(left.value % 60).padStart(2, '0')}`)
@@ -37,14 +47,23 @@ onMounted(async () => {
     await loadAuth()
     loadingState.value = false
   }
-  if (!tgLogin.value && pwLogin.value) await showPassword()
+  await afterState()
 })
+
+async function afterState(): Promise<void> {
+  if (setupRequired.value) {
+    await nextTick()
+    setupCodeInput.value?.focus()
+  } else if (!tgLogin.value && pwLogin.value) {
+    await showPassword()
+  }
+}
 
 async function retryState(): Promise<void> {
   loadingState.value = true
   await loadAuth()
   loadingState.value = false
-  if (!tgLogin.value && pwLogin.value) await showPassword()
+  await afterState()
 }
 
 function explain(e: unknown): string {
@@ -81,6 +100,53 @@ async function finish(): Promise<void> {
   await loadAuth()
   void refreshShell(true)
   await router.replace(redirectTarget(route.query.redirect))
+}
+
+async function createFirstPassword(): Promise<void> {
+  const code = setupCode.value.trim()
+  if (!code) {
+    problem.value = L('Masukkan kode setup dari terminal atau journal.', 'Enter the setup code from the terminal or the journal.')
+    setupCodeInput.value?.focus()
+    return
+  }
+  if (setupPw1.value.length < 8) {
+    problem.value = L('Kata sandi paling sedikit 8 karakter.', 'The password needs at least 8 characters.')
+    setupPwInput.value?.focus()
+    return
+  }
+  if (setupPw1.value !== setupPw2.value) {
+    problem.value = L('Kedua kata sandi tidak sama.', 'The two passwords do not match.')
+    return
+  }
+  problem.value = null
+  const body: SetupRequest = { code, password: setupPw1.value }
+  try {
+    await api.post<Ok>('/api/auth/setup', body)
+    setupPw1.value = ''
+    setupPw2.value = ''
+    setupCode.value = ''
+    await loadAuth()
+    void refreshShell(true)
+    await router.replace('/quickstart')
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 'bad_code') {
+      problem.value = L(
+        'Kode setup salah atau sudah kedaluwarsa. Periksa lagi kode terbaru di terminal atau journal.',
+        'The setup code is wrong or has expired. Check the latest code in the terminal or the journal.',
+      )
+      await nextTick()
+      setupCodeInput.value?.select()
+    } else if (e instanceof ApiError && e.code === 'conflict') {
+      /* Someone (or the CLI) already created a way to sign in: show the normal sign-in instead. */
+      setupPw1.value = ''
+      setupPw2.value = ''
+      await loadAuth()
+      setupNote.value = L('Cara masuk sudah dibuat. Silakan masuk.', 'A way to sign in already exists. Please sign in.')
+      await afterState()
+    } else {
+      problem.value = explain(e)
+    }
+  }
 }
 
 async function verify(): Promise<void> {
@@ -186,8 +252,8 @@ function setOtpRef(el: unknown, i: number): void {
   <div class="login-wrap">
     <div class="login-card">
       <div class="login-brand">
-        <div class="brandmark" aria-hidden="true">小</div>
-        <h2>Xiao Console</h2>
+        <Brandmark />
+        <h2>Xiao</h2>
         <div class="muted small">{{ L('Hanya untuk owner', 'Owner only') }}</div>
       </div>
 
@@ -208,8 +274,51 @@ function setOtpRef(el: unknown, i: number): void {
 
         <template v-else>
           <div v-if="problem" class="note err login-note" role="alert"><Icon name="alert" size="sm" /><div>{{ problem }}</div></div>
+          <div v-else-if="setupNote && !setupRequired" class="note ok login-note" role="status"><Icon name="check" size="sm" /><div>{{ setupNote }}</div></div>
 
-          <div v-if="!tgLogin && !pwLogin" class="note">
+          <template v-if="setupRequired">
+            <h3 class="login-h">{{ L('Buat kata sandi pertama', 'Create the first password') }}</h3>
+            <p class="mt0 small muted">
+              <Rich
+                :text="
+                  L(
+                    'Kode setup dicetak di terminal tempat `xiao start` berjalan, atau di journal: `journalctl -u xiao | grep -i setup`.',
+                    'The setup code is printed in the terminal running `xiao start`, or in the journal: `journalctl -u xiao | grep -i setup`.',
+                  )
+                "
+              />
+            </p>
+            <form @submit.prevent>
+              <label class="field mt0">
+                <span class="lab">{{ L('Kode setup', 'Setup code') }}</span>
+                <input
+                  ref="setupCodeInput"
+                  v-model="setupCode"
+                  class="input mono"
+                  placeholder="1234-5678"
+                  inputmode="numeric"
+                  autocomplete="one-time-code"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  maxlength="32"
+                />
+              </label>
+              <label class="field">
+                <span class="lab">{{ L('Kata sandi baru', 'New password') }}</span>
+                <input ref="setupPwInput" v-model="setupPw1" class="input" type="password" autocomplete="new-password" minlength="8" />
+                <span class="help">{{ L('Paling sedikit 8 karakter. Dipakai untuk masuk dari browser mana pun.', 'At least 8 characters. Used to sign in from any browser.') }}</span>
+              </label>
+              <label class="field">
+                <span class="lab">{{ L('Ulangi kata sandi', 'Repeat the password') }}</span>
+                <input v-model="setupPw2" class="input" type="password" autocomplete="new-password" minlength="8" />
+              </label>
+              <BusyButton type="submit" class="btn primary block mt16" :run="createFirstPassword" :label="L('Menyimpan…', 'Saving…')">
+                <Icon name="key" size="sm" />{{ L('Buat kata sandi dan masuk', 'Create the password and sign in') }}
+              </BusyButton>
+            </form>
+          </template>
+
+          <div v-else-if="!tgLogin && !pwLogin" class="note">
             <Icon name="info" size="sm" />
             <div>
               <Rich

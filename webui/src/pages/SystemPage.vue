@@ -1,21 +1,54 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import { api } from '../api/client'
-import type { Effect, SettingRow, SystemState, ValueSource } from '../api/types'
+import type { Effect, SettingRow, SettingsRequest, SystemState, ValueSource, WriteResult } from '../api/types'
 import Badge from '../components/Badge.vue'
+import EffectBadge from '../components/EffectBadge.vue'
 import EnvLock from '../components/EnvLock.vue'
 import Icon from '../components/Icon.vue'
 import LoadState from '../components/LoadState.vue'
 import PageHead from '../components/PageHead.vue'
 import SectionTitle from '../components/SectionTitle.vue'
+import { useForm } from '../composables/useForm'
 import { useLoad } from '../composables/useLoad'
 import { fmtBytes, fmtDuration, fmtWhen } from '../format'
 import { L } from '../i18n'
 import { confirmRestart } from '../lib/actions'
 import { uptimeNow } from '../stores/session'
-import { toast } from '../stores/ui'
+import { toast, useSaveBar } from '../stores/ui'
 
 const { data, loading, error, reload } = useLoad(() => api.get<SystemState>('/api/system'))
+
+/* Log level: XIAO_LOG_LEVEL applies at once; RUST_LOG in the environment wins over it. */
+type Level = SystemState['system']['log_level']
+const LEVELS: readonly Level[] = ['error', 'warn', 'info', 'debug', 'trace']
+const { form, dirty, reset } = useForm<{ level: Level }>({ level: 'info' })
+const fromState = (d: SystemState): { level: Level } => ({ level: LEVELS.includes(d.system.log_level) ? d.system.log_level : 'info' })
+watch(data, (d) => {
+  if (d && !dirty.value) reset(fromState(d))
+})
+const rustLogLock = computed(() => data.value?.env_locks.RUST_LOG ?? null)
+
+function levelHint(l: Level): string {
+  return {
+    error: L('hanya galat', 'errors only'),
+    warn: L('galat dan peringatan', 'errors and warnings'),
+    info: L('bawaan', 'default'),
+    debug: L('rinci, untuk mencari masalah', 'detailed, for troubleshooting'),
+    trace: L('sangat rinci, log cepat penuh', 'very detailed, fills the log fast'),
+  }[l]
+}
+
+async function save(): Promise<void> {
+  if (rustLogLock.value) throw new Error(L('RUST_LOG di environment mengunci level log.', 'RUST_LOG in the environment locks the log level.'))
+  const body: SettingsRequest = { XIAO_LOG_LEVEL: form.level }
+  await api.put<WriteResult>('/api/settings', body)
+  toast(L(`Level log diganti ke ${form.level}. Langsung berlaku.`, `Log level set to ${form.level}. It applies now.`))
+  const d = await reload(true)
+  if (d) reset(fromState(d))
+}
+
+useSaveBar({ dirty, save, discard: () => data.value && reset(fromState(data.value)) })
 
 const c = computed(() => ({
   key: L('Kunci', 'Key'),
@@ -96,11 +129,16 @@ function backup(): void {
     <SectionTitle :title="L('Log', 'Logs')" />
     <div class="card card-body">
       <label class="field mt0">
-        <span class="lab">{{ L('Level log', 'Log level') }}</span>
-        <input class="input mono" :value="data.system.rust_log || 'info'" disabled />
-        <span class="help"><code>RUST_LOG</code> {{ L('Diatur lewat RUST_LOG di environment.', 'Set with RUST_LOG in the environment.') }}</span>
+        <span class="lab">{{ L('Level log', 'Log level') }} <EffectBadge type="live" /></span>
+        <select v-model="form.level" class="select" :disabled="!!rustLogLock" :aria-label="L('Level log', 'Log level')">
+          <option v-for="l in LEVELS" :key="l" :value="l">{{ l }} ({{ levelHint(l) }})</option>
+        </select>
+        <span class="help">
+          <code>XIAO_LOG_LEVEL</code>
+          {{ L('Filter efektif sekarang:', 'Effective filter now:') }} <code>{{ data.system.rust_log || 'info' }}</code>
+        </span>
       </label>
-      <EnvLock :src="data.env_locks.RUST_LOG" />
+      <EnvLock :src="rustLogLock" />
     </div>
 
     <SectionTitle :title="L('Semua pengaturan', 'Every setting')" />

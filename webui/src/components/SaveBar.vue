@@ -1,7 +1,12 @@
 <script setup lang="ts">
+import { ref } from 'vue'
+import { useHeightVar } from '../composables/useHeightVar'
 import { L } from '../i18n'
 import { saveBar, saveBarOn } from '../stores/ui'
 import BusyButton from './BusyButton.vue'
+
+const root = ref<HTMLElement | null>(null)
+useHeightVar(root, '--savebar-h')
 
 async function save(): Promise<void> {
   if (saveBar.value) await saveBar.value.save()
@@ -9,7 +14,7 @@ async function save(): Promise<void> {
 </script>
 
 <template>
-  <div class="savebar" :class="{ on: saveBarOn }" role="region" :aria-label="L('Perubahan belum disimpan', 'Unsaved changes')">
+  <div ref="root" class="savebar" :class="{ on: saveBarOn }" role="region" :aria-label="L('Perubahan belum disimpan', 'Unsaved changes')">
     <div class="grow">{{ L('Ada perubahan yang belum disimpan', 'You have unsaved changes') }}</div>
     <button type="button" class="btn ghost sm" @click="saveBar?.discard()">{{ L('Batal', 'Discard') }}</button>
     <BusyButton class="btn primary sm" :run="save" :label="L('Menyimpan…', 'Saving…')">{{ L('Simpan', 'Save') }}</BusyButton>

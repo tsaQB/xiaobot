@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, seg } from '../api/client'
-import type { DeviceOs, Ok, SecurityState, SettingsRequest, WebSessionView, WriteResult } from '../api/types'
+import type { DeviceOs, Ok, PasswordSetRequest, SecurityState, SettingsRequest, WebSessionView, WriteResult } from '../api/types'
 import Badge from '../components/Badge.vue'
 import BusyButton from '../components/BusyButton.vue'
 import EffectBadge from '../components/EffectBadge.vue'
@@ -12,14 +12,13 @@ import LoadState from '../components/LoadState.vue'
 import PageHead from '../components/PageHead.vue'
 import SectionTitle from '../components/SectionTitle.vue'
 import SecretField from '../components/SecretField.vue'
-import Sheet from '../components/Sheet.vue'
 import Toggle from '../components/Toggle.vue'
 import { intIn, useForm } from '../composables/useForm'
 import { useLoad } from '../composables/useLoad'
 import { fmtAgo } from '../format'
 import { L, lang } from '../i18n'
 import { markSignedOut } from '../stores/session'
-import { confirmAction, copyText, toast, useSaveBar, useSheet } from '../stores/ui'
+import { confirmAction, copyText, toast, useSaveBar } from '../stores/ui'
 
 const router = useRouter()
 const { data, loading, error, reload } = useLoad(() => api.get<SecurityState>('/api/security'))
@@ -105,34 +104,10 @@ async function copyUrl(): Promise<void> {
   toast(ok ? L('Alamat disalin', 'Address copied') : L('Tidak bisa menyalin; salin manual.', 'Could not copy; copy it by hand.'), !ok)
 }
 
-/* Backup password */
-const pwSheet = useSheet()
-const pw1 = ref('')
-const pw2 = ref('')
-const pwError = ref<string | null>(null)
-
-function openPassword(): void {
-  pw1.value = ''
-  pw2.value = ''
-  pwError.value = null
-  pwSheet.show()
-}
-
-async function savePassword(): Promise<void> {
-  if (pw1.value.length < 8) {
-    pwError.value = L('Kata sandi paling sedikit 8 karakter.', 'The password needs at least 8 characters.')
-    return
-  }
-  if (pw1.value !== pw2.value) {
-    pwError.value = L('Kedua kata sandi tidak sama.', 'The two passwords do not match.')
-    return
-  }
-  await api.put<Ok>('/api/security/password', { password: pw1.value })
-  pw1.value = ''
-  pw2.value = ''
-  pwSheet.hide()
-  toast(L('Kata sandi cadangan disimpan', 'Backup password saved'))
-  await reload(true)
+/* Backup password: set inline (asked twice), stored as a hash. */
+async function setPassword(password: string): Promise<void> {
+  const body: PasswordSetRequest = { password }
+  await api.put<Ok>('/api/security/password', body)
 }
 
 const deletePassword = (): Promise<Ok> => api.del<Ok>('/api/security/password')
@@ -298,8 +273,12 @@ const dayOptions = computed(() => [
             :where-text="L('vault/web, disimpan sebagai hash', 'vault/web, stored as a hash')"
             :delete-warn="L('Masuk hanya bisa lewat kode Telegram.', 'Sign-in then only works with a Telegram code.')"
             :delete-fn="deletePassword"
-            external
-            @edit="openPassword"
+            :save-fn="setPassword"
+            :saved-text="L('Kata sandi cadangan disimpan', 'Backup password saved')"
+            :placeholder="L('Kata sandi baru, paling sedikit 8 karakter', 'New password, at least 8 characters')"
+            :min-length="8"
+            autocomplete="new-password"
+            repeat
             @changed="reload(true)"
           />
         </div>
@@ -346,26 +325,4 @@ const dayOptions = computed(() => [
       <button type="button" class="btn danger" @click="signOutEverywhere"><Icon name="logout" size="sm" />{{ L('Keluar dari semua perangkat', 'Sign out everywhere') }}</button>
     </div>
   </template>
-
-  <Sheet
-    :sheet="pwSheet"
-    :title="data?.password.set ? L('Ganti kata sandi cadangan', 'Replace the backup password') : L('Pasang kata sandi cadangan', 'Set a backup password')"
-    :sub="L('Paling sedikit 8 karakter. Disimpan sebagai hash di vault; sesi yang sudah masuk tetap berlaku.', 'At least 8 characters. Stored as a hash in the vault; signed-in sessions stay valid.')"
-  >
-    <form @submit.prevent>
-      <label class="field">
-        <span class="lab">{{ L('Kata sandi baru', 'New password') }}</span>
-        <input v-model="pw1" class="input" type="password" autocomplete="new-password" minlength="8" />
-      </label>
-      <label class="field">
-        <span class="lab">{{ L('Ulangi kata sandi', 'Repeat the password') }}</span>
-        <input v-model="pw2" class="input" type="password" autocomplete="new-password" minlength="8" />
-      </label>
-      <div v-if="pwError" class="field-err" role="alert">{{ pwError }}</div>
-      <div class="actions end mt16">
-        <button type="button" class="btn ghost" @click="pwSheet.hide()">{{ L('Batal', 'Cancel') }}</button>
-        <BusyButton type="submit" class="btn primary" :run="savePassword" :label="L('Menyimpan…', 'Saving…')">{{ L('Simpan', 'Save') }}</BusyButton>
-      </div>
-    </form>
-  </Sheet>
 </template>

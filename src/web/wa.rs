@@ -23,6 +23,9 @@ use crate::gateway::whatsapp::{
 
 /// Time a stopping gateway gets before its task is aborted.
 const STOP_GRACE: Duration = Duration::from_secs(15);
+/// An unlinked gateway stops pairing after this long, so QR codes do not
+/// rotate forever.
+const PAIR_LIMIT: Duration = Duration::from_secs(3 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +59,7 @@ pub(crate) struct PairingView {
     pub code: Option<String>,
     pub phone: Option<String>,
     pub expires_in: Option<u64>,
+    pub stops_in: Option<u64>,
     pub done: bool,
     pub error: Option<String>,
 }
@@ -112,7 +116,9 @@ pub(crate) struct WaController {
     alert: std::sync::RwLock<Option<(TelegramBotClient, i64)>>,
     hooks: WaHooks,
     run: Mutex<Option<WaRun>>,
-    intent: std::sync::Mutex<Option<PairIntent>>,
+    intent: Arc<std::sync::Mutex<Option<PairIntent>>>,
+    /// When the current unlinked run stops pairing by itself.
+    pair_deadline: Arc<std::sync::Mutex<Option<Instant>>>,
 }
 
 async fn wait_true(signal: &mut watch::Receiver<bool>) {
@@ -131,7 +137,8 @@ impl WaController {
             alert: std::sync::RwLock::new(None),
             hooks: WaHooks::default(),
             run: Mutex::new(None),
-            intent: std::sync::Mutex::new(None),
+            intent: Arc::default(),
+            pair_deadline: Arc::default(),
         })
     }
 
@@ -189,6 +196,7 @@ impl WaController {
                 () = forward.closed() => {}
             }
         });
+        self.watch_pairing(&stop);
         let alert = self.alert.read().ok().and_then(|slot| slot.clone());
         let task = tokio::spawn(crate::bot::daemon::supervise_whatsapp(
             config,
@@ -200,6 +208,45 @@ impl WaController {
         *run = Some(WaRun { stop, task });
     }
 
+    /// Limits pairing of an unlinked session to [`PAIR_LIMIT`]: the run is
+    /// stopped when no phone linked it in time.
+    fn watch_pairing(&self, stop: &watch::Sender<bool>) {
+        let deadline = (!Self::linked()).then(|| Instant::now() + PAIR_LIMIT);
+        if let Ok(mut slot) = self.pair_deadline.lock() {
+            *slot = deadline;
+        }
+        if deadline.is_none() {
+            return;
+        }
+        let stop = stop.clone();
+        let hooks = self.hooks.clone();
+        let intent = Arc::clone(&self.intent);
+        let deadline_slot = Arc::clone(&self.pair_deadline);
+        tokio::spawn(async move {
+            tokio::select! {
+                () = tokio::time::sleep(PAIR_LIMIT) => {}
+                () = stop.closed() => return,
+            }
+            if hooks.snapshot().phase == LinkPhase::Online || Self::linked() {
+                return;
+            }
+            let _ = stop.send(true);
+            hooks.update(|state| {
+                state.error = Some(
+                    "Penautan dihentikan setelah 3 menit tanpa pindaian. / Pairing stopped after 3 minutes without a scan."
+                        .to_string(),
+                );
+            });
+            if let Ok(mut slot) = intent.lock() {
+                *slot = None;
+            }
+            if let Ok(mut slot) = deadline_slot.lock() {
+                *slot = None;
+            }
+            info!("WhatsApp pairing stopped after the time limit");
+        });
+    }
+
     /// Stops the current run, if any.
     pub(crate) async fn stop(&self) {
         let current = self.run.lock().await.take();
@@ -208,6 +255,9 @@ impl WaController {
             info!("WhatsApp gateway stopped");
         }
         self.hooks.update(|state| *state = LinkState::default());
+        if let Ok(mut slot) = self.pair_deadline.lock() {
+            *slot = None;
+        }
     }
 
     /// Applies changed WhatsApp settings by restarting (or stopping) the
@@ -298,6 +348,13 @@ impl WaController {
             |intent| intent.mode,
         );
         let now = Instant::now();
+        let stops_in = self
+            .pair_deadline
+            .lock()
+            .ok()
+            .and_then(|slot| *slot)
+            .filter(|at| *at > now && !done)
+            .map(|at| at.duration_since(now).as_secs());
         Some(PairingView {
             mode,
             qr: match mode {
@@ -310,6 +367,7 @@ impl WaController {
                 .expires_at
                 .filter(|at| *at > now)
                 .map(|at| at.duration_since(now).as_secs()),
+            stops_in,
             done,
             error: state.error,
         })

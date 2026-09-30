@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { api } from '../api/client'
 import type { SecretWriteResult, SettingsRequest, TelegramCheck, TelegramState, WriteResult } from '../api/types'
 import Badge from '../components/Badge.vue'
@@ -16,9 +16,22 @@ import { useForm } from '../composables/useForm'
 import { useLoad } from '../composables/useLoad'
 import { fmtAgoSecs } from '../format'
 import { L, nf } from '../i18n'
+import { telegramStatus } from '../lib/status'
 import { toast, useSaveBar } from '../stores/ui'
 
-const { data, loading, error, reload } = useLoad(() => api.get<TelegramState>('/api/telegram'))
+/* Polled every 10 s: Telegram starts by itself a few seconds after the token and owner are set. */
+const { data, loading, error, reload } = useLoad(() => api.get<TelegramState>('/api/telegram'), { pollMs: 10_000 })
+
+/* One extra look shortly after a save, so "Connecting…" turns into "Online" without waiting for the poll. */
+let soonTimer: ReturnType<typeof setTimeout> | null = null
+function reloadSoon(): void {
+  void reload(true)
+  if (soonTimer) clearTimeout(soonTimer)
+  soonTimer = setTimeout(() => void reload(true), 4000)
+}
+onBeforeUnmount(() => {
+  if (soonTimer) clearTimeout(soonTimer)
+})
 
 interface TgForm {
   owner: string
@@ -34,6 +47,7 @@ watch(data, (d) => {
 
 const locks = computed(() => data.value?.env_locks ?? {})
 const bot = computed(() => data.value?.bot ?? null)
+const status = computed(() => (data.value ? telegramStatus(data.value.running, data.value.online, !!data.value.bot) : null))
 const lastPoll = computed(() => {
   const s = data.value?.last_poll_secs
   return s === null || s === undefined ? L('belum ada', 'none yet') : fmtAgoSecs(s)
@@ -68,10 +82,16 @@ async function save(): Promise<void> {
     if (!idListOk(form.dedicated)) throw new Error(L('DEDICATED_CHAT_IDS berisi ID chat yang dipisah koma.', 'DEDICATED_CHAT_IDS holds chat ids separated by commas.'))
     body.DEDICATED_CHAT_IDS = ids(form.dedicated).join(',')
   }
-  if (Object.keys(body).length) await api.put<WriteResult>('/api/settings', body)
-  toast(L('Disimpan. Berlaku setelah restart.', 'Saved. Applies after a restart.'))
+  let r: WriteResult | null = null
+  if (Object.keys(body).length) r = await api.put<WriteResult>('/api/settings', body)
+  toast(
+    r?.restart_needed
+      ? L('Disimpan. Berlaku setelah restart.', 'Saved. Applies after a restart.')
+      : L('Disimpan. Telegram menyala sendiri beberapa detik lagi bila token dan owner terisi.', 'Saved. Telegram starts by itself in a few seconds once the token and owner are set.'),
+  )
   const d = await reload(true)
   if (d) reset(fromState(d))
+  reloadSoon()
 }
 
 useSaveBar({ dirty, save, discard: () => data.value && reset(fromState(data.value)) })
@@ -94,10 +114,13 @@ async function runCheck(): Promise<void> {
   void reload(true)
 }
 
-const tokenToast = (r: SecretWriteResult): string =>
-  r.detail
-    ? L(`Token valid untuk ${r.detail}. Berlaku setelah restart.`, `The token is valid for ${r.detail}. It applies after a restart.`)
-    : L('Token disimpan. Berlaku setelah restart.', 'Token saved. It applies after a restart.')
+function tokenToast(r: SecretWriteResult): string {
+  const who = r.detail ? L(`Token valid untuk ${r.detail}. `, `The token is valid for ${r.detail}. `) : L('Token disimpan. ', 'Token saved. ')
+  const when = r.restart_needed
+    ? L('Berlaku setelah restart.', 'It applies after a restart.')
+    : L('Telegram menyala sendiri beberapa detik lagi bila owner terisi.', 'Telegram starts by itself in a few seconds once the owner is set.')
+  return who + when
+}
 
 type RowState = 'ok' | 'warn' | 'info'
 interface CheckRow {
@@ -210,8 +233,8 @@ const rowIcon = (s: RowState): string => ({ ok: 'check', warn: 'alert', info: 'i
       <div>
         {{
           L(
-            'Telegram belum diatur. Isi token bot dari @BotFather dan owner user ID (akun Telegram Anda) di bawah, lalu restart daemon.',
-            'Telegram is not set up yet. Enter the bot token from @BotFather and the owner user ID (your Telegram account) below, then restart the daemon.',
+            'Telegram belum diatur. Isi token bot dari @BotFather dan owner user ID (akun Telegram Anda) di bawah. Telegram menyala sendiri setelah keduanya terisi.',
+            'Telegram is not set up yet. Enter the bot token from @BotFather and the owner user ID (your Telegram account) below. Telegram starts by itself once both are set.',
           )
         }}
       </div>
@@ -219,20 +242,23 @@ const rowIcon = (s: RowState): string => ({ ok: 'check', warn: 'alert', info: 'i
 
     <div class="card">
       <div class="card-head">
-        <span class="row-ic" :class="bot ? (data.online ? 'ok' : 'err') : ''"><Icon name="send" /></span>
+        <span class="row-ic" :class="bot || data.token.set || data.running ? status?.kind : ''"><Icon name="send" /></span>
         <div class="grow">
           <template v-if="bot">
             <h4>
               @{{ bot.username }}
-              <Badge v-if="data.online" kind="ok">Online</Badge>
-              <Badge v-else kind="err">Offline</Badge>
+              <Badge v-if="status" :kind="status.kind">{{ status.text }}</Badge>
             </h4>
             <div class="sub">
               {{ bot.first_name }}, ID {{ bot.id }}, {{ L(`long-poll, timeout ${data.poll_timeout} dtk`, `long-poll, ${data.poll_timeout} s timeout`) }}
             </div>
+            <div v-if="status?.hint" class="sub">{{ status.hint }}</div>
           </template>
           <template v-else>
-            <h4>{{ data.token.set ? L('Bot tidak terjangkau', 'The bot cannot be reached') : L('Belum ada token bot', 'No bot token yet') }}</h4>
+            <h4>
+              {{ data.token.set ? L('Bot tidak terjangkau', 'The bot cannot be reached') : L('Belum ada token bot', 'No bot token yet') }}
+              <Badge v-if="status && (data.token.set || data.running)" :kind="status.kind">{{ status.text }}</Badge>
+            </h4>
             <div class="sub">{{ data.bot_error ?? L('Isi token bot di bawah.', 'Set the bot token below.') }}</div>
           </template>
         </div>
@@ -273,11 +299,17 @@ const rowIcon = (s: RowState): string => ({ ok: 'check', warn: 'alert', info: 'i
           :meta="data.token"
           :locked="locks.BOT_TOKEN"
           :saved-toast="tokenToast"
+          :placeholder="L('Tempel token dari @BotFather', 'Paste the token from @BotFather')"
           :delete-warn="L('Tanpa token, Telegram berhenti setelah restart sampai token baru diisi.', 'Without a token, Telegram stops after the restart until a new one is set.')"
-          @changed="reload(true)"
+          @changed="reloadSoon"
         />
         <div class="help">
-          {{ L('Diperiksa dengan getMe sebelum disimpan. Token baru dipakai setelah daemon di-restart.', 'Checked with getMe before it is saved. The new token is used after the daemon restarts.') }}
+          {{
+            L(
+              'Diperiksa dengan getMe sebelum disimpan. Selama Telegram belum berjalan, ia menyala sendiri begitu token dan owner terisi; mengganti token yang sedang dipakai perlu restart.',
+              'Checked with getMe before it is saved. While Telegram is not running, it starts by itself once the token and owner are set; replacing a token in use needs a restart.',
+            )
+          }}
         </div>
       </div>
       <label class="field">

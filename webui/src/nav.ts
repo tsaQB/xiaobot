@@ -1,7 +1,8 @@
 import type { PageId } from './api/types'
 import { L } from './i18n'
 
-export type NavPage = Exclude<PageId, 'login'>
+/* `quickstart` is a UI-only page (it reads /api/overview), so it is not in the API's PageId. */
+export type NavPage = Exclude<PageId, 'login'> | 'quickstart'
 
 export interface NavItem {
   id: NavPage
@@ -16,6 +17,7 @@ export interface NavGroup {
 
 export const PAGES: readonly NavPage[] = [
   'home',
+  'quickstart',
   'chat',
   'ai',
   'search',
@@ -36,6 +38,7 @@ export function navGroups(): NavGroup[] {
       group: L('Ringkasan', 'Overview'),
       items: [
         { id: 'home', title: L('Beranda', 'Home'), icon: 'home' },
+        { id: 'quickstart', title: L('Mulai cepat', 'Quickstart'), icon: 'steps' },
         { id: 'chat', title: 'Chat', icon: 'chat' },
       ],
     },
@@ -78,19 +81,20 @@ export function pageTitle(id: string): string {
   return 'Xiao'
 }
 
-/** Phone bottom bar; "more" opens the sheet with the rest. */
+/** Phone bottom bar, Home in the centre; "more" opens the sheet with the rest. */
 export function bottomItems(): { id: NavPage | 'more'; title: string; icon: string }[] {
   return [
-    { id: 'home', title: L('Beranda', 'Home'), icon: 'home' },
     { id: 'chat', title: 'Chat', icon: 'chat' },
-    { id: 'ai', title: 'AI', icon: 'cpu' },
     { id: 'telegram', title: L('Kanal', 'Channels'), icon: 'send' },
+    { id: 'home', title: L('Beranda', 'Home'), icon: 'home' },
+    { id: 'ai', title: 'AI', icon: 'cpu' },
     { id: 'more', title: L('Lainnya', 'More'), icon: 'grid' },
   ]
 }
 
 export function moreItems(): NavItem[] {
   return [
+    { id: 'quickstart', title: L('Mulai cepat', 'Quickstart'), icon: 'steps' },
     { id: 'whatsapp', title: 'WhatsApp', icon: 'phone' },
     { id: 'search', title: L('Pencarian', 'Search'), icon: 'search' },
     { id: 'mcp', title: 'MCP', icon: 'plug' },

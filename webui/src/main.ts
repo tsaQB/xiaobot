@@ -10,7 +10,7 @@ import { applyTheme } from './theme'
 applyTheme()
 applyLang()
 
-/* Any response that carries `restart_needed` updates the restart banner. */
+/* Any response that carries `restart_needed` updates the floating restart bar. */
 onRestartFlag((needed) => {
   restart.needed = needed
 })

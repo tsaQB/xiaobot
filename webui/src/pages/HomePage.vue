@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { api } from '../api/client'
-import type { AttentionItem, Overview, RoleTestResult, TelegramCheck, WaPhase } from '../api/types'
+import type { AttentionItem, Overview, RoleTestResult, TelegramCheck } from '../api/types'
+import ActivityChart from '../components/ActivityChart.vue'
 import Badge from '../components/Badge.vue'
 import BusyButton from '../components/BusyButton.vue'
 import Icon from '../components/Icon.vue'
@@ -9,9 +10,11 @@ import LoadState from '../components/LoadState.vue'
 import PageHead from '../components/PageHead.vue'
 import SectionTitle from '../components/SectionTitle.vue'
 import { useLoad } from '../composables/useLoad'
-import { fmtAgoSecs, fmtBytes, fmtDuration, fmtMs, listJoin } from '../format'
-import { L, lang, nf } from '../i18n'
+import { fmtAgoSecs, fmtBytes, fmtMs, listJoin } from '../format'
+import { L, nf } from '../i18n'
 import { confirmRestart } from '../lib/actions'
+import { COUNTED_STEPS, countedDone, nextStep, setupSteps } from '../lib/setup'
+import { telegramStatus, waPhaseKind, waPhaseText, type StatusKind } from '../lib/status'
 import { applyOverview, uptimeNow } from '../stores/session'
 import { toast } from '../stores/ui'
 
@@ -19,6 +22,8 @@ const { data, loading, error, reload } = useLoad(() => api.get<Overview>('/api/o
   pollMs: 15_000,
   onData: applyOverview,
 })
+
+/* ---------- 1. Attention, errors first ---------- */
 
 interface AttentionRow {
   kind: AttentionItem['kind']
@@ -68,87 +73,110 @@ function attentionRow(a: AttentionItem, o: Overview): AttentionRow {
   }
 }
 
-const attention = computed(() => (data.value ? data.value.attention.map((a) => attentionRow(a, data.value as Overview)) : []))
+const KIND_ORDER: Record<AttentionItem['kind'], number> = { err: 0, warn: 1, info: 2 }
+const attention = computed(() => {
+  const o = data.value
+  if (!o) return []
+  return [...o.attention].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind]).map((a) => attentionRow(a, o))
+})
+const attnKind = computed<'err' | 'warn' | 'info'>(() => attention.value[0]?.kind ?? 'info')
 
-function phaseText(p: WaPhase): string {
-  const t: Record<WaPhase, string> = {
-    off: L('Gateway nonaktif', 'Gateway off'),
-    starting: L('Memulai…', 'Starting…'),
-    pairing: L('Menunggu penautan', 'Waiting to be linked'),
-    online: 'Online',
-    retrying: L('Mencoba ulang', 'Retrying'),
-    logged_out: L('Keluar dari WhatsApp', 'Logged out of WhatsApp'),
-  }
-  return t[p]
-}
+/* ---------- 2. Quickstart card (until the essentials are done) ---------- */
 
-interface StatusRow {
+const steps = computed(() => (data.value ? setupSteps(data.value) : []))
+const stepsDone = computed(() => countedDone(steps.value))
+const next = computed(() => nextStep(steps.value))
+const stepsPct = computed(() => `${Math.round((stepsDone.value / COUNTED_STEPS) * 100)}%`)
+
+/* ---------- 3. Status tiles ---------- */
+
+interface Tile {
+  key: string
   icon: string
-  kind: string
-  k: string
-  v: string
-  s: string
+  label: string
+  kind: StatusKind
+  value: string
+  sub: string
   to: string
+  mono?: boolean
+  ticking?: boolean
 }
 
-const status = computed<StatusRow[]>(() => {
+/* A clock that visibly ticks: "02:14:05", or "3h 04:12:09" / "3d 04:12:09" past a day. */
+function uptimeClock(total: number): string {
+  const s = Math.max(0, Math.floor(total))
+  const d = Math.floor(s / 86400)
+  const hh = String(Math.floor((s % 86400) / 3600)).padStart(2, '0')
+  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
+  const ss = String(s % 60).padStart(2, '0')
+  const hms = `${hh}:${mm}:${ss}`
+  return d ? `${L(`${d}h`, `${d}d`)} ${hms}` : hms
+}
+
+const tiles = computed<Tile[]>(() => {
   const o = data.value
   if (!o) return []
   const tg = o.telegram
+  const tgs = telegramStatus(tg.running, tg.online, !!tg.username)
+  const tgOff = !tg.configured && !tg.running
   const wa = o.whatsapp
   const mm = o.main_model
-  const paused = o.search.paused
   const up = uptimeNow.value ?? o.system.uptime_secs
   return [
-    { icon: 'power', kind: 'ok', k: 'Daemon', v: L('Berjalan ', 'Running for ') + fmtDuration(up), s: `v${o.system.version}, PID ${o.system.pid}, ${o.system.host}`, to: '/system' },
     {
+      key: 'telegram',
       icon: 'send',
-      kind: tg.online ? 'ok' : tg.configured ? 'err' : '',
-      k: 'Telegram',
-      v: tg.username ? `@${tg.username}` : L('Belum diatur', 'Not set up'),
-      s: tg.online
-        ? `Online, owner ${tg.owner_id ?? '—'}, poll ${tg.last_poll_secs === null ? L('belum ada', 'none yet') : fmtAgoSecs(tg.last_poll_secs)}`
-        : tg.configured
-          ? L('Offline, polling tidak berjalan', 'Offline, polling is not running')
-          : L('Token bot dan owner belum diisi', 'The bot token and owner are not set'),
+      label: 'Telegram',
+      kind: tgOff ? '' : tgs.kind,
+      value: tgOff ? L('Belum diatur', 'Not set up') : tg.running ? tgs.text : tg.username ? L('Belum berjalan', 'Not running yet') : L('Mati', 'Off'),
+      sub: tg.username ? `@${tg.username}` : tgOff ? L('Isi token dan owner', 'Set the token and owner') : '—',
       to: '/telegram',
     },
     {
+      key: 'whatsapp',
       icon: 'phone',
-      kind: wa.linked && wa.phase === 'online' ? 'ok' : wa.phase === 'retrying' ? 'warn' : '',
-      k: 'WhatsApp',
-      v: wa.linked ? L('Tertaut', 'Linked') : L('Belum ditautkan', 'Not linked'),
-      s: phaseText(wa.phase),
+      label: 'WhatsApp',
+      kind: waPhaseKind(wa.phase, wa.linked),
+      value: wa.linked ? waPhaseText(wa.phase) : wa.phase === 'pairing' ? waPhaseText(wa.phase) : L('Belum ditautkan', 'Not linked'),
+      sub: wa.linked ? L('Tertaut', 'Linked') : wa.enabled ? L('Aktif, belum tertaut', 'On, not linked') : L('Gateway mati', 'Gateway off'),
       to: '/whatsapp',
     },
     {
+      key: 'model',
       icon: 'cpu',
-      kind: mm.model ? 'info' : 'err',
-      k: L('Model utama', 'Main model'),
-      v: mm.model ?? L('Belum dipilih', 'Not chosen'),
-      s: mm.provider
-        ? L(`${mm.provider}, ${nf(mm.catalogue)} model di katalog`, `${mm.provider}, ${nf(mm.catalogue)} models in the catalogue`)
-        : L('Tambahkan provider di halaman AI', 'Add a provider on the AI page'),
+      label: L('Model utama', 'Main model'),
+      kind: mm.model ? '' : 'err',
+      value: mm.model ?? L('Belum dipilih', 'Not chosen'),
+      sub: mm.provider ?? L('Tambahkan provider', 'Add a provider'),
       to: '/ai',
+      mono: !!mm.model,
     },
     {
-      icon: 'search',
-      kind: paused.length ? 'warn' : 'ok',
-      k: L('Pencarian', 'Search'),
-      v: o.search.first ?? L('Tidak ada', 'None'),
-      s: paused.length ? L(`${listJoin(paused)} sedang dijeda`, `${listJoin(paused)} paused`) : L('Semua mesin siap', 'Every engine is ready'),
-      to: '/search',
-    },
-    {
-      icon: 'db',
-      kind: '',
-      k: L('Penyimpanan', 'Storage'),
-      v: `${fmtBytes(o.storage.db_bytes)} database`,
-      s: L(`Lampiran ${fmtBytes(o.storage.attachments_bytes)}, ${nf(o.storage.memories)} memori`, `Attachments ${fmtBytes(o.storage.attachments_bytes)}, ${nf(o.storage.memories)} memories`),
+      key: 'daemon',
+      icon: 'clock',
+      label: L('Daemon berjalan', 'Daemon uptime'),
+      kind: 'ok',
+      value: uptimeClock(up),
+      sub: `v${o.system.version} · PID ${o.system.pid}`,
       to: '/system',
+      ticking: true,
     },
   ]
 })
+
+/* ---------- 4. Activity ---------- */
+
+const activity = computed(() => data.value?.activity ?? [])
+const today = computed(() => activity.value[activity.value.length - 1] ?? null)
+const split = computed(() => {
+  const tg = activity.value.reduce((n, d) => n + d.telegram, 0)
+  const wa = activity.value.reduce((n, d) => n + d.whatsapp, 0)
+  const all = tg + wa
+  const share = (v: number): string => (all ? `${Math.round((v / all) * 100)}%` : '—')
+  return { tg, wa, tgPct: share(tg), waPct: share(wa) }
+})
+
+/* ---------- 5. Quick actions ---------- */
 
 async function testMain(): Promise<void> {
   const r = await api.post<RoleTestResult>('/api/ai/test/main')
@@ -162,32 +190,29 @@ async function checkTelegram(): Promise<void> {
   else toast(r.error ?? L('Telegram tidak menjawab', 'Telegram did not answer'), true)
   void reload(true)
 }
+
+/* ---------- 6. Details ---------- */
+
+const lastPoll = computed(() => {
+  const s = data.value?.telegram.last_poll_secs
+  return s === null || s === undefined ? null : fmtAgoSecs(s)
+})
 </script>
 
 <template>
-  <PageHead :title="L('Beranda', 'Home')">
-    <template v-if="data">
-      <template v-if="lang === 'en'">
-        <b :class="{ err: data.queue.failed }">{{ nf(data.queue.failed) }} failed</b> and <b>{{ nf(data.queue.pending) }}</b> waiting in the
-        queue. <b>{{ nf(data.storage.messages) }}</b> messages stored across {{ nf(data.storage.conversations) }} conversations,
-        <b>{{ nf(data.storage.memories) }}</b> facts in memory.
-      </template>
-      <template v-else>
-        <b :class="{ err: data.queue.failed }">{{ nf(data.queue.failed) }} gagal</b> dan <b>{{ nf(data.queue.pending) }}</b> menunggu di
-        antrean. <b>{{ nf(data.storage.messages) }}</b> pesan tersimpan di {{ nf(data.storage.conversations) }} percakapan,
-        <b>{{ nf(data.storage.memories) }}</b> fakta di memori.
-      </template>
-    </template>
-  </PageHead>
+  <PageHead :title="L('Beranda', 'Home')" :text="L('Keadaan Xiao sekarang dan 7 hari terakhir.', 'How Xiao is doing now and over the last 7 days.')" />
 
   <LoadState v-if="!data" :loading="loading" :error="error" @retry="reload()" />
 
   <template v-else>
+    <!-- 1. Needs attention -->
     <template v-if="attention.length">
-      <SectionTitle :title="L('Perlu perhatian', 'Needs attention')"><Badge kind="warn">{{ attention.length }}</Badge></SectionTitle>
+      <SectionTitle :title="L('Perlu perhatian', 'Needs attention')">
+        <Badge :kind="attnKind">{{ attention.length }}</Badge>
+      </SectionTitle>
       <div class="card rows">
         <RouterLink v-for="(a, i) in attention" :key="i" class="row link" :to="a.to">
-          <span class="row-ic" :class="a.kind"><Icon :name="a.icon" /></span>
+          <span class="row-ic" :class="a.kind"><Icon :name="a.kind === 'err' ? 'alert' : a.icon" /></span>
           <div class="grow">
             <div class="label">{{ a.title }}</div>
             <div v-if="a.hint" class="hint">{{ a.hint }}</div>
@@ -197,26 +222,125 @@ async function checkTelegram(): Promise<void> {
       </div>
     </template>
 
-    <SectionTitle title="Status" />
-    <div class="card rows">
-      <RouterLink v-for="r in status" :key="r.k" class="row link srow" :to="r.to">
-        <span class="row-ic" :class="r.kind"><Icon :name="r.icon" /></span>
+    <!-- 2. Quickstart -->
+    <div v-if="!data.setup.complete" class="card card-body qs-card" :class="{ 'mt16': attention.length }">
+      <div class="flex top">
+        <span class="row-ic info"><Icon name="steps" /></span>
         <div class="grow">
-          <div class="k">{{ r.k }}</div>
-          <div class="v">{{ r.v }}</div>
-          <div class="hint">{{ r.s }}</div>
+          <div class="label">{{ L('Penyiapan belum selesai', 'Setup is not finished') }}</div>
+          <div class="hint">
+            <b>{{ stepsDone }}</b>{{ L(` dari ${COUNTED_STEPS} langkah penting selesai.`, ` of ${COUNTED_STEPS} key steps done.`) }}{{ next ? L(` Berikutnya: ${next.title}.`, ` Next: ${next.title}.`) : '' }}
+          </div>
         </div>
-        <Icon name="chev" />
-      </RouterLink>
+      </div>
+      <div class="meter mt12" role="progressbar" :aria-valuenow="stepsDone" aria-valuemin="0" :aria-valuemax="COUNTED_STEPS" :aria-label="L('Kemajuan penyiapan', 'Setup progress')">
+        <i :style="{ width: stepsPct }"></i>
+      </div>
+      <div class="actions mt12">
+        <RouterLink v-if="next" class="btn primary sm" :to="next.to"><Icon :name="next.icon" size="sm" />{{ next.action }}</RouterLink>
+        <RouterLink class="btn ghost sm" to="/quickstart">{{ L('Semua langkah', 'All steps') }}<Icon name="chev" size="sm" /></RouterLink>
+      </div>
     </div>
 
+    <!-- 3. Status tiles -->
+    <SectionTitle title="Status" />
+    <div class="tiles-wrap">
+      <div class="tiles">
+        <RouterLink v-for="t in tiles" :key="t.key" class="tile" :to="t.to">
+          <span class="tile-k"><Icon :name="t.icon" size="sm" />{{ t.label }}</span>
+          <span class="tile-v" :class="{ mono: t.mono, tick: t.ticking }" :title="t.value">
+            <span v-if="t.kind" class="dot" :class="t.kind" aria-hidden="true"></span><span class="tv">{{ t.value }}</span>
+          </span>
+          <span class="tile-s" :title="t.sub">{{ t.sub }}</span>
+        </RouterLink>
+      </div>
+    </div>
+
+    <!-- 4. Activity -->
+    <SectionTitle :title="L('Aktivitas 7 hari', 'Activity, 7 days')" />
+    <div class="card">
+      <div class="card-body">
+        <ActivityChart v-if="activity.length" :days="activity" />
+        <div v-else class="small muted">{{ L('Belum ada data aktivitas.', 'No activity data yet.') }}</div>
+      </div>
+      <dl v-if="activity.length" class="qstats act-stats">
+        <div>
+          <dt>{{ L('Pesan hari ini', 'Messages today') }}</dt>
+          <dd>{{ nf(today?.prompts ?? 0) }}</dd>
+        </div>
+        <div>
+          <dt>{{ L('Jawaban hari ini', 'Answers today') }}</dt>
+          <dd>{{ nf(today?.answers ?? 0) }}</dd>
+        </div>
+        <div>
+          <dt>{{ L('Telegram, 7 hari', 'Telegram, 7 days') }}</dt>
+          <dd>{{ nf(split.tg) }} <span class="pct">{{ split.tgPct }}</span></dd>
+        </div>
+        <div>
+          <dt>{{ L('WhatsApp, 7 hari', 'WhatsApp, 7 days') }}</dt>
+          <dd>{{ nf(split.wa) }} <span class="pct">{{ split.waPct }}</span></dd>
+        </div>
+      </dl>
+    </div>
+
+    <!-- 5. Quick actions -->
     <SectionTitle :title="L('Aksi cepat', 'Quick actions')" />
     <div class="actions">
       <RouterLink class="btn primary" to="/chat"><Icon name="chat" size="sm" />{{ L('Chat dengan Xiao', 'Chat with Xiao') }}</RouterLink>
       <BusyButton class="btn" :run="testMain" :label="L('Menguji…', 'Testing…')"><Icon name="play" size="sm" />{{ L('Uji model utama', 'Test main model') }}</BusyButton>
-      <BusyButton class="btn" :run="checkTelegram" :label="L('Memeriksa…', 'Checking…')"><Icon name="send" size="sm" />{{ L('Periksa Telegram', 'Check Telegram') }}</BusyButton>
+      <BusyButton class="btn" :run="checkTelegram" :disabled="!data.telegram.configured" :label="L('Memeriksa…', 'Checking…')">
+        <Icon name="send" size="sm" />{{ L('Periksa Telegram', 'Check Telegram') }}
+      </BusyButton>
       <RouterLink class="btn" to="/search"><Icon name="search" size="sm" />{{ L('Uji pencarian', 'Test search') }}</RouterLink>
+      <RouterLink class="btn" to="/quickstart"><Icon name="steps" size="sm" />{{ L('Mulai cepat', 'Quickstart') }}</RouterLink>
       <button type="button" class="btn danger" @click="confirmRestart"><Icon name="power" size="sm" />Restart daemon</button>
+    </div>
+
+    <!-- 6. Details -->
+    <SectionTitle :title="L('Rincian', 'Details')" />
+    <div class="card rows details">
+      <RouterLink class="row link srow" to="/queue">
+        <span class="row-ic" :class="{ err: data.queue.failed }"><Icon name="inbox" /></span>
+        <div class="grow">
+          <div class="k">{{ L('Antrean', 'Queue') }}</div>
+          <div class="v">
+            {{ L(`${nf(data.queue.pending)} menunggu`, `${nf(data.queue.pending)} waiting`) }},
+            <span :class="{ 'err-text': data.queue.failed }">{{ L(`${nf(data.queue.failed)} gagal`, `${nf(data.queue.failed)} failed`) }}</span>
+          </div>
+          <div class="hint">
+            {{ lastPoll ? L(`Poll Telegram terakhir ${lastPoll}`, `Last Telegram poll ${lastPoll}`) : L('Belum ada poll Telegram', 'No Telegram poll yet') }}
+          </div>
+        </div>
+        <Icon name="chev" />
+      </RouterLink>
+      <RouterLink class="row link srow" to="/search">
+        <span class="row-ic" :class="{ warn: data.search.paused.length }"><Icon name="search" /></span>
+        <div class="grow">
+          <div class="k">{{ L('Pencarian', 'Search') }}</div>
+          <div class="v">{{ data.search.first ? L(`Pertama: ${data.search.first}`, `First: ${data.search.first}`) : L('Tidak ada mesin aktif', 'No active engine') }}</div>
+          <div class="hint">
+            {{ data.search.paused.length ? L(`${listJoin(data.search.paused)} sedang dijeda`, `${listJoin(data.search.paused)} paused`) : L('Tidak ada yang dijeda', 'Nothing paused') }},
+            {{ L(`${nf(data.search.keyed)} kunci API`, `${nf(data.search.keyed)} API ${data.search.keyed === 1 ? 'key' : 'keys'}`) }}
+          </div>
+        </div>
+        <Icon name="chev" />
+      </RouterLink>
+      <RouterLink class="row link srow" to="/system">
+        <span class="row-ic"><Icon name="db" /></span>
+        <div class="grow">
+          <div class="k">{{ L('Penyimpanan', 'Storage') }}</div>
+          <div class="v">{{ L(`Database ${fmtBytes(data.storage.db_bytes)}, lampiran ${fmtBytes(data.storage.attachments_bytes)}`, `Database ${fmtBytes(data.storage.db_bytes)}, attachments ${fmtBytes(data.storage.attachments_bytes)}`) }}</div>
+          <div class="hint">
+            {{
+              L(
+                `${nf(data.storage.memories)} memori, ${nf(data.storage.messages)} pesan di ${nf(data.storage.conversations)} percakapan`,
+                `${nf(data.storage.memories)} memories, ${nf(data.storage.messages)} messages in ${nf(data.storage.conversations)} conversations`,
+              )
+            }}
+          </div>
+        </div>
+        <Icon name="chev" />
+      </RouterLink>
     </div>
   </template>
 </template>

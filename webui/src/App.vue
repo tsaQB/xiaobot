@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import AppShell from './components/AppShell.vue'
 import ConfirmSheet from './components/ConfirmSheet.vue'
+import RestartBar from './components/RestartBar.vue'
 import SaveBar from './components/SaveBar.vue'
 import Toasts from './components/Toasts.vue'
 import { L } from './i18n'
@@ -27,6 +28,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKey))
   <AppShell v-else-if="route.name" />
   <div class="scrim" :class="{ on: !!sheetState.active }" aria-hidden="true" @click="closeSheet"></div>
   <ConfirmSheet />
+  <RestartBar v-if="route.name && route.name !== 'login'" />
   <SaveBar />
   <Toasts />
   <div v-if="restart.running" class="busy-overlay" role="alertdialog" aria-live="assertive" :aria-label="L('Merestart daemon', 'Restarting the daemon')">

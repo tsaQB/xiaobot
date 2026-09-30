@@ -4,7 +4,7 @@ import { router } from '../router'
 import { markSignedOut, restartDaemon } from '../stores/session'
 import { closeSheet, confirmAction } from '../stores/ui'
 
-/** The restart confirmation used by the home, system and banner buttons. */
+/** The restart confirmation used by the home and system pages and the restart bar. */
 export function confirmRestart(): void {
   confirmAction({
     title: L('Restart daemon?', 'Restart the daemon?'),

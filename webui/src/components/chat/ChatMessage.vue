@@ -3,6 +3,7 @@ import { fmtBytes, fmtWhen } from '../../format'
 import { L, nf } from '../../i18n'
 import type { UiMessage } from '../../stores/chat'
 import Badge from '../Badge.vue'
+import Brandmark from '../Brandmark.vue'
 import Icon from '../Icon.vue'
 import Markdown from '../Markdown'
 import { activityIcon, fileUrl, routeIcon } from './chatFiles'
@@ -31,7 +32,7 @@ function onToggle(m: UiMessage, e: Event): void {
   </div>
 
   <div v-else class="msg">
-    <div class="brandmark av" aria-hidden="true">小</div>
+    <Brandmark class="av" />
     <div class="body">
       <span class="sr">Xiao: </span>
       <details v-if="m.thinking" class="think" :open="m.thinkOpen" @toggle="onToggle(m, $event)">

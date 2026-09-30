@@ -71,6 +71,13 @@ pub async fn try_bootstrap_telegram(
     ai_service: &AIChatService,
 ) -> Option<(TelegramBotClient, Arc<ChatRouteScope>, UserLastImagePrompt)> {
     let token = get_or_prompt_token(ai_service).await?;
+    bootstrap_telegram_with_token(token).await
+}
+
+/// Connects the bot without asking anything on the terminal.
+async fn bootstrap_telegram_with_token(
+    token: String,
+) -> Option<(TelegramBotClient, Arc<ChatRouteScope>, UserLastImagePrompt)> {
     let owner_user_id = get_configured_owner_id()?;
 
     let bot = TelegramBotClient::new(token);
@@ -264,6 +271,8 @@ pub async fn poll_loop(
 ) {
     let mut offset = ai::storage::load_telegram_offset_async().await;
     let mut consecutive_failures = 0u32;
+    // getMe just succeeded, so the bot counts as online from the first poll.
+    LAST_POLL_UNIX.store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
     info!("Memulai polling pesan dengan durable control/generation queues...");
 
     loop {
@@ -458,31 +467,47 @@ pub(crate) async fn supervise_whatsapp(
     }
 }
 
-/// Keeps trying to start Telegram (with the polling backoff) until it works
-/// or the daemon stops. Used when the token and owner are set but Telegram
-/// could not be reached at start, for example before the network is up:
-/// without the WebUI the daemon used to exit and let the service manager
-/// retry, which would now also take the console down.
+/// How often a daemon without Telegram checks whether the bot token and
+/// owner have been set (for example in the WebUI).
+const TELEGRAM_SETUP_CHECK: Duration = Duration::from_secs(5);
+
+/// Starts Telegram as soon as it can, while the WebUI keeps the daemon
+/// alive: waits until the bot token and owner are set, then retries with
+/// the polling backoff while Telegram cannot be reached (for example before
+/// the network is up). Returns `None` when the daemon stops first.
 async fn wait_for_telegram(
-    ai_service: &AIChatService,
     mut shutdown: watch::Receiver<bool>,
 ) -> Option<(TelegramBotClient, Arc<ChatRouteScope>, UserLastImagePrompt)> {
     let mut failures = 0u32;
     loop {
-        failures = failures.saturating_add(1);
-        let delay = poll_backoff(failures);
-        warn!("Telegram could not be started; trying again in {delay:?}");
+        let delay = if crate::web::auth::telegram_configured() {
+            failures = failures.saturating_add(1);
+            let delay = poll_backoff(failures);
+            warn!("Telegram could not be started; trying again in {delay:?}");
+            delay
+        } else {
+            failures = 0;
+            TELEGRAM_SETUP_CHECK
+        };
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
             _ = wait_until_shutdown(&mut shutdown) => return None,
         }
-        if let Some(telegram) = try_bootstrap_telegram(ai_service).await {
+        let Some(token) = crate::get_configured_token() else {
+            continue;
+        };
+        if get_configured_owner_id().is_none() {
+            continue;
+        }
+        if let Some(telegram) = bootstrap_telegram_with_token(token).await {
+            info!("Telegram started");
             return Some(telegram);
         }
     }
 }
 
 pub async fn run_daemon(ai_service: Arc<AIChatService>) {
+    LAST_POLL_UNIX.store(0, Ordering::Relaxed);
     let wa_enabled = crate::web::wa::WaController::should_run();
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -527,8 +552,11 @@ pub async fn run_daemon(ai_service: Arc<AIChatService>) {
     }
 
     let tg_bootstrap = match tg_bootstrap {
-        None if web.is_some() && crate::web::auth::telegram_configured() => {
-            let telegram = wait_for_telegram(&ai_service, shutdown_rx.clone()).await;
+        None if web.is_some() => {
+            if !crate::web::auth::telegram_configured() {
+                info!("Telegram is not set up yet; it starts once the bot token and owner are set in the WebUI");
+            }
+            let telegram = wait_for_telegram(shutdown_rx.clone()).await;
             if let Some((bot, scope, _)) = telegram.as_ref() {
                 wa.set_alert(Some((bot.clone(), scope.owner_user_id)));
             }
@@ -589,7 +617,7 @@ pub async fn run_daemon(ai_service: Arc<AIChatService>) {
         } else {
             "WebUI only (configure Telegram or WhatsApp from the console)"
         };
-        info!("Daemon running without Telegram: {mode}");
+        info!("Daemon stopping without Telegram: {mode}");
         let mut wait = shutdown_rx.clone();
         wait_until_shutdown(&mut wait).await;
         wa.stop().await;
@@ -615,8 +643,13 @@ pub async fn run_daemon(ai_service: Arc<AIChatService>) {
             error!("WhatsApp gateway berhenti permanen karena logout; daemon WhatsApp selesai.");
         }
     }
+    signal_task.abort();
     ai_service.begin_shutdown().await;
     let _ = shutdown_tx.send(true);
+    // A restart in the same process binds the address again.
+    if let Some(web) = web.as_ref() {
+        web.stop_server().await;
+    }
 }
 
 #[cfg(test)]

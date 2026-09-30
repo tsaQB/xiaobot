@@ -1,4 +1,4 @@
-//! `xiao web`: address, status and sign-in of the Xiao Console from the
+//! `xiao web`: address, status and sign-in of the Xiao WebUI from the
 //! terminal. Setting a password here is the way in when Telegram is not
 //! configured yet.
 
@@ -9,7 +9,7 @@ use std::time::Duration;
 use super::{assets, auth, net, settings};
 
 fn print_help() {
-    println!("\n  \x1b[1;37mxiao web\x1b[0m: Xiao Console (WebUI) inside `xiao start`\n");
+    println!("\n  \x1b[1;37mxiao web\x1b[0m: Xiao WebUI inside `xiao start`\n");
     println!("    \x1b[1;38;5;45mxiao web\x1b[0m [status]           Address, sign-in methods and whether the console answers");
     println!("    \x1b[1;38;5;45mxiao web password\x1b[0m           Set the backup password (asked twice, not shown)");
     println!("    \x1b[1;38;5;45mxiao web password rm\x1b[0m        Remove the backup password");
@@ -40,7 +40,7 @@ fn yes_no(value: bool) -> &'static str {
 
 fn print_status() {
     let raw = settings::effective("XIAO_WEB_BIND");
-    println!("\n  \x1b[1;37mXiao Console\x1b[0m");
+    println!("\n  \x1b[1;37mXiao WebUI\x1b[0m");
     match net::parse_bind(&raw) {
         Ok(None) => println!("    Address      : off (XIAO_WEB_BIND=off)"),
         Ok(Some(bind)) => {
@@ -73,7 +73,7 @@ fn print_status() {
         println!("    \x1b[33mThis binary was built without the WebUI files.\x1b[0m");
     }
     if !auth::telegram_login_available() && !auth::password_is_set() {
-        println!("\n  \x1b[33mNo sign-in method yet: run `xiao web password`.\x1b[0m");
+        println!("\n  \x1b[33mNo sign-in method yet: open the WebUI and enter the setup code that `xiao start` prints (also in the journal), or run `xiao web password`.\x1b[0m");
     }
     println!();
 }

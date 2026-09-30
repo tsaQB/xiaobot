@@ -22,7 +22,7 @@ pub(crate) fn print_cli_help() {
 
     println!("  \x1b[1;38;2;6;182;212m▸ \x1b[1;37mGATEWAY & SYSTEM\x1b[0m");
     println!("    \x1b[1;38;5;45mgateway\x1b[0m \x1b[38;5;245m[check|token|owner|wa]\x1b[0m  \x1b[38;5;250mKelola gateway Telegram dan WhatsApp\x1b[0m");
-    println!("    \x1b[1;38;5;45mweb\x1b[0m \x1b[38;5;245m[status|password|bind|logout-all]\x1b[0m \x1b[38;5;250mXiao Console (WebUI) address and sign-in\x1b[0m");
+    println!("    \x1b[1;38;5;45mweb\x1b[0m \x1b[38;5;245m[status|password|bind|logout-all]\x1b[0m \x1b[38;5;250mXiao WebUI address and sign-in\x1b[0m");
     println!("    \x1b[1;38;5;45mstatus\x1b[0m                    \x1b[38;5;250mDisplay telemetry, health, & provider dashboard\x1b[0m");
     println!("    \x1b[1;38;5;45mversion\x1b[0m, \x1b[1;38;5;45m-v\x1b[0m               \x1b[38;5;250mDisplay binary version\x1b[0m");
     println!("    \x1b[1;38;5;45mhelp\x1b[0m, \x1b[1;38;5;45m-h\x1b[0m                  \x1b[38;5;250mShow this help reference\x1b[0m\n");

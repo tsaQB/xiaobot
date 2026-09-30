@@ -29,7 +29,8 @@ pub(crate) fn router(state: Arc<WebState>) -> Router {
         .route("/api/auth/state", get(auth::auth_state))
         .route("/api/auth/code/send", post(auth::code_send))
         .route("/api/auth/code/verify", post(auth::code_verify))
-        .route("/api/auth/password", post(auth::password_login));
+        .route("/api/auth/password", post(auth::password_login))
+        .route("/api/auth/setup", post(auth::setup));
 
     let protected = Router::new()
         .route("/api/auth/logout", post(auth::logout))
@@ -50,6 +51,7 @@ pub(crate) fn router(state: Arc<WebState>) -> Router {
         .route("/api/ai/test/{role}", post(ai::test_role))
         .route("/api/search", get(search::state))
         .route("/api/search/cooldowns/reset", post(search::reset_cooldowns))
+        .route("/api/search/engines/{id}", put(search::set_engine))
         .route("/api/search/test", post(search::test))
         .route("/api/mcp", get(search::mcp_state).put(search::mcp_update))
         .route("/api/mcp/reset", post(search::mcp_reset))

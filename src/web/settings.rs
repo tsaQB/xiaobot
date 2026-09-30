@@ -63,7 +63,11 @@ pub(crate) const SETTINGS: &[SettingSpec] = &[
     ),
     spec("XIAO_WEB_SESSION_DAYS", Effect::Live, "7"),
     spec("XIAO_WEB_TELEGRAM_LOGIN", Effect::Live, "true"),
+    spec("XIAO_LOG_LEVEL", Effect::Live, "info"),
 ];
+
+/// Levels `XIAO_LOG_LEVEL` accepts, quietest first.
+pub(crate) const LOG_LEVELS: [&str; 5] = ["error", "warn", "info", "debug", "trace"];
 
 const fn spec(key: &'static str, effect: Effect, default: &'static str) -> SettingSpec {
     SettingSpec {
@@ -156,7 +160,7 @@ pub(crate) fn all_env_locks() -> BTreeMap<String, String> {
                     .iter()
                     .flat_map(|(_, aliases, _)| aliases.iter().copied()),
             )
-            .chain(["EXA_MCP_URL", "RUST_LOG"]),
+            .chain(["EXA_MCP_URL", "RUST_LOG", "XIAO_SEARCH_DISABLED"]),
     )
 }
 
@@ -396,6 +400,18 @@ pub(crate) fn normalize(key: &str, raw: &str) -> Result<String, ApiError> {
                     .join(", ")
             })
             .map_err(|error| invalid(key, &error, "daftar jaringan tidak valid")),
+        "XIAO_LOG_LEVEL" => {
+            let level = value.to_ascii_lowercase();
+            if LOG_LEVELS.contains(&level.as_str()) {
+                Ok(level)
+            } else {
+                Err(invalid(
+                    key,
+                    "must be error, warn, info, debug or trace",
+                    "harus error, warn, info, debug, atau trace",
+                ))
+            }
+        }
         "XIAO_WEB_SESSION_DAYS" => match value {
             "1" | "7" | "30" => Ok(value.to_string()),
             _ => Err(invalid(key, "must be 1, 7 or 30", "harus 1, 7, atau 30")),
@@ -411,7 +427,7 @@ pub(crate) fn normalize(key: &str, raw: &str) -> Result<String, ApiError> {
 /// no extra copy of the bot token is kept) to tell which changes still wait
 /// for a restart.
 pub(crate) struct RestartTracker {
-    snapshot: Vec<(&'static str, Option<[u8; 32]>)>,
+    snapshot: std::sync::Mutex<Vec<(&'static str, Option<[u8; 32]>)>>,
 }
 
 fn restart_fingerprint(key: &str) -> Option<[u8; 32]> {
@@ -426,20 +442,37 @@ fn restart_fingerprint(key: &str) -> Option<[u8; 32]> {
 impl RestartTracker {
     pub(crate) fn capture() -> Self {
         Self {
-            snapshot: RESTART_KEYS
-                .iter()
-                .map(|key| (*key, restart_fingerprint(key)))
-                .collect(),
+            snapshot: std::sync::Mutex::new(
+                RESTART_KEYS
+                    .iter()
+                    .map(|key| (*key, restart_fingerprint(key)))
+                    .collect(),
+            ),
         }
     }
 
     /// Restart-only settings whose value changed since startup.
     pub(crate) fn pending(&self) -> Vec<&'static str> {
-        self.snapshot
+        let Ok(snapshot) = self.snapshot.lock() else {
+            return Vec::new();
+        };
+        snapshot
             .iter()
             .filter(|(key, at_start)| restart_fingerprint(key) != *at_start)
             .map(|(key, _)| *key)
             .collect()
+    }
+
+    /// Takes the current values of `keys` as applied (a part of the daemon
+    /// started later with them).
+    pub(crate) fn rebaseline(&self, keys: &[&str]) {
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            for (key, fingerprint) in snapshot.iter_mut() {
+                if keys.contains(&*key) {
+                    *fingerprint = restart_fingerprint(*key);
+                }
+            }
+        }
     }
 }
 
@@ -475,6 +508,11 @@ mod tests {
         assert!(normalize("XIAO_WEB_BIND", "0.0.0.0:22").is_err());
         assert!(normalize("XIAO_WEB_ALLOWED_NETWORKS", "10.0.0.0/8,bad").is_err());
         assert!(normalize("XIAO_WEB_SESSION_DAYS", "3").is_err());
+        assert_eq!(
+            normalize("XIAO_LOG_LEVEL", " WARN ").expect("level"),
+            "warn"
+        );
+        assert!(normalize("XIAO_LOG_LEVEL", "loud").is_err());
         assert!(
             normalize("BOT_TOKEN", "x").is_err(),
             "secrets have their own endpoint"

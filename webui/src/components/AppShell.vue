@@ -9,8 +9,8 @@ import { bottomItems, moreItems, navGroups, pageTitle, PAGES, type NavPage } fro
 import { auth, refreshShell, shell, uptimeNow } from '../stores/session'
 import { useSheet } from '../stores/ui'
 import { cycleTheme, theme, themeIcon, themeName } from '../theme'
+import Brandmark from './Brandmark.vue'
 import Icon from './Icon.vue'
-import RestartBanner from './RestartBanner.vue'
 import Sheet from './Sheet.vue'
 
 const route = useRoute()
@@ -46,9 +46,9 @@ poll.start()
   <div class="app" :data-page="page">
     <nav class="sidebar" :aria-label="L('Navigasi', 'Navigation')">
       <div class="side-brand">
-        <div class="brandmark" aria-hidden="true">小</div>
+        <Brandmark />
         <div>
-          <b>Xiao Console</b>
+          <b>Xiao</b>
           <small><template v-if="botName">@{{ botName }}</template><span class="ver">v{{ version }}</span></small>
         </div>
       </div>
@@ -75,7 +75,7 @@ poll.start()
     </nav>
 
     <header class="topbar">
-      <div class="brandmark" aria-hidden="true">小</div>
+      <Brandmark />
       <h1>{{ pageTitle(page) }}</h1>
       <span class="livepill" :title="L('Daemon berjalan', 'Daemon running')"><span class="dot"></span>{{ uptime }}</span>
       <button type="button" class="iconbtn lang" :lang="otherLang" :title="otherLangName" :aria-label="otherLangName" @click="toggleLang">
@@ -96,7 +96,6 @@ poll.start()
     </header>
 
     <main id="main" class="main">
-      <RestartBanner />
       <RouterView />
     </main>
 
@@ -114,7 +113,7 @@ poll.start()
     <Sheet
       :sheet="more"
       :title="L('Menu lainnya', 'More')"
-      :sub="L('Bagian Xiao Console yang tidak ada di bilah bawah.', 'The parts of Xiao Console that are not in the bottom bar.')"
+      :sub="L('Bagian Xiao yang tidak ada di bilah bawah.', 'The parts of Xiao that are not in the bottom bar.')"
     >
       <div class="more-grid">
         <RouterLink v-for="it in moreItems()" :key="it.id" :to="`/${it.id}`" @click="more.hide()">
