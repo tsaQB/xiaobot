@@ -427,8 +427,11 @@ pub(crate) fn normalize(key: &str, raw: &str) -> Result<String, ApiError> {
 /// no extra copy of the bot token is kept) to tell which changes still wait
 /// for a restart.
 pub(crate) struct RestartTracker {
-    snapshot: std::sync::Mutex<Vec<(&'static str, Option<[u8; 32]>)>>,
+    snapshot: std::sync::Mutex<Vec<Fingerprint>>,
 }
+
+/// A restart-only setting and the hash of its value at startup.
+type Fingerprint = (&'static str, Option<[u8; 32]>);
 
 fn restart_fingerprint(key: &str) -> Option<[u8; 32]> {
     let value = if key == "BOT_TOKEN" {
@@ -469,7 +472,7 @@ impl RestartTracker {
         if let Ok(mut snapshot) = self.snapshot.lock() {
             for (key, fingerprint) in snapshot.iter_mut() {
                 if keys.contains(&*key) {
-                    *fingerprint = restart_fingerprint(*key);
+                    *fingerprint = restart_fingerprint(key);
                 }
             }
         }
