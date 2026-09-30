@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{watch, RwLock};
@@ -12,10 +13,7 @@ use crate::bot::router::ChatRouteScope;
 use crate::bot::worker::{process_durable_update, replay_durable_inbox, spawn_workers};
 use crate::cli::get_or_prompt_token;
 use crate::gateway::whatsapp::client::WhatsAppExit;
-use crate::{
-    get_configured_owner_id, get_configured_whatsapp_owner, get_whatsapp_db_path,
-    get_whatsapp_dedicated_groups, is_whatsapp_enabled,
-};
+use crate::get_configured_owner_id;
 
 /// Time allowed for in-flight work to finish once shutdown starts.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
@@ -27,6 +25,29 @@ const WHATSAPP_RESTART_INITIAL: Duration = Duration::from_secs(5);
 const WHATSAPP_RESTART_MAX: Duration = Duration::from_secs(300);
 /// Consecutive WhatsApp failures before the owner is alerted on Telegram.
 const WHATSAPP_ALERT_AFTER_FAILURES: u32 = 3;
+/// Long-poll timeout of `getUpdates`, in seconds.
+pub(crate) const POLL_TIMEOUT_SECS: i32 = 20;
+
+/// Unix time of the last successful `getUpdates` (0 before the first).
+static LAST_POLL_UNIX: AtomicI64 = AtomicI64::new(0);
+/// Inline queries and chosen inline results seen since start. Telegram only
+/// sends chosen results when inline feedback is on in @BotFather, so many
+/// queries without a single chosen result means it is probably off.
+static INLINE_QUERIES_SEEN: AtomicU64 = AtomicU64::new(0);
+static CHOSEN_RESULTS_SEEN: AtomicU64 = AtomicU64::new(0);
+
+/// Seconds since the last successful poll, `None` before the first.
+pub(crate) fn last_poll_age_secs() -> Option<u64> {
+    let last = LAST_POLL_UNIX.load(Ordering::Relaxed);
+    (last > 0).then(|| u64::try_from(chrono::Utc::now().timestamp() - last).unwrap_or_default())
+}
+
+pub(crate) fn inline_counters() -> (u64, u64) {
+    (
+        INLINE_QUERIES_SEEN.load(Ordering::Relaxed),
+        CHOSEN_RESULTS_SEEN.load(Ordering::Relaxed),
+    )
+}
 
 pub(crate) fn parse_chat_ids_from_str(raw: &str) -> HashSet<i64> {
     raw.split(',')
@@ -253,7 +274,7 @@ pub async fn poll_loop(
             updates_res = bot.get_updates(
                 offset,
                 100,
-                20,
+                POLL_TIMEOUT_SECS,
                 Some(vec![
                     "message".to_string(),
                     "edited_message".to_string(),
@@ -267,9 +288,16 @@ pub async fn poll_loop(
                 match updates_res {
                     Ok(resp) if resp.ok => {
                         consecutive_failures = 0;
+                        LAST_POLL_UNIX.store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
                         if let Some(updates) = resp.result {
                             for update in updates {
                                 let update_id = update.update_id;
+                                if update.inline_query.is_some() {
+                                    INLINE_QUERIES_SEEN.fetch_add(1, Ordering::Relaxed);
+                                }
+                                if update.chosen_inline_result.is_some() {
+                                    CHOSEN_RESULTS_SEEN.fetch_add(1, Ordering::Relaxed);
+                                }
                                 let payload_json = match serde_json::to_string(&update) {
                                     Ok(payload) => payload,
                                     Err(error) => {
@@ -352,7 +380,7 @@ pub async fn poll_loop(
 /// unexpectedly and alerts the owner on Telegram when the phone unlinks the
 /// device or the gateway keeps failing. Previously a single failure left
 /// WhatsApp offline until the whole process was restarted, silently.
-async fn supervise_whatsapp(
+pub(crate) async fn supervise_whatsapp(
     config: crate::gateway::whatsapp::WhatsAppConfig,
     ai_service: Arc<AIChatService>,
     shutdown: watch::Receiver<bool>,
@@ -373,6 +401,17 @@ async fn supervise_whatsapp(
         }
     };
 
+    let set_phase = |phase: crate::gateway::whatsapp::LinkPhase, error: Option<String>| {
+        if let Some(hooks) = config.hooks.as_ref() {
+            hooks.update(|state| {
+                state.phase = phase;
+                if error.is_some() {
+                    state.error = error;
+                }
+            });
+        }
+    };
+
     let mut failures = 0u32;
     loop {
         let exit = crate::gateway::whatsapp::WhatsAppGateway::start(
@@ -382,8 +421,12 @@ async fn supervise_whatsapp(
         )
         .await;
         match exit {
-            WhatsAppExit::Shutdown => return exit,
+            WhatsAppExit::Shutdown => {
+                set_phase(crate::gateway::whatsapp::LinkPhase::Off, None);
+                return exit;
+            }
             WhatsAppExit::LoggedOut => {
+                set_phase(crate::gateway::whatsapp::LinkPhase::LoggedOut, None);
                 warn!("WhatsApp gateway berhenti: perangkat telah di-logout dari HP");
                 notify("⚠️ Xiao: sesi WhatsApp dilepas dari HP (logout). Gateway WhatsApp berhenti; jalankan `xiao gateway wa pair` untuk menautkan ulang.").await;
                 return exit;
@@ -397,63 +440,101 @@ async fn supervise_whatsapp(
                 warn!(
                     "WhatsApp gateway berhenti ({reason}); restart ke-{failures} dalam {delay:?}"
                 );
+                set_phase(crate::gateway::whatsapp::LinkPhase::Retrying, Some(reason));
                 if failures == WHATSAPP_ALERT_AFTER_FAILURES {
                     notify("⚠️ Xiao: gateway WhatsApp gagal tersambung beberapa kali berturut-turut. Xiao terus mencoba ulang di latar belakang.").await;
                 }
                 let mut wait = shutdown.clone();
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {}
-                    _ = wait_until_shutdown(&mut wait) => return WhatsAppExit::Shutdown,
+                    _ = wait_until_shutdown(&mut wait) => {
+                        set_phase(crate::gateway::whatsapp::LinkPhase::Off, None);
+                        return WhatsAppExit::Shutdown;
+                    }
                 }
+                set_phase(crate::gateway::whatsapp::LinkPhase::Starting, None);
             }
         }
     }
 }
 
+/// Keeps trying to start Telegram (with the polling backoff) until it works
+/// or the daemon stops. Used when the token and owner are set but Telegram
+/// could not be reached at start, for example before the network is up:
+/// without the WebUI the daemon used to exit and let the service manager
+/// retry, which would now also take the console down.
+async fn wait_for_telegram(
+    ai_service: &AIChatService,
+    mut shutdown: watch::Receiver<bool>,
+) -> Option<(TelegramBotClient, Arc<ChatRouteScope>, UserLastImagePrompt)> {
+    let mut failures = 0u32;
+    loop {
+        failures = failures.saturating_add(1);
+        let delay = poll_backoff(failures);
+        warn!("Telegram could not be started; trying again in {delay:?}");
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = wait_until_shutdown(&mut shutdown) => return None,
+        }
+        if let Some(telegram) = try_bootstrap_telegram(ai_service).await {
+            return Some(telegram);
+        }
+    }
+}
+
 pub async fn run_daemon(ai_service: Arc<AIChatService>) {
-    let wa_db_path = get_whatsapp_db_path();
-    let wa_status = crate::gateway::whatsapp::WhatsAppGateway::check_status(&wa_db_path);
-    let wa_enabled =
-        is_whatsapp_enabled() || wa_status == crate::gateway::whatsapp::WhatsAppStatus::Linked;
+    let wa_enabled = crate::web::wa::WaController::should_run();
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let wa = crate::web::wa::WaController::new(Arc::clone(&ai_service), shutdown_rx.clone());
+    // The console starts first so it can be used to finish the setup even
+    // when Telegram cannot start.
+    let web = crate::web::start(
+        Arc::clone(&ai_service),
+        Arc::clone(&wa),
+        shutdown_tx.clone(),
+        shutdown_rx.clone(),
+    )
+    .await;
 
     let tg_bootstrap = try_bootstrap_telegram(&ai_service).await;
 
-    if tg_bootstrap.is_none() && !wa_enabled {
-        error!("Tidak ada gateway yang aktif! Konfigurasikan Telegram (`xiao gateway token` & `xiao gateway owner`) atau WhatsApp (`xiao gateway wa pair`).");
+    if tg_bootstrap.is_none() && !wa_enabled && web.is_none() {
+        error!("Tidak ada gateway yang aktif! Konfigurasikan Telegram (`xiao gateway token` & `xiao gateway owner`) atau WhatsApp (`xiao gateway wa pair`), atau aktifkan WebUI (XIAO_WEB_BIND).");
         std::process::exit(1);
     }
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let signal_ai = Arc::clone(&ai_service);
+    let signal_shutdown = shutdown_tx.clone();
     let signal_task = tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         println!("\nReceived shutdown signal. Shutting down gracefully.");
         // Flag first so work cancelled below reports `Interrupted` and stays
         // in the durable inbox for replay instead of being marked answered.
         signal_ai.begin_shutdown().await;
-        let _ = shutdown_tx.send(true);
+        let _ = signal_shutdown.send(true);
     });
 
-    // Spawn WhatsApp Gateway concurrently if configured or session exists
-    let wa_worker = if wa_enabled {
-        let wa_config = crate::gateway::whatsapp::WhatsAppConfig {
-            db_path: wa_db_path,
-            owner_number: get_configured_whatsapp_owner(),
-            phone_login: None,
-            dedicated_groups: get_whatsapp_dedicated_groups(),
-        };
-        let alert = tg_bootstrap
+    // WhatsApp runs under the controller so the WebUI can restart or pair it.
+    wa.set_alert(
+        tg_bootstrap
             .as_ref()
-            .map(|(bot, scope, _)| (bot.clone(), scope.owner_user_id));
+            .map(|(bot, scope, _)| (bot.clone(), scope.owner_user_id)),
+    );
+    if wa_enabled {
         info!("Memulai WhatsApp Gateway di background daemon...");
-        Some(tokio::spawn(supervise_whatsapp(
-            wa_config,
-            Arc::clone(&ai_service),
-            shutdown_rx.clone(),
-            alert,
-        )))
-    } else {
-        None
+        wa.start(None).await;
+    }
+
+    let tg_bootstrap = match tg_bootstrap {
+        None if web.is_some() && crate::web::auth::telegram_configured() => {
+            let telegram = wait_for_telegram(&ai_service, shutdown_rx.clone()).await;
+            if let Some((bot, scope, _)) = telegram.as_ref() {
+                wa.set_alert(Some((bot.clone(), scope.owner_user_id)));
+            }
+            telegram
+        }
+        other => other,
     };
 
     if let Some((bot, route_scope, user_last_image_prompt)) = tg_bootstrap {
@@ -463,6 +544,14 @@ pub async fn run_daemon(ai_service: Arc<AIChatService>) {
             Arc::clone(&user_last_image_prompt),
             Arc::clone(&route_scope),
         );
+        if let Some(web) = web.as_ref() {
+            web.attach_telegram(
+                bot.clone(),
+                route_scope.owner_user_id,
+                route_scope.bot_username.clone(),
+                update_tx.clone(),
+            );
+        }
 
         replay_durable_inbox(&ai_service, &update_tx).await;
 
@@ -479,7 +568,11 @@ pub async fn run_daemon(ai_service: Arc<AIChatService>) {
         // poll_loop also returns if the dispatcher died; make sure every
         // component observes shutdown in that case too.
         ai_service.begin_shutdown().await;
+        let _ = shutdown_tx.send(true);
         signal_task.abort();
+        if let Some(web) = web.as_ref() {
+            web.detach_telegram();
+        }
         drop(update_tx);
 
         match tokio::time::timeout(SHUTDOWN_GRACE, update_worker).await {
@@ -487,6 +580,19 @@ pub async fn run_daemon(ai_service: Arc<AIChatService>) {
             Ok(Err(err)) => warn!("Update worker terminated with error: {err}"),
             Err(_) => warn!("Update worker did not stop within shutdown grace period"),
         }
+        wa.stop().await;
+    } else if web.is_some() {
+        // Without Telegram the daemon lives as long as the console, so a
+        // WhatsApp logout or a missing bot token can be fixed from there.
+        let mode = if wa_enabled {
+            "WhatsApp + WebUI"
+        } else {
+            "WebUI only (configure Telegram or WhatsApp from the console)"
+        };
+        info!("Daemon running without Telegram: {mode}");
+        let mut wait = shutdown_rx.clone();
+        wait_until_shutdown(&mut wait).await;
+        wa.stop().await;
     } else {
         // WhatsApp Standalone Daemon Mode
         let bar_width = crate::cli::tui::get_terminal_bar_width();
@@ -502,22 +608,15 @@ pub async fn run_daemon(ai_service: Arc<AIChatService>) {
             crate::cli::tui::render_hud_box("WHATSAPP DAEMON ACTIVE", &daemon_rows, bar_width);
         println!("{hud}");
         println!("\n  \x1b[38;5;244mService actively running. Press \x1b[1;37m[Ctrl+C]\x1b[0m \x1b[38;5;244mto stop daemon.\x1b[0m\n");
-    }
 
-    if let Some(wa_handle) = wa_worker {
         // In standalone mode this is the daemon's lifetime: it returns on
         // shutdown or when the device is logged out (nothing left to serve).
-        match wa_handle.await {
-            Ok(WhatsAppExit::LoggedOut) => {
-                error!(
-                    "WhatsApp gateway berhenti permanen karena logout; daemon WhatsApp selesai."
-                );
-            }
-            Ok(_) => {}
-            Err(err) => warn!("WhatsApp supervisor terminated with error: {err}"),
+        if wa.join().await == Some(WhatsAppExit::LoggedOut) {
+            error!("WhatsApp gateway berhenti permanen karena logout; daemon WhatsApp selesai.");
         }
     }
     ai_service.begin_shutdown().await;
+    let _ = shutdown_tx.send(true);
 }
 
 #[cfg(test)]

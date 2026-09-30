@@ -1,0 +1,2629 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101317" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f7f5f2" media="(prefers-color-scheme: light)">
+<title>Xiao Console</title>
+<style>
+/* ---------- Design tokens ----------
+   Paper and ink: warm off-white paper, blue-black ink, one indigo accent
+   for actions and selection, and a vermilion seal for the brand only.
+   Status colors (ok, warn, err, info, violet) never double as the accent. */
+:root {
+  --bg: #f7f5f2;
+  --surface: #fefdfa;
+  --surface-2: #f1efeb;
+  --surface-3: #e8e5e0;
+  --raised: #fefdfa;
+  --control: #fefdfa;
+  --control-hover: #f1efeb;
+  --seg-on: #fefdfa;
+  --border: #e1ddd8;
+  --border-strong: #cbc7c0;
+  --field-line: #898680;
+  --text: #14191f;
+  --muted: #4d535a;
+  --faint: #62676d;
+  --accent: #2759a2;
+  --accent-strong: #18488c;
+  --accent-ink: #fbfaf7;
+  --accent-soft: #e0ecfe;
+  --ok: #1e7546;
+  --ok-soft: #dcf5e4;
+  --warn: #935a00;
+  --warn-soft: #ffeed3;
+  --err: #b63039;
+  --err-soft: #fee8e7;
+  --on-err: #fdf9f8;
+  --info: #226888;
+  --info-soft: #e0f1fa;
+  --violet: #734f99;
+  --violet-soft: #f2ebfc;
+  --seal: #c23c22;
+  --seal-ink: #fdf9f6;
+  --knob: #fefdfc;
+  --knob-on: #fefdfc;
+  --toast: #1b2025;
+  --toast-ink: #f3f1ef;
+  --toast-ok: #7ad59c;
+  --toast-err: #fa9390;
+  --term: #12161b;
+  --term-ink: #e0deda;
+  --term-dim: #8d939a;
+  --term-info: #81d39f;
+  --term-warn: #f0c374;
+  --term-err: #f98e8b;
+  --term-dbg: #8bbfde;
+  --scrim: rgba(18, 22, 27, .45);
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2362676d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  --shadow: 0 1px 2px rgba(20, 25, 31, .06), 0 4px 12px rgba(20, 25, 31, .06);
+  --shadow-lg: 0 2px 6px rgba(20, 25, 31, .08), 0 14px 36px rgba(20, 25, 31, .16);
+  --radius: 12px;
+  --radius-sm: 10px;
+  --radius-xs: 8px;
+  --ease: cubic-bezier(.16, 1, .3, 1);
+  --font: system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --seal-font: "Noto Serif CJK SC", "Source Han Serif SC", "Noto Serif SC", "Songti SC", SimSun, serif;
+  --nav-h: 64px;
+  --top-h: 56px;
+  --side-w: 256px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101317;
+    --surface: #161a1f;
+    --surface-2: #1d2228;
+    --surface-3: #272c32;
+    --raised: #1d2228;
+    --control: #2c3137;
+    --control-hover: #33383f;
+    --seg-on: #3b4047;
+    --border: #272c31;
+    --border-strong: #3b4047;
+    --field-line: #6f757d;
+    --text: #ece9e5;
+    --muted: #b3b8be;
+    --faint: #979ca2;
+    --accent: #7ba6e6;
+    --accent-strong: #99bdf1;
+    --accent-ink: #0d1624;
+    --accent-soft: #1e2e47;
+    --ok: #74ca94;
+    --ok-soft: #163120;
+    --warn: #e8b966;
+    --warn-soft: #3a2911;
+    --err: #f18381;
+    --err-soft: #461f1f;
+    --on-err: #221010;
+    --info: #7cbbdb;
+    --info-soft: #132e3b;
+    --violet: #c0a1e4;
+    --violet-soft: #31253f;
+    --knob: #f0eeeb;
+    --knob-on: #f0eeeb;
+    --toast: #2e333a;
+    --toast-ink: #f0eeeb;
+    --term: #090c10;
+    --scrim: rgba(0, 0, 0, .55);
+    --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23979ca2' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 12px rgba(0, 0, 0, .25);
+    --shadow-lg: 0 2px 6px rgba(0, 0, 0, .35), 0 16px 40px rgba(0, 0, 0, .45);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #101317;
+  --surface: #161a1f;
+  --surface-2: #1d2228;
+  --surface-3: #272c32;
+  --raised: #1d2228;
+  --control: #2c3137;
+  --control-hover: #33383f;
+  --seg-on: #3b4047;
+  --border: #272c31;
+  --border-strong: #3b4047;
+  --field-line: #6f757d;
+  --text: #ece9e5;
+  --muted: #b3b8be;
+  --faint: #979ca2;
+  --accent: #7ba6e6;
+  --accent-strong: #99bdf1;
+  --accent-ink: #0d1624;
+  --accent-soft: #1e2e47;
+  --ok: #74ca94;
+  --ok-soft: #163120;
+  --warn: #e8b966;
+  --warn-soft: #3a2911;
+  --err: #f18381;
+  --err-soft: #461f1f;
+  --on-err: #221010;
+  --info: #7cbbdb;
+  --info-soft: #132e3b;
+  --violet: #c0a1e4;
+  --violet-soft: #31253f;
+  --knob: #f0eeeb;
+  --knob-on: #f0eeeb;
+  --toast: #2e333a;
+  --toast-ink: #f0eeeb;
+  --term: #090c10;
+  --scrim: rgba(0, 0, 0, .55);
+  --chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23979ca2' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 12px rgba(0, 0, 0, .25);
+  --shadow-lg: 0 2px 6px rgba(0, 0, 0, .35), 0 16px 40px rgba(0, 0, 0, .45);
+  color-scheme: dark;
+}
+
+/* ---------- Base ---------- */
+*, *::before, *::after { box-sizing: border-box; }
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-padding-top: calc(var(--top-h) + 16px);
+  scrollbar-color: var(--border-strong) var(--bg);
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 1rem/1.5 var(--font);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: clip;
+}
+::selection { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+button, input, select, textarea { font: inherit; color: inherit; }
+input, textarea { caret-color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-strong); }
+.help a, .hint a, .sub a, .result a, p a {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: .2em;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+}
+.help a:hover, .hint a:hover, .sub a:hover, .result a:hover, p a:hover { text-decoration-color: currentColor; }
+h1, h2, h3, h4 { text-wrap: balance; }
+code, .mono { font-family: var(--mono); font-size: .875em; }
+code { padding: .05em .3em; border-radius: 4px; background: color-mix(in srgb, var(--text) 7%, transparent); overflow-wrap: anywhere; }
+b, strong { font-weight: 650; }
+svg.i { width: 20px; height: 20px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+svg.i.sm { width: 16px; height: 16px; }
+svg.i.lg { width: 24px; height: 24px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* ---------- Shell ---------- */
+.app { min-height: 100dvh; }
+.topbar {
+  position: sticky; top: 0; z-index: 30;
+  height: calc(var(--top-h) + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) 16px 0;
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.topbar h1 { font-size: 1.125rem; font-weight: 650; letter-spacing: -.02em; margin: 0; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* The brand is a seal: a vermilion chop with a thin inner frame. */
+.brandmark {
+  width: 32px; height: 32px; border-radius: 7px; flex: none;
+  display: grid; place-items: center;
+  background: var(--seal); color: var(--seal-ink);
+  font: 700 18px/1 var(--seal-font);
+  box-shadow: inset 0 0 0 2px var(--seal), inset 0 0 0 3px color-mix(in srgb, var(--seal-ink) 75%, transparent);
+}
+.iconbtn {
+  width: 40px; height: 40px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: var(--control); display: grid; place-items: center; cursor: pointer; color: var(--muted);
+  transition: background-color .15s ease-out, color .15s ease-out, border-color .15s ease-out;
+}
+.iconbtn:hover { color: var(--text); background: var(--control-hover); border-color: var(--border-strong); }
+.livepill {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+  background: var(--ok-soft); color: var(--ok); font-size: .8125rem; font-weight: 600; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.livepill .dot { width: 7px; height: 7px; background: currentColor; }
+
+.main {
+  padding: 16px 16px calc(var(--nav-h) + 28px + env(safe-area-inset-bottom));
+  max-width: 1080px; margin: 0 auto;
+}
+
+/* Bottom navigation (phone) */
+.bottomnav {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  height: calc(var(--nav-h) + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+  display: grid; grid-template-columns: repeat(5, 1fr);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+.bottomnav a {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  color: var(--faint); font-size: .75rem; font-weight: 600; position: relative;
+  transition: color .15s ease-out;
+}
+.bottomnav a:hover { color: var(--text); }
+.bottomnav a:focus-visible { outline-offset: -4px; border-radius: var(--radius-sm); }
+.bottomnav a.on { color: var(--accent); }
+.bottomnav a.on::before {
+  content: ""; position: absolute; top: -1px; left: 32%; right: 32%; height: 3px; border-radius: 0 0 3px 3px; background: var(--accent);
+}
+.bottomnav .badge-dot {
+  position: absolute; top: 10px; left: calc(50% + 8px); min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+  background: var(--err); color: var(--on-err); font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Sidebar (desktop) */
+.sidebar { display: none; }
+@media (min-width: 900px) {
+  .bottomnav { display: none; }
+  .sidebar {
+    display: flex; flex-direction: column; position: fixed; inset: 0 auto 0 0; width: var(--side-w); z-index: 35;
+    background: var(--bg); border-right: 1px solid var(--border); padding: 18px 12px;
+    overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
+  }
+  .topbar, .main { margin-left: var(--side-w); }
+  .topbar .brandmark { display: none; }
+  /* The page heading carries the title on wide screens. */
+  .topbar h1 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .topbar .livepill { margin-left: auto; }
+  .main { padding: 28px 32px 48px; }
+}
+.side-brand { display: flex; align-items: center; gap: 10px; padding: 4px 10px 14px; }
+.side-brand b { display: block; font-size: 1rem; font-weight: 650; letter-spacing: -.02em; line-height: 1.3; }
+.side-brand small { display: block; color: var(--faint); font-size: .8125rem; }
+.side-brand .ver { margin-left: .5em; font-variant-numeric: tabular-nums; }
+.side-group { margin: 18px 0 4px; padding: 0 12px; font-size: .8125rem; font-weight: 600; color: var(--faint); }
+.side-link {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: var(--radius-xs);
+  color: var(--muted); font-weight: 550; font-size: .875rem;
+  transition: background-color .15s ease-out, color .15s ease-out;
+}
+.side-link svg.i { width: 18px; height: 18px; }
+.side-link:hover { background: var(--surface-2); color: var(--text); }
+.side-link:focus-visible { outline-offset: -2px; }
+.side-link.on { background: var(--accent-soft); color: var(--accent-strong); font-weight: 600; }
+.side-link .count {
+  margin-left: auto; font-size: .75rem; padding: 0 7px; border-radius: 999px; line-height: 1.5;
+  background: var(--err-soft); color: var(--err); font-weight: 650; font-variant-numeric: tabular-nums;
+}
+.side-foot { margin-top: auto; padding: 12px; border-top: 1px solid var(--border); font-size: .8125rem; color: var(--faint); line-height: 1.5; }
+.side-foot b { color: var(--muted); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* ---------- Page scaffolding ---------- */
+.page-head { margin: 4px 0 20px; }
+.page-head h2 { margin: 0; font-size: 1.5rem; font-weight: 650; letter-spacing: -.025em; line-height: 1.2; }
+.page-head p { margin: 6px 0 0; color: var(--muted); max-width: 70ch; text-wrap: pretty; }
+.page-head p b { color: var(--text); font-variant-numeric: tabular-nums; }
+.page-head p b.err { color: var(--err); }
+@media (max-width: 899px) { .page-head h2 { display: none; } .page-head p { margin-top: 0; font-size: .875rem; } }
+.section-title { display: flex; align-items: center; gap: 10px; margin: 32px 2px 10px; min-height: 32px; }
+.section-title h3 { margin: 0; font-size: 1.125rem; font-weight: 650; letter-spacing: -.02em; line-height: 1.3; }
+.section-title .spacer { flex: 1; }
+.grid { display: grid; gap: 12px; }
+@media (min-width: 640px) { .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1000px) { .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 640px) and (max-width: 999px) { .grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.stack > * + * { margin-top: 12px; }
+
+/* ---------- Cards & rows ---------- */
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  min-width: 0; overflow: hidden;
+}
+.card-pad { padding: 16px; }
+.card-head { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+.card-head + .rows, .card-head + .card-body { border-top: 1px solid var(--border); }
+.card-head h4, .card-title { margin: 0; font-size: 1rem; font-weight: 650; letter-spacing: -.01em; line-height: 1.4; }
+.card-head h4 { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.card-head .sub { color: var(--muted); font-size: .875rem; margin-top: 1px; overflow-wrap: anywhere; }
+.card-body { padding: 16px; }
+.grow { flex: 1; min-width: 0; }
+
+.rows > .row + .row { border-top: 1px solid var(--border); }
+.row { display: flex; align-items: center; gap: 12px; padding: 12px 16px; min-height: 52px; }
+.row.top { align-items: flex-start; }
+.row.flush { padding: 10px 0; }
+.row .label { font-weight: 550; }
+.row .hint { color: var(--muted); font-size: .875rem; margin-top: 1px; overflow-wrap: anywhere; max-width: 72ch; }
+.row .val { color: var(--muted); font-size: .875rem; text-align: right; overflow-wrap: anywhere; max-width: 55%; }
+a.row { color: inherit; }
+.row.link { cursor: pointer; transition: background-color .15s ease-out; }
+.row.link:hover { background: var(--surface-2); }
+.row.link:focus-visible { outline-offset: -2px; }
+.row.link > svg.i:last-child { color: var(--faint); transition: transform .15s ease-out; }
+.row.link:hover > svg.i:last-child { transform: translateX(2px); color: var(--muted); }
+.row-ic { flex: none; display: grid; place-items: center; width: 20px; height: 24px; color: var(--faint); }
+.row-ic.ok { color: var(--ok); } .row-ic.warn { color: var(--warn); } .row-ic.err { color: var(--err); } .row-ic.info { color: var(--info); }
+.full { width: 100%; }
+
+/* Home status list: name, value, detail */
+.srow .k { font-size: .8125rem; color: var(--muted); }
+.srow .v { font-weight: 600; overflow-wrap: anywhere; }
+@media (min-width: 640px) {
+  .srow .grow { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr); column-gap: 16px; align-items: baseline; }
+  .srow .k { grid-row: span 2; font-size: 1rem; color: var(--text); font-weight: 550; }
+  .srow .hint { grid-column: 2; }
+}
+
+/* Queue counters: one ruled strip, not tiles */
+.qstats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; }
+.qstats > div { padding: 12px 16px; min-width: 0; }
+.qstats > div + div { border-left: 1px solid var(--border); }
+.qstats dt { font-size: .8125rem; color: var(--muted); }
+.qstats dd { margin: 2px 0 0; font-size: 1.3125rem; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.qstats .err dd { color: var(--err); }
+@media (max-width: 479px) {
+  .qstats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .qstats > div:nth-child(3) { border-left: 0; }
+  .qstats > div:nth-child(n+3) { border-top: 1px solid var(--border); }
+}
+
+/* Badges & dots */
+.badge {
+  display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 999px; font-size: .75rem; font-weight: 600;
+  background: var(--surface-3); color: var(--muted); white-space: nowrap; line-height: 1.5; letter-spacing: 0;
+}
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.warn { background: var(--warn-soft); color: var(--warn); }
+.badge.err { background: var(--err-soft); color: var(--err); }
+.badge.info { background: var(--info-soft); color: var(--info); }
+.badge.violet { background: var(--violet-soft); color: var(--violet); }
+.badge svg.i { width: 12px; height: 12px; stroke-width: 2.4; }
+.badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--faint); flex: none; }
+.dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.err { background: var(--err); } .dot.info { background: var(--info); }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 0 14px;
+  border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--control); color: var(--text);
+  font-weight: 600; font-size: .875rem; cursor: pointer; white-space: nowrap;
+  transition: background-color .15s ease-out, border-color .15s ease-out, color .15s ease-out;
+}
+a.btn { color: var(--text); }
+.btn:hover:not([disabled]) { background: var(--control-hover); border-color: var(--field-line); }
+.btn:active:not([disabled]) { transform: translateY(1px); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover:not([disabled]) { background: var(--accent-strong); border-color: var(--accent-strong); }
+.btn.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border-strong)); }
+.btn.danger:hover:not([disabled]) { background: var(--err-soft); border-color: var(--err); }
+.btn.danger.solid { background: var(--err); color: var(--on-err); border-color: var(--err); }
+.btn.danger.solid:hover:not([disabled]) { background: color-mix(in srgb, var(--err) 86%, var(--text)); }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+.btn.ghost:hover:not([disabled]) { background: var(--control-hover); border-color: transparent; color: var(--text); }
+.btn.sm { min-height: 32px; padding: 0 10px; gap: 6px; font-size: .8125rem; border-radius: var(--radius-xs); }
+.btn.block { width: 100%; }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
+.btn[disabled]:has(.spin) { opacity: .8; cursor: progress; }
+.btn .spin, .spin-inline {
+  width: 16px; height: 16px; flex: none; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+.spin-inline { width: 14px; height: 14px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.actions.end { justify-content: flex-end; }
+
+/* Forms */
+.field { display: block; }
+.field + .field, .help + .field { margin-top: 18px; }
+.field > .lab { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; font-size: .875rem; margin-bottom: 6px; }
+.help { color: var(--muted); font-size: .8125rem; line-height: 1.45; margin-top: 6px; max-width: 75ch; }
+.help > code:first-child { margin-right: .3em; }
+.actions + .help { margin-top: 10px; }
+.input, .select {
+  width: 100%; min-height: 44px; padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--field-line);
+  background-color: var(--surface); color: var(--text); font-size: 1rem; line-height: 1.4;
+  transition: border-color .15s ease-out;
+}
+.input::placeholder { color: var(--faint); opacity: 1; }
+.input:hover:not([disabled]), .select:hover:not([disabled]) { border-color: var(--muted); }
+.input:focus, .select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+.input[disabled], .select[disabled] { background-color: var(--surface-2); border-color: var(--border-strong); color: var(--faint); cursor: not-allowed; }
+textarea.input { min-height: 96px; resize: vertical; line-height: 1.5; }
+.input.mono { font-family: var(--mono); font-size: 1rem; }
+.select {
+  appearance: none; -webkit-appearance: none; padding-right: 36px;
+  background-image: var(--chevron); background-repeat: no-repeat; background-position: right 12px center;
+}
+.select.fit { width: auto; }
+.inline { display: flex; gap: 8px; }
+.inline > .input, .inline > .select { flex: 1; min-width: 0; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+.toolbar > .input { flex: 1; width: auto; min-width: 160px; }
+
+/* Secret field */
+.secret {
+  display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 12px; min-height: 48px;
+  border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-2);
+}
+.secret > svg.i { color: var(--faint); }
+.secret .mask { font-family: var(--mono); letter-spacing: .08em; color: var(--muted); }
+.secret .grow { font-size: .8125rem; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.secret.unset { background: transparent; }
+.secret.unset .mask { letter-spacing: 0; font-family: var(--font); font-size: .875rem; color: var(--faint); }
+@media (max-width: 559px) {
+  .secret { flex-wrap: wrap; row-gap: 0; }
+  .secret .mask { flex: 1; min-width: 0; }
+  .secret .grow { order: 9; flex-basis: 100%; padding: 0 0 5px 26px; }
+  .secret .grow:empty { display: none; }
+}
+
+/* Lock note (value comes from the environment) and inline notes */
+.lock {
+  display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: var(--radius-xs); margin-top: 8px;
+  background: var(--warn-soft); color: var(--text); font-size: .8125rem; line-height: 1.5;
+}
+.lock svg.i { color: var(--warn); margin-top: 1px; }
+.lock > div { min-width: 0; overflow-wrap: anywhere; }
+.note {
+  display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: var(--radius-sm); font-size: .875rem; line-height: 1.5;
+  background: var(--info-soft); color: var(--text);
+}
+.note > div { min-width: 0; overflow-wrap: anywhere; }
+.note svg.i { color: var(--info); margin-top: 2px; }
+.note.warn { background: var(--warn-soft); } .note.warn svg.i { color: var(--warn); }
+.note.err { background: var(--err-soft); } .note.err svg.i { color: var(--err); }
+.note.ok { background: var(--ok-soft); } .note.ok svg.i { color: var(--ok); }
+
+/* Toggle */
+.switch { position: relative; width: 46px; height: 28px; flex: none; }
+.switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; z-index: 1; }
+.switch span {
+  position: absolute; inset: 0; border-radius: 999px; background: var(--surface-3); border: 1px solid var(--field-line);
+  transition: background-color .2s var(--ease), border-color .2s var(--ease); pointer-events: none;
+}
+.switch span::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%;
+  background: var(--knob); box-shadow: 0 1px 2px rgba(0, 0, 0, .22), 0 2px 4px rgba(0, 0, 0, .08);
+  transition: transform .2s var(--ease), background-color .2s var(--ease);
+}
+.switch input:checked + span { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + span::after { transform: translateX(18px); background: var(--knob-on); }
+.switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Segmented control */
+.seg {
+  display: inline-flex; padding: 3px; border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border);
+  gap: 2px; max-width: 100%; overflow-x: auto; scrollbar-width: none;
+}
+.seg button {
+  border: 0; background: transparent; padding: 6px 12px; min-height: 32px; border-radius: 7px; font-weight: 600; font-size: .8125rem;
+  color: var(--muted); cursor: pointer; white-space: nowrap; transition: color .15s ease-out, background-color .15s ease-out;
+}
+.seg button:hover { color: var(--text); }
+.seg button:focus-visible { outline-offset: -2px; }
+.seg button.on { background: var(--seg-on); color: var(--text); box-shadow: 0 1px 2px rgba(20, 25, 31, .14), 0 1px 3px rgba(20, 25, 31, .06); }
+.chan-switch { margin-bottom: 16px; }
+
+/* Tables that turn into cards on phones */
+.tbl { width: 100%; border-collapse: collapse; font-size: .875rem; font-variant-numeric: tabular-nums; }
+.tbl th {
+  text-align: left; font-size: .8125rem; color: var(--muted); font-weight: 600; white-space: nowrap;
+  padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface-2);
+}
+.card:has(> .tbl) { container-type: inline-size; }
+.tbl td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: baseline; }
+.tbl th { padding-inline: 14px; }
+.tbl td:not(.full):not(.break) { white-space: nowrap; }
+.tbl td .actions { flex-wrap: nowrap; justify-content: flex-end; }
+.tbl tr:last-child td { border-bottom: 0; }
+@container (max-width: 959px) {
+  .tbl thead { display: none; }
+  .tbl, .tbl tbody, .tbl tr, .tbl td { display: block; width: 100%; }
+  .tbl tr { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  .tbl tr:last-child { border-bottom: 0; }
+  .tbl td, .tbl td:not(.full):not(.break) { padding: 3px 0; border: 0; white-space: normal; display: flex; gap: 12px; justify-content: space-between; align-items: baseline; text-align: right; overflow-wrap: anywhere; }
+  .tbl td::before { content: attr(data-l); color: var(--muted); font-family: var(--font); font-size: .8125rem; font-weight: 500; flex: none; text-align: left; }
+  .tbl td.full { display: block; text-align: left; }
+  .tbl td.full::before { display: none; }
+  .tbl td.full .actions { margin-top: 8px; justify-content: flex-start; }
+}
+
+/* Context gauge */
+.ctx-total { font-size: 1.3125rem; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; line-height: 1.3; }
+.ctx-total span { font-size: .875rem; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+.bar { height: 8px; border-radius: 999px; background: var(--surface-3); overflow: hidden; display: flex; }
+.bar > i { display: block; height: 100%; }
+.legend { display: grid; gap: 6px; margin-top: 12px; font-size: .875rem; }
+.legend div { display: flex; align-items: center; gap: 8px; }
+.legend .sw { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.legend .n { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted); }
+.para { margin: 6px 0 0; max-width: 72ch; }
+
+/* Engine chain */
+.chain { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 4px; }
+.chain .eng {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: var(--radius-xs);
+  border: 1px solid var(--border-strong); background: var(--surface); font-size: .8125rem; font-weight: 600;
+}
+.chain .eng.off {
+  color: var(--faint); background: transparent; border-style: dashed;
+  text-decoration: line-through; text-decoration-color: color-mix(in srgb, currentColor 60%, transparent);
+}
+.chain .eng.cool { border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); background: var(--warn-soft); }
+.chain .arr { display: inline-flex; color: var(--faint); }
+
+/* Log viewer */
+.log {
+  font-family: var(--mono); font-size: .8125rem; line-height: 1.6; background: var(--term); color: var(--term-ink);
+  border-radius: var(--radius); padding: 12px 14px; max-height: 60vh; overflow: auto;
+  scrollbar-width: thin; scrollbar-color: #3a4049 transparent;
+}
+.log ::selection { background: rgba(123, 166, 230, .35); }
+.log div { white-space: pre-wrap; overflow-wrap: anywhere; }
+.log .t { color: var(--term-dim); }
+.log .INFO { color: var(--term-info); } .log .WARN { color: var(--term-warn); } .log .ERROR { color: var(--term-err); } .log .DEBUG { color: var(--term-dbg); }
+
+/* Sheet / dialog: the one motion moment, an expo ease-out rise */
+.scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 60; opacity: 0; pointer-events: none; transition: opacity .2s ease-out; }
+.scrim.on { opacity: 1; pointer-events: auto; }
+.sheet {
+  position: fixed; z-index: 61; left: 0; right: 0; bottom: 0; max-height: 88dvh; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--raised); border-radius: 16px 16px 0 0; box-shadow: var(--shadow-lg);
+  padding: 8px 16px calc(20px + env(safe-area-inset-bottom));
+  transform: translateY(104%); visibility: hidden;
+  transition: transform .34s var(--ease), visibility 0s linear .34s;
+}
+.sheet.on { transform: none; visibility: visible; transition: transform .34s var(--ease); }
+.sheet .grab { width: 36px; height: 4px; border-radius: 2px; background: var(--border-strong); margin: 4px auto 14px; }
+.sheet h3 { margin: 0 0 4px; font-size: 1.125rem; font-weight: 650; letter-spacing: -.02em; }
+.sheet .sub { color: var(--muted); font-size: .875rem; margin-bottom: 16px; max-width: 62ch; }
+@media (min-width: 700px) {
+  .sheet {
+    left: 50%; right: auto; bottom: auto; top: 50%; width: min(560px, 92vw); border-radius: 14px; padding: 20px 22px 22px;
+    transform: translate(-50%, -47%) scale(.985); opacity: 0;
+    transition: transform .26s var(--ease), opacity .18s ease-out, visibility 0s linear .26s;
+  }
+  .sheet.on { transform: translate(-50%, -50%); opacity: 1; transition: transform .26s var(--ease), opacity .18s ease-out; }
+  .sheet .grab { display: none; }
+}
+.more-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.more-grid a {
+  display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 6px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); color: var(--text); font-size: .8125rem; font-weight: 600; text-align: center;
+  transition: background-color .15s ease-out;
+}
+.more-grid a:hover { background: var(--control-hover); }
+.more-ic { display: grid; color: var(--muted); }
+.more-ic.err { color: var(--err); }
+
+/* Toast */
+.toasts { position: fixed; z-index: 80; left: 16px; right: 16px; bottom: calc(var(--nav-h) + 14px + env(safe-area-inset-bottom)); display: grid; gap: 8px; justify-items: center; pointer-events: none; }
+@media (min-width: 900px) { .toasts { left: auto; right: 24px; bottom: 24px; justify-items: end; } }
+.toast {
+  pointer-events: auto; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: var(--radius-sm);
+  background: var(--toast); color: var(--toast-ink); box-shadow: var(--shadow-lg); font-size: .875rem; max-width: 420px;
+  animation: toastin .3s var(--ease);
+}
+.toast svg.i { color: var(--toast-ok); }
+.toast.err svg.i { color: var(--toast-err); }
+@keyframes toastin { from { transform: translateY(10px); opacity: 0; } }
+
+/* Unsaved changes bar */
+.savebar {
+  position: fixed; z-index: 45; left: 12px; right: 12px; bottom: calc(var(--nav-h) + 10px + env(safe-area-inset-bottom));
+  display: none; align-items: center; gap: 8px; padding: 8px 8px 8px 16px; border-radius: var(--radius);
+  background: var(--toast); color: var(--toast-ink); box-shadow: var(--shadow-lg);
+}
+.savebar.on { display: flex; animation: toastin .3s var(--ease); }
+.savebar .grow { font-size: .875rem; font-weight: 600; }
+.savebar .btn { border-color: transparent; }
+.savebar .btn.ghost { color: color-mix(in srgb, var(--toast-ink) 78%, transparent); }
+.savebar .btn.ghost:hover:not([disabled]) { background: rgba(255, 255, 255, .08); color: var(--toast-ink); }
+.savebar .btn.primary { background: var(--toast-ink); color: var(--toast); }
+.savebar .btn.primary:hover:not([disabled]) { background: #ffffff; border-color: transparent; }
+@media (min-width: 900px) { .savebar { left: calc(var(--side-w) + 32px); right: 32px; bottom: 20px; max-width: 1016px; } }
+
+/* Misc */
+.muted { color: var(--muted); } .faint { color: var(--faint); } .small { font-size: .8125rem; }
+.err-text { color: var(--err); } .break { overflow-wrap: anywhere; }
+.mt0 { margin-top: 0 !important; } .mt8 { margin-top: 8px; } .mt12 { margin-top: 12px; } .mt16 { margin-top: 16px; }
+.flex { display: flex; align-items: center; gap: 8px; } .wrap { flex-wrap: wrap; } .flex.top { align-items: flex-start; }
+.hr { height: 1px; background: var(--border); margin: 14px 0; }
+.steps { padding-left: 20px; margin-bottom: 0; }
+.steps li + li { margin-top: 4px; }
+.steps li::marker { color: var(--faint); font-variant-numeric: tabular-nums; }
+.qr { width: 220px; height: 220px; margin: 0 auto; padding: 12px; color: #0f1216; background: #fcfcfa; border: 1px solid var(--border); border-radius: var(--radius); display: block; }
+.pair-code {
+  font-family: var(--mono); font-size: 1.75rem; font-weight: 700; letter-spacing: .12em; text-align: center; padding: 14px;
+  border-radius: var(--radius); background: var(--surface-2); border: 1px solid var(--border);
+}
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: .875rem; margin: 0; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.result { margin-top: 12px; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border); font-size: .875rem; }
+.result a { overflow-wrap: anywhere; }
+.result ol { margin: 8px 0 0; padding-left: 20px; } .result li + li { margin-top: 8px; }
+.empty { text-align: center; padding: 32px 16px; color: var(--muted); }
+.empty svg.i { color: var(--ok); }
+.empty-title { font-weight: 600; color: var(--text); }
+.danger-zone { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; border-color: color-mix(in srgb, var(--err) 30%, var(--border)); }
+.danger-zone .grow { min-width: 200px; }
+.danger-zone .label { font-weight: 600; }
+.login-wrap { min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px; }
+.login-card { width: min(400px, 100%); }
+.login-brand { text-align: center; margin-bottom: 24px; }
+.login-brand .brandmark {
+  width: 56px; height: 56px; border-radius: 12px; font-size: 32px; margin: 0 auto 14px;
+  box-shadow: inset 0 0 0 3px var(--seal), inset 0 0 0 4.5px color-mix(in srgb, var(--seal-ink) 75%, transparent);
+}
+.login-brand h2 { margin: 0; font-size: 1.3125rem; font-weight: 650; letter-spacing: -.025em; }
+.login-foot { text-align: center; margin-top: 16px; }
+.otp { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.otp input { text-align: center; font-family: var(--mono); font-size: 1.375rem; font-weight: 700; padding: 10px 0; min-height: 52px; }
+.demo-flag {
+  padding: calc(3px + env(safe-area-inset-top)) 16px 3px; text-align: center;
+  font-size: .75rem; font-weight: 600; background: var(--violet); color: var(--surface); white-space: nowrap;
+}
+@media (min-width: 900px) {
+  .demo-flag {
+    position: fixed; z-index: 36; top: 17px; left: calc(var(--side-w) + 32px);
+    padding: 3px 10px; border-radius: 999px; pointer-events: none;
+  }
+}
+
+/* Phone-only and desktop-only pieces */
+@media (max-width: 899px) { .only-desk { display: none !important; } }
+@media (min-width: 900px) { .only-phone { display: none !important; } }
+.iconbtn.lang { font-size: .8125rem; font-weight: 700; letter-spacing: .02em; }
+.btn.ghost.danger { color: var(--err); }
+.btn.ghost.danger:hover:not([disabled]) { background: var(--err-soft); color: var(--err); }
+button.row { width: 100%; border: 0; background: none; text-align: left; font: inherit; color: inherit; }
+.sheet-rows { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.sheet-rows .row.danger-row, .sheet-rows .row.danger-row .row-ic { color: var(--err); }
+
+/* ---------- Chat ----------
+   Phone: the session picker sits on top, messages flow with the page and the
+   composer is pinned above the bottom navigation. Desktop: a session list and
+   one conversation card whose log scrolls on its own. */
+.chat-side { display: none; }
+.chat-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 18px; }
+.chat-bar .select { flex: 1; min-width: 0; width: auto; }
+.chat-head { display: none; }
+.chat-log { display: flex; flex-direction: column; gap: 24px; }
+.msg { display: flex; gap: 12px; min-width: 0; }
+.msg.me { justify-content: flex-end; }
+.msg .col { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: min(62ch, 88%); min-width: 0; }
+.msg .bubble {
+  background: var(--accent-soft); padding: 9px 14px; border-radius: var(--radius) var(--radius) 4px var(--radius);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.msg .av { width: 28px; height: 28px; border-radius: 6px; font-size: 15px; }
+.msg .body { flex: 1; min-width: 0; max-width: 72ch; padding-top: 2px; }
+.md { overflow-wrap: anywhere; }
+.md p, .md ul, .md-tbl { margin: 0 0 12px; }
+.md > :last-child { margin-bottom: 0; }
+.md ul { padding-left: 20px; }
+.md li + li { margin-top: 4px; }
+.md li::marker { color: var(--faint); }
+.md-tbl { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.md table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+.md th { text-align: left; font-weight: 600; font-size: .8125rem; color: var(--muted); background: var(--surface-2); }
+.md th, .md td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: top; min-width: 6.5rem; overflow-wrap: normal; }
+.md tr:last-child td { border-bottom: 0; }
+.think { margin: 0 0 12px; padding-left: 12px; border-left: 1px solid var(--border-strong); font-size: .875rem; color: var(--muted); }
+.think summary { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; cursor: pointer; font-weight: 600; list-style: none; border-radius: var(--radius-xs); }
+.think summary::-webkit-details-marker { display: none; }
+.think summary:hover { color: var(--text); }
+.think[open] summary svg.i { transform: rotate(90deg); }
+.think > div { margin: 2px 0 4px; max-width: 68ch; text-wrap: pretty; }
+.tools { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.tool {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 10px; border-radius: var(--radius-xs);
+  border: 1px solid var(--border); background: var(--surface-2); font-size: .8125rem; color: var(--muted);
+}
+.tool b { font: 600 .8125rem/1.5 var(--mono); color: var(--text); }
+.tool > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-status { display: flex; align-items: center; gap: 8px; min-height: 24px; color: var(--muted); font-size: .875rem; }
+.msg-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 8px; font-size: .8125rem; color: var(--faint); font-variant-numeric: tabular-nums; }
+.msg-meta .mono { font-size: .75rem; overflow-wrap: anywhere; }
+.msg-meta .btn.sm { min-height: 28px; padding: 0 6px; }
+.chat-files { display: flex; flex-wrap: wrap; gap: 6px; }
+.chat-files:empty { display: none; }
+.msg .chat-files { justify-content: flex-end; }
+.composer .chat-files { margin-bottom: 8px; }
+.fchip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 32px; padding: 2px 10px;
+  border-radius: var(--radius-xs); border: 1px solid var(--border-strong); background: var(--surface); font-size: .8125rem;
+}
+.fchip:has(button) { padding-right: 2px; }
+.fchip > svg.i { color: var(--muted); }
+.fchip .fname { min-width: 0; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.fchip .fmeta { color: var(--muted); white-space: nowrap; }
+.fchip button { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }
+.fchip button:hover { background: var(--control-hover); color: var(--text); }
+.composer-row { display: flex; align-items: flex-end; gap: 8px; }
+.composer textarea.input { flex: 1; min-width: 0; min-height: 44px; max-height: 168px; resize: none; padding: 10px 12px; }
+.composer .iconbtn { width: 44px; height: 44px; flex: none; }
+.composer .btn { min-height: 44px; }
+.composer-hint { margin-top: 6px; font-size: .75rem; color: var(--faint); }
+.chat-empty { max-width: 54ch; margin: 0 auto; padding: 40px 8px 16px; text-align: center; color: var(--muted); }
+.chat-empty .brandmark { width: 40px; height: 40px; border-radius: 9px; font-size: 22px; margin: 0 auto 14px; }
+.chat-empty p { margin: 6px 0 0; text-wrap: pretty; }
+.sess {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-xs); color: var(--text);
+  transition: background-color .15s ease-out;
+}
+.sess:hover { background: var(--surface-2); color: var(--text); }
+.sess:focus-visible { outline-offset: -2px; }
+.sess.on { background: var(--accent-soft); }
+.sess .n { display: block; font-weight: 550; font-size: .875rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess .s { display: block; font-size: .75rem; color: var(--muted); }
+.sess .id { font: .75rem/1 var(--mono); color: var(--faint); }
+.sess .spin-inline { color: var(--accent); }
+@media (max-width: 899px) {
+  .app[data-page="chat"] .main { padding-bottom: calc(var(--nav-h) + var(--composer-h, 76px) + 24px + env(safe-area-inset-bottom)); }
+  .composer {
+    position: fixed; z-index: 38; left: 0; right: 0; bottom: calc(var(--nav-h) + env(safe-area-inset-bottom));
+    padding: 8px 12px; background: var(--bg); border-top: 1px solid var(--border);
+  }
+  .composer .send-t { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .composer .btn { width: 44px; padding: 0; flex: none; }
+  body:has(.app[data-page="chat"]) .toasts { bottom: calc(var(--nav-h) + var(--composer-h, 76px) + 12px + env(safe-area-inset-bottom)); }
+}
+@media (min-width: 900px) {
+  .app[data-page="chat"] .main { max-width: 1200px; padding: 20px 24px; }
+  .chat { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 20px; height: calc(100dvh - var(--top-h) - 40px); min-height: 480px; }
+  .chat-side { display: flex; flex-direction: column; min-height: 0; }
+  .chat-side-head { display: flex; align-items: center; gap: 8px; margin: 2px 2px 10px; }
+  .chat-side-head h3 { flex: 1; margin: 0; font-size: 1rem; font-weight: 650; letter-spacing: -.01em; }
+  .sess-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; scrollbar-width: thin; }
+  .chat-side-foot { margin: 12px 4px 0; }
+  .chat-main { display: flex; flex-direction: column; min-height: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .chat-head { display: flex; align-items: center; gap: 6px; padding: 10px 12px 10px 20px; border-bottom: 1px solid var(--border); }
+  .chat-head h3 { margin: 0; font-size: 1rem; font-weight: 650; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-head .sub { font-size: .8125rem; color: var(--muted); }
+  .chat-log { flex: 1; min-height: 0; overflow-y: auto; padding: 24px 28px; scrollbar-width: thin; }
+  .composer { padding: 12px 16px 10px; border-top: 1px solid var(--border); }
+}
+
+/* WebUI access presets: two radio cards */
+.preset {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px; width: 100%; padding: 14px 16px;
+  text-align: left; font: inherit; color: var(--text); cursor: pointer;
+  border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface);
+  transition: border-color .15s ease-out, box-shadow .15s ease-out;
+}
+.preset:hover { border-color: var(--border-strong); }
+.preset.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.preset-top { display: flex; align-items: center; gap: 10px; width: 100%; }
+.preset-top b { flex: 1; font-weight: 650; }
+.preset.on .preset-top .row-ic { color: var(--accent); }
+.preset-check { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--field-line); color: transparent; flex: none; }
+.preset.on .preset-check { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.preset .mono, .preset .hint { padding-left: 30px; color: var(--muted); }
+.preset .hint { font-size: .875rem; text-wrap: pretty; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; transition-delay: 0s !important; }
+  .btn .spin, .spin-inline { animation-duration: 1.6s !important; animation-iteration-count: infinite !important; }
+}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9.5 21v-6h5v6"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-12.3 7.4L3 21l2.1-5.6A8.5 8.5 0 1 1 21 11.5z"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 2v6M15 2v6"/><path d="M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v4"/></symbol>
+  <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13L22 12v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6z"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 12 10 5 10-5"/><path d="m2 17 10 5 10-5"/></symbol>
+  <symbol id="i-term" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m6 9 4 3-4 3"/><path d="M12 15h6"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.8-9.8M17 6l3 3M14.5 8.5l2 2"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol>
+  <symbol id="i-auto" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v18" /><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5M21 12H9"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v4"/></symbol>
+  <symbol id="i-video" viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-4v12l-6-4"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 24 24"><path d="M3 5h18M6 12h12M10 19h4"/></symbol>
+  <symbol id="i-qr" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></symbol>
+  <symbol id="i-unlink" viewBox="0 0 24 24"><path d="m18.8 13.4 1.7-1.7a5 5 0 0 0-7-7l-1.7 1.7M5.2 10.6l-1.7 1.7a5 5 0 0 0 7 7l1.7-1.7"/><path d="M8 2v3M2 8h3M16 22v-3M22 16h-3"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l1.9 4.6 4.6 1.9-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0"/><path d="M16 4a4 4 0 0 1 0 8M22 21a7 7 0 0 0-4-6.3"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+  <symbol id="i-clip" viewBox="0 0 24 24"><path d="m21 11-8.6 8.6a5 5 0 0 1-7-7l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5" fill="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/><circle cx="19" cy="12" r="1.5" fill="currentColor"/></symbol>
+</svg>
+<div class="demo-flag" id="demo-flag">Simulasi, data contoh</div>
+<div id="root"></div>
+<div class="scrim" id="scrim"></div>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true"></div>
+<div class="savebar" id="savebar"><div class="grow" id="savebar-text">Ada perubahan yang belum disimpan</div><button class="btn ghost sm" id="savebar-discard" data-act="discard">Batal</button><button class="btn primary sm" id="savebar-save" data-act="save">Simpan</button></div>
+<div class="toasts" id="toasts"></div>
+<script>
+"use strict";
+/* =====================================================================
+   Xiao Console — static simulation. Every value below is sample data.
+   In the real build, `S` is filled from GET /api/... and every action
+   calls the matching POST/PUT/DELETE endpoint instead of a timeout.
+   ===================================================================== */
+
+const $ = (sel, el = document) => el.querySelector(sel);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const ic = (name, cls = "") => `<svg class="i ${cls}"><use href="#i-${name}"/></svg>`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* ---------- Language ----------
+   "auto" follows a saved choice, then the browser language. The real build
+   uses vue-i18n with the same two catalogues. */
+const LANG_DEFAULT = "auto";
+let LANG = "id";
+const L = (id, en) => (LANG === "en" ? en : id);
+const tx = (id, en) => ({ id, en });
+const T = (v) => (v && typeof v === "object" && "en" in v ? v[LANG] : v);
+const nf = (n) => Number(n).toLocaleString(LANG === "en" ? "en-US" : "id-ID");
+function pickLang() {
+  if (LANG_DEFAULT === "id" || LANG_DEFAULT === "en") return LANG_DEFAULT;
+  try { const saved = localStorage.getItem("xiao-lang"); if (saved === "id" || saved === "en") return saved; } catch (_) {}
+  const nav = typeof navigator !== "undefined" && navigator.language ? navigator.language : "";
+  return /^(id|in)\b/i.test(nav) ? "id" : "en";
+}
+function applyLang() {
+  if (document.documentElement) document.documentElement.lang = LANG;
+  const set = (id, text) => { const n = document.getElementById(id); if (n) n.textContent = text; };
+  set("demo-flag", L("Simulasi, data contoh", "Simulation, sample data"));
+  set("savebar-text", L("Ada perubahan yang belum disimpan", "You have unsaved changes"));
+  set("savebar-discard", L("Batal", "Discard"));
+  set("savebar-save", L("Simpan", "Save"));
+}
+
+const MODELS = [
+  "claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3.1-pro-preview", "gemini-3.7-flash", "gemini-3.6-flash-high",
+  "gemini-3-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-image", "gemini-3.7-flash-customtools", "gpt-oss-120b-medium",
+  "stepfun/step-3.7-flash:free", "poolside/laguna-s-2.1:free", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "kilo-auto/free",
+];
+
+const S = {
+  ui: { theme: "auto" },
+  system: { version: "0.2.0", uptime: tx("2j 14m", "2h 14m"), pid: 2196167, host: "armbian (aarch64)", started: "29 Sep 09:46",
+    data_dir: "/root/.local/share/xiaoai", config_file: tx("tidak ada .env, semua dari database", "no .env, everything from the database"),
+    db_size: tx("1,7 MB", "1.7 MB"), attachments: tx("2,4 MB", "2.4 MB"),
+    service: tx("xiao.service, Restart=always (5 dtk)", "xiao.service, Restart=always (5 s)"), rust_log: "info" },
+  env_locks: { RUST_LOG: "Environment=RUST_LOG=info (xiao.service)", IMAGE_FALLBACK_PROVIDER: "Environment=IMAGE_FALLBACK_PROVIDER=pollinations (xiao.service)" },
+  secrets: { BOT_TOKEN: { set: true, tail: "Q9kA", where: "vault/telegram" }, BRAVE_API_KEY: { set: false }, TAVILY_API_KEY: { set: false }, EXA_API_KEY: { set: false },
+    "provider:prov_con3gj": { set: true, tail: "a91c", where: "vault/provider/prov_con3gj" },
+    XIAO_WEB_PASSWORD: { set: true, tail: "", where: tx("vault/web, disimpan sebagai hash", "vault/web, stored as a hash") } },
+  telegram: { status: "online", bot: { username: "xiaofreebot", name: "Xiao", id: 8012345678, can_join_groups: true, can_read_all_group_messages: false, supports_inline_queries: true },
+    owner_id: "6120045871", allowed_chat_ids: "", dedicated_chat_ids: "-1003900000001",
+    last_poll: tx("2 dtk lalu", "2 s ago"), polling: tx("long-poll, timeout 20 dtk", "long-poll, 20 s timeout") },
+  whatsapp: { enabled: false, linked: false, owner_number: "", dedicated_groups: "" },
+  providers: [ { id: "prov_con3gj", name: "cpa", endpoint: "http://127.0.0.1:8317/v1", models: 40, active_model: "claude-opus-4-6-thinking", key: "provider:prov_con3gj", active: true } ],
+  roles: [
+    { id: "main", name: "Main", icon: "chat", desc: tx("Percakapan utama, alat, dan riwayat.", "The main conversation, tools and history."), route: { type: "specific", model: "claude-opus-4-6-thinking" }, fixed: true,
+      caps: { text_chat: true, tools: true, reasoning: true, image_input: true, structured_output: null }, checked: tx("2 hari lalu", "2 days ago") },
+    { id: "vision", name: "Vision", icon: "eye", desc: tx("Membaca gambar dan stiker.", "Reads pictures and stickers."), route: { type: "main_model" }, caps: { image_input: true }, checked: tx("2 hari lalu", "2 days ago") },
+    { id: "video", name: "Video", icon: "video", desc: tx("Membaca video dan video note.", "Reads videos and video notes."), route: { type: "specific", model: "gemini-3-flash" }, caps: { video_input: true }, checked: tx("5 hari lalu", "5 days ago") },
+    { id: "audio_stt", name: "Audio STT", icon: "mic", desc: tx("Transkripsi voice note dan audio.", "Transcribes voice notes and audio."), route: { type: "specific", model: "gemini-3.5-flash-lite" }, caps: { audio_transcription: false, audio_input: true }, checked: tx("5 hari lalu", "5 days ago") },
+    { id: "image_gen", name: "Image Generation", icon: "image", desc: tx("Membuat dan mengedit gambar.", "Creates and edits pictures."), route: { type: "specific", model: "gemini-3.1-flash-image" }, caps: { image_generation: true, image_editing: null }, checked: tx("1 hari lalu", "1 day ago") },
+    { id: "curator", name: "Curator", icon: "filter", desc: tx("Merangkum riwayat dan mengekstrak memori.", "Summarizes history and extracts memories."), route: { type: "specific", model: "gemini-3.5-flash-lite" }, caps: { text_chat: true, structured_output: true }, checked: tx("5 hari lalu", "5 days ago") },
+  ],
+  image: { fallback: "pollinations", gen_timeout: 120, connect_timeout: 10, download_timeout: 30 },
+  ai_limits: { connect_timeout: 10 },
+  search: { engines: [
+    { id: "brave", name: "Brave", keyed: true, state: "off", note: tx("tanpa kunci", "no key") },
+    { id: "tavily", name: "Tavily", keyed: true, state: "off", note: tx("tanpa kunci", "no key") },
+    { id: "exa", name: "Exa API", keyed: true, state: "off", note: tx("tanpa kunci", "no key") },
+    { id: "exa_mcp", name: "Exa MCP", keyed: false, state: "cool", note: tx("jeda 7 mnt setelah 429", "paused 7 min after 429") },
+    { id: "ddg", name: "DuckDuckGo", keyed: false, state: "cool", note: tx("jeda 3 mnt setelah captcha", "paused 3 min after captcha") },
+    { id: "wiki", name: "Wikipedia", keyed: false, state: "on", note: tx("cadangan terakhir", "last fallback") } ] },
+  mcp: { url: "https://mcp.exa.ai/", default_url: "https://mcp.exa.ai/", tools: [
+    ["web_search", tx("Cari di web lewat rantai mesin pencari.", "Searches the web through the engine chain."), true],
+    ["fetch_url", tx("Ambil dan baca isi halaman (aman SSRF).", "Fetches and reads a page (SSRF-safe)."), true],
+    ["send_photo", tx("Kirim satu foto dari URL publik.", "Sends one photo from a public URL.")],
+    ["send_collage", tx("Album 2–10 foto (sendMediaGroup).", "An album of 2–10 photos (sendMediaGroup).")],
+    ["send_slideshow", tx("Tayangan slide foto yang bisa digeser.", "A photo slideshow you can swipe.")],
+    ["send_audio", tx("Kirim berkas audio musik.", "Sends a music file.")],
+    ["send_voice", tx("Kirim voice note dengan waveform.", "Sends a voice note with a waveform.")],
+    ["send_location", tx("Kirim pin lokasi.", "Sends a location pin.")],
+    ["send_document", tx("Kirim dokumen dari URL.", "Sends a document from a URL.")],
+    ["create_document", tx("Buat PDF, HTML, kode, CSV/JSON, SVG lalu kirim.", "Creates a PDF, HTML, code, CSV/JSON or SVG file and sends it.")],
+    ["create_archive", tx("Paketkan banyak berkas jadi satu ZIP.", "Packs several files into one ZIP.")],
+    ["create_quiz", tx("Kuis native: gambar, penjelasan, batas waktu.", "Native quizzes with pictures, explanations and a time limit.")],
+    ["send_live_photo", tx("Live photo dari foto + MP4 ≤10 dtk.", "A live photo from a picture and an MP4 of 10 s or less.")] ] },
+  history: { retention: 2000 },
+  memories: [
+    { key: tx("bahasa", "language"), fact: tx("Lebih suka bahasa Indonesia yang santai; istilah teknis boleh bahasa Inggris.", "Prefers casual Indonesian; technical terms may stay in English."), updated: "12 Sep" },
+    { key: tx("perangkat", "devices"), fact: tx("Menjalankan Xiao di Armbian (ARM64); kerja harian di Windows 11.", "Runs Xiao on Armbian (ARM64); works on Windows 11 day to day."), updated: "20 Sep" },
+    { key: tx("proyek_utama", "main_project"), fact: tx("Mengembangkan xiaobot (Rust), asisten Telegram + WhatsApp.", "Builds xiaobot (Rust), a Telegram and WhatsApp assistant."), updated: "24 Sep" },
+    { key: tx("gaya_jawaban", "answer_style"), fact: tx("Jawaban ringkas, pakai tabel bila membandingkan.", "Short answers, with a table when comparing things."), updated: "25 Sep" },
+    { key: tx("larangan_build", "build_rule"), fact: tx("Jangan compile di Armbian; binary dipasang manual.", "Never compile on Armbian; binaries are installed by hand."), updated: "26 Sep" },
+    { key: tx("minat", "interests"), fact: tx("Sejarah dunia, kuis bergambar, fotografi.", "World history, picture quizzes, photography."), updated: "28 Sep" },
+    { key: tx("zona_waktu", "active_hours"), fact: tx("Aktif sekitar 08.00–23.00.", "Usually active from 08:00 to 23:00."), updated: "28 Sep" } ],
+  scopes: [
+    { chat: "6120045871", thread: 0, label: tx("Chat pribadi (Telegram)", "Private chat (Telegram)"), kind: "private", messages: 540, summary: true, tokens: { system: 2150, memory: 610, summary: 780, history: 18400, budget: 64000 } },
+    { chat: "-1003900000001", thread: 0, label: tx("Grup Xiao Lab, umum", "Xiao Lab group, general"), kind: "group", messages: 8, summary: false, tokens: { system: 2150, memory: 610, summary: 0, history: 1320, budget: 64000 } },
+    { chat: "-1003900000001", thread: 82, label: tx("Grup Xiao Lab, topik #82", "Xiao Lab group, topic #82"), kind: "topic", messages: 6, summary: false, tokens: { system: 2150, memory: 610, summary: 0, history: 940, budget: 64000 } } ],
+  queue: { telegram: { pending: 0, processing: 0, completed: 572, failed: 4 }, whatsapp: { pending: 0, processing: 0, completed: 0, failed: 0 },
+    failed: [
+      { ch: "telegram", id: 494665806, kind: "message", scope: tx("Chat pribadi", "Private chat"), attempts: 1, when: "29 Sep 09:41", error: "final answer could not be delivered", retry: true },
+      { ch: "telegram", id: 494665617, kind: "message", scope: tx("Grup Xiao Lab", "Xiao Lab group"), attempts: 2, when: "27 Sep 21:08", error: "quarantined after exceeding max attempts across restarts", retry: true },
+      { ch: "telegram", id: 494665607, kind: "inline", scope: "Inline", attempts: 2, when: "27 Sep 20:55", error: "quarantined after exceeding max attempts across restarts", retry: false },
+      { ch: "telegram", id: 494665605, kind: "message", scope: tx("Chat pribadi", "Private chat"), attempts: 2, when: "27 Sep 20:51", error: "quarantined after exceeding max attempts across restarts", retry: true } ] },
+  logs: [
+    ["09:57:05", "INFO", "xiao::bot::worker", "scope -1003900000001/0 · update 494665940 completed in 14.2s"],
+    ["09:56:51", "INFO", "xiao::ai::tools::search", "web_search: Wikipedia returned 5 results (Exa MCP cooling down, DuckDuckGo cooling down)"],
+    ["09:56:50", "WARN", "xiao::ai::tools::search", "Exa MCP returned 429 Too Many Requests; skipping it for 600s"],
+    ["09:56:28", "INFO", "xiao::bot::inline", "inline query answered with placeholder"],
+    ["09:54:01", "INFO", "xiao::ai::service::quiz", "create_quiz: 3 quizzes sent (pictures accepted)"],
+    ["09:53:40", "WARN", "xiao::ai::tools::search", "DuckDuckGo returned 202 (anomaly page); skipping it for 600s"],
+    ["09:53:24", "INFO", "xiao::bot::worker", "scope 6120045871/0 · update 494665921 claimed"],
+    ["09:46:26", "INFO", "xiao::bot::daemon", "Connected as @xiaofreebot; slash commands cleared"],
+    ["09:46:25", "INFO", "xiao::bot::daemon", "Recovered 0 in-flight updates; 0 quarantined"],
+    ["09:41:12", "ERROR", "xiao::bot::client", "sendRichMessage failed after 3 attempts: error sending request (timeout)"] ],
+  security: { lan: false, port: 8787, lan_ip: "192.168.1.206", allowed: "192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12",
+    tg_code: true, session_days: 7, session_expires: tx("dalam 6 hari", "in 6 days"),
+    sessions: [ { device: tx("Chrome di Android", "Chrome on Android"), os: "android", ip: "192.168.1.23", last: tx("baru saja", "just now"), current: true },
+                { device: tx("Edge di Windows", "Edge on Windows"), os: "windows", ip: tx("127.0.0.1 (tunnel SSH)", "127.0.0.1 (SSH tunnel)"), last: tx("kemarin 21:14", "yesterday 21:14"), current: false } ] },
+  /* Web chat sessions are the CLI sessions (`xiao chat`): same list, same history. */
+  chat: { active: 1, next: 4, draft: "", pending: [], sessions: [
+    { id: 1, name: "Default Chat", when: tx("hari ini 09:52", "today 09:52"), busy: false, messages: [
+      { role: "user", text: tx("Bandingkan Brave, Tavily, dan Exa untuk web_search. Kunci mana yang sebaiknya saya pasang dulu?",
+        "Compare Brave, Tavily and Exa for web_search. Which key should I add first?") },
+      { role: "xiao", model: "claude-opus-4-6-thinking", secs: 14.2,
+        think: tx("Pengguna menjalankan Xiao di Armbian dan sering melihat Exa MCP serta DuckDuckGo dijeda. Bandingkan tiga API di rantai web_search, lalu pilih satu yang paling membantu.",
+          "The user runs Xiao on Armbian and often sees Exa MCP and DuckDuckGo paused. Compare the three APIs in the web_search chain, then pick the one that helps most."),
+        tools: [["web_search", "Brave Tavily Exa search API"], ["fetch_url", "docs.tavily.com"]],
+        md: tx("Ketiganya dipakai berurutan di rantai `web_search`, dan masing-masing hanya aktif kalau kuncinya ada.\n\n| Mesin | Cocok untuk | Catatan |\n|---|---|---|\n| Brave | Pencarian web umum | Perlu kunci, dicoba paling awal |\n| Tavily | Riset dan ringkasan sumber | Ada paket gratis bulanan |\n| Exa | Pencarian semantik | Terpisah dari Exa MCP tanpa kunci |\n\nSaran saya: pasang **Tavily** dulu. Paket gratisnya cukup untuk pemakaian pribadi, dan begitu kuncinya ada, Exa MCP dan DuckDuckGo yang sering dijeda jadi jarang dibutuhkan.",
+          "All three sit in the `web_search` chain in order, and each one only runs when its key is set.\n\n| Engine | Good for | Notes |\n|---|---|---|\n| Brave | General web search | Needs a key, tried first |\n| Tavily | Research and source summaries | Has a free monthly plan |\n| Exa | Semantic search | Separate from the keyless Exa MCP |\n\nMy suggestion: add **Tavily** first. The free plan covers personal use, and once the key is set, the often-paused Exa MCP and DuckDuckGo are rarely needed.") },
+      { role: "user", text: tx("Ringkas laporan ini jadi poin-poin.", "Summarize this report as bullet points."),
+        files: [{ name: tx("laporan-armbian.pdf", "armbian-report.pdf"), size: "412 KB", kind: "file" }] },
+      { role: "xiao", model: "claude-opus-4-6-thinking", secs: 6.8,
+        md: tx("- Fitur inti (chat, media, kuis, live photo) lolos di Armbian.\n- Mode inline berhenti di placeholder karena inline feedback belum diaktifkan di @BotFather.\n- Mention di grup tidak sampai ke bot karena privacy mode masih aktif.\n- Exa MCP dan DuckDuckGo sering dijeda; kunci Tavily mengurangi ketergantungan pada keduanya.",
+          "- Core features (chat, media, quizzes, live photos) passed on Armbian.\n- Inline mode stops at the placeholder because inline feedback is not enabled in @BotFather.\n- Group mentions do not reach the bot because privacy mode is still on.\n- Exa MCP and DuckDuckGo are often paused; a Tavily key makes the chain depend on them less.") } ] },
+    { id: 2, name: tx("Rencana WebUI", "WebUI plan"), when: tx("hari ini 08:17", "today 08:17"), busy: false, messages: [
+      { role: "user", text: tx("Apa saja yang perlu disiapkan sebelum WebUI dibuild?", "What needs to be ready before the WebUI is built?") },
+      { role: "xiao", model: "claude-opus-4-6-thinking", secs: 9.4, tools: [["create_document", "checklist-webui.md"]],
+        md: tx("Ada empat hal:\n\n- Tentukan alamat lewat `XIAO_WEB_BIND`: hanya server ini (127.0.0.1) atau jaringan lokal (0.0.0.0).\n- Login memakai kode dari Telegram, dengan kata sandi cadangan yang disimpan di vault.\n- Tambahkan job `webui` di GitHub Actions supaya Armbian cukup menerima binary jadi.\n- Daftar cek lengkapnya ada di lampiran.",
+          "Four things:\n\n- Pick the address with `XIAO_WEB_BIND`: this server only (127.0.0.1) or the local network (0.0.0.0).\n- Sign-in uses a code sent on Telegram, with a backup password kept in the vault.\n- Add a `webui` job to GitHub Actions so Armbian only receives finished binaries.\n- The full checklist is attached."),
+        files: [{ name: "checklist-webui.md", size: "3 KB", kind: "doc" }] },
+      { role: "user", text: tx("Buatkan juga checklist uji di HP.", "Also make a checklist for testing on a phone.") },
+      { role: "xiao", model: "claude-opus-4-6-thinking",
+        error: tx("Provider tidak menjawab dalam 10 detik (AI_PROVIDER_CONNECT_TIMEOUT_SECS).", "The provider did not answer within 10 seconds (AI_PROVIDER_CONNECT_TIMEOUT_SECS).") } ] },
+    { id: 3, name: "Session 28 Sep 21:14", when: tx("28 Sep 21:14", "28 Sep 21:14"), busy: false, messages: [] } ] },
+};
+
+/* Plain text of a chat message, for token estimates and copying. */
+function msgText(m) {
+  return String(T(m.role === "user" ? m.text : m.md) || "");
+}
+/* Telegram scopes plus one scope per chat session (thread id = -session id, like the CLI). */
+function allScopes() {
+  return S.scopes.concat(S.chat.sessions.map((s) => ({
+    chat: S.telegram.owner_id, thread: -s.id, kind: "cli", messages: s.messages.length, summary: false,
+    label: tx(`Sesi #${s.id}: ${T(s.name)} (CLI dan web)`, `Session #${s.id}: ${T(s.name)} (CLI and web)`),
+    tokens: { system: 2150, memory: 610, summary: 0, history: Math.round(s.messages.reduce((n, m) => n + msgText(m).length, 0) / 3.6), budget: 64000 },
+  })));
+}
+function sessionStamp(d = new Date()) {
+  const mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()];
+  const p = (n) => String(n).padStart(2, "0");
+  return `Session ${p(d.getDate())} ${mon} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/* ---------- Navigation ---------- */
+const NAV = () => [
+  { group: L("Ringkasan", "Overview"), items: [["home", L("Beranda", "Home"), "home"], ["chat", "Chat", "chat"]] },
+  { group: L("Kecerdasan", "Intelligence"), items: [["ai", L("AI dan model", "AI and models"), "cpu"], ["search", L("Pencarian web", "Web search"), "search"], ["mcp", "MCP", "plug"], ["memory", L("Memori", "Memory"), "book"]] },
+  { group: L("Kanal", "Channels"), items: [["telegram", "Telegram", "send"], ["whatsapp", "WhatsApp", "phone"]] },
+  { group: L("Operasional", "Operations"), items: [["queue", L("Antrean", "Queue"), "inbox"], ["context", L("Konteks dan sesi", "Context and sessions"), "layers"], ["logs", L("Log", "Logs"), "term"]] },
+  { group: L("Sistem", "System"), items: [["system", L("Sistem", "System"), "sliders"], ["security", L("Keamanan WebUI", "WebUI security"), "shield"]] },
+];
+const BOTTOM = () => [["home", L("Beranda", "Home"), "home"], ["chat", "Chat", "chat"], ["ai", "AI", "cpu"], ["telegram", L("Kanal", "Channels"), "send"], ["more", L("Lainnya", "More"), "grid"]];
+const TITLES = () => Object.fromEntries(NAV().flatMap((g) => g.items.map(([id, t]) => [id, t])));
+const themeName = (t) => ({ auto: L("otomatis", "auto"), light: L("terang", "light"), dark: L("gelap", "dark") }[t]);
+
+function failedCount() {
+  return S.queue.telegram.failed + S.queue.whatsapp.failed;
+}
+
+function shell(page, body) {
+  const fc = failedCount();
+  const side = NAV().map((g) => `
+    <div class="side-group">${g.group}</div>
+    ${g.items.map(([id, t, icon]) => `<a class="side-link ${id === page ? "on" : ""}" href="#/${id}">${ic(icon)}<span>${t}</span>${id === "queue" && fc ? `<span class="count">${fc}</span>` : ""}</a>`).join("")}
+  `).join("");
+  const channelPages = ["telegram", "whatsapp"];
+  const inMore = !BOTTOM().some(([id]) => id === page) && !channelPages.includes(page);
+  const bottom = BOTTOM().map(([id, t, icon]) => {
+    const on = id === page || (id === "telegram" && channelPages.includes(page)) || (id === "more" && inMore);
+    const href = id === "more" ? "#" : `#/${id}`;
+    const act = id === "more" ? `data-act="more"` : "";
+    const dot = id === "more" && fc ? `<span class="badge-dot">${fc}</span>` : "";
+    return `<a href="${href}" ${act} class="${on ? "on" : ""}">${ic(icon)}<span>${t}</span>${dot}</a>`;
+  }).join("");
+  const themeIcon = { auto: "auto", light: "sun", dark: "moon" }[S.ui.theme];
+  const other = LANG === "en" ? "id" : "en";
+  const otherName = other === "en" ? "English" : "Bahasa Indonesia";
+  return `
+  <div class="app" data-page="${page}">
+    <nav class="sidebar" aria-label="${L("Navigasi", "Navigation")}">
+      <div class="side-brand"><div class="brandmark" aria-hidden="true">小</div><div><b>Xiao Console</b><small>@${esc(S.telegram.bot.username)}<span class="ver">v${S.system.version}</span></small></div></div>
+      ${side}
+      <div class="side-foot">${L("Masuk sebagai owner", "Signed in as owner")} <b>${esc(S.telegram.owner_id)}</b><br>${L("Sesi berakhir", "Session ends")} ${esc(T(S.security.session_expires))}</div>
+    </nav>
+    <header class="topbar">
+      <div class="brandmark" aria-hidden="true">小</div>
+      <h1>${esc(TITLES()[page] || "Xiao")}</h1>
+      <span class="livepill" title="${L("Daemon berjalan", "Daemon running")}"><span class="dot"></span>${esc(T(S.system.uptime))}</span>
+      <button class="iconbtn lang" data-act="lang" lang="${other}" title="${otherName}" aria-label="${otherName}">${other.toUpperCase()}</button>
+      <button class="iconbtn" data-act="theme" title="${L("Tema", "Theme")}: ${themeName(S.ui.theme)}" aria-label="${L("Ganti tema", "Change theme")}">${ic(themeIcon)}</button>
+      <button class="iconbtn only-desk" data-act="logout" title="${L("Keluar", "Sign out")}" aria-label="${L("Keluar", "Sign out")}">${ic("logout")}</button>
+    </header>
+    <main class="main" id="main">${body}</main>
+    <nav class="bottomnav" aria-label="${L("Navigasi utama", "Main navigation")}">${bottom}</nav>
+  </div>`;
+}
+
+function head(title, text) {
+  return `<div class="page-head"><h2>${esc(title)}</h2>${text ? `<p>${text}</p>` : ""}</div>`;
+}
+function sec(title, right = "") {
+  return `<div class="section-title"><h3>${esc(title)}</h3><span class="spacer"></span>${right}</div>`;
+}
+function badge(text, kind = "", icon = "") {
+  return `<span class="badge ${kind}">${icon ? ic(icon) : ""}${esc(text)}</span>`;
+}
+const LIVE = () => badge(L("Langsung berlaku", "Applies now"), "ok", "bolt");
+const RESTART = () => badge(L("Perlu restart", "Needs restart"), "warn", "refresh");
+const SECRET = () => badge(L("Disimpan di vault", "Stored in vault"), "violet", "lock");
+
+/* A setting whose environment value wins over the saved one cannot be edited here. */
+function envLock(key) {
+  const src = S.env_locks[key];
+  if (!src) return "";
+  return `<div class="lock">${ic("lock", "sm")}<div>${L(
+    `<b>Dikunci oleh environment.</b> Nilai ini berasal dari <code>${esc(src)}</code>, yang selalu menang atas nilai yang disimpan. Ubah atau hapus baris itu, lalu restart, agar pengaturan di sini berlaku.`,
+    `<b>Locked by the environment.</b> This value comes from <code>${esc(src)}</code>, which always wins over the saved value. Change or remove that line, then restart, for the setting here to apply.`)}</div></div>`;
+}
+
+function secretField(key, meta) {
+  const set = meta && meta.set;
+  return `
+  <div class="secret ${set ? "" : "unset"}" id="sec-${key}">
+    ${ic("key", "sm")}
+    <span class="mask">${set ? "••••••••" + esc(meta.tail) : L("belum diisi", "not set")}</span>
+    <span class="grow">${set ? esc(T(meta.where)) : ""}</span>
+    <button class="btn sm" data-act="secret-edit" data-key="${key}">${set ? L("Ganti", "Replace") : L("Isi", "Set")}</button>
+    ${set ? `<button class="btn sm ghost" data-act="secret-clear" data-key="${key}" aria-label="${L("Hapus", "Delete")}">${ic("trash", "sm")}</button>` : ""}
+  </div>`;
+}
+
+function toggle(id, on, attrs = "") {
+  const dirty = attrs.includes("data-nodirty") ? "" : "data-dirty";
+  return `<label class="switch"><input type="checkbox" id="${id}" ${on ? "checked" : ""} ${attrs} ${dirty}><span></span></label>`;
+}
+
+/* ---------- Sheet, toast, busy buttons ---------- */
+let sheetOpener = null;
+function openSheet(html) {
+  if (!$("#sheet").classList.contains("on")) sheetOpener = document.activeElement;
+  $("#sheet").innerHTML = `<div class="grab"></div>${html}`;
+  $("#sheet").classList.add("on");
+  $("#scrim").classList.add("on");
+  const first = $("#sheet").querySelector("input:not([disabled]), textarea, select, button:not([disabled]), a[href]");
+  if (first && first.focus) first.focus({ preventScroll: true });
+}
+function closeSheet() {
+  const wasOpen = $("#sheet").classList.contains("on");
+  $("#sheet").classList.remove("on");
+  $("#scrim").classList.remove("on");
+  if (wasOpen && sheetOpener && sheetOpener.isConnected && sheetOpener.focus) sheetOpener.focus({ preventScroll: true });
+  if (wasOpen) sheetOpener = null;
+}
+function toast(msg, err = false) {
+  const t = document.createElement("div");
+  t.className = "toast" + (err ? " err" : "");
+  t.innerHTML = `${ic(err ? "alert" : "check")}<span>${msg}</span>`;
+  $("#toasts").appendChild(t);
+  setTimeout(() => { if (t.remove) t.remove(); }, 3200);
+}
+async function busy(btn, ms, label = null) {
+  const html = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spin"></span>${label ?? L("Memproses…", "Working…")}`;
+  await sleep(ms);
+  btn.disabled = false;
+  btn.innerHTML = html;
+}
+function markDirty(on = true) {
+  $("#savebar").classList.toggle("on", on);
+}
+
+const PAGES = {};
+const AFTER = {};
+const ACTIONS = {};
+const CHANGES = {};
+const INPUTS = {};
+let currentPage = "home";
+
+function capName(k) {
+  return {
+    text_chat: L("Chat teks", "Text chat"), tools: "Tool calling", reasoning: "Reasoning", image_input: L("Input gambar", "Image input"),
+    video_input: L("Input video", "Video input"), audio_input: L("Input audio", "Audio input"), audio_transcription: L("Transkripsi", "Transcription"),
+    image_generation: L("Buat gambar", "Image generation"), image_editing: L("Edit gambar", "Image editing"),
+    structured_output: L("JSON terstruktur", "Structured JSON"), native_file_input: L("File native", "Native files"),
+  }[k] || k;
+}
+function capChips(caps) {
+  return Object.entries(caps).map(([k, v]) =>
+    v === true ? badge(capName(k), "ok", "check") : v === false ? badge(capName(k), "err", "x") : badge(capName(k) + L(" (belum diuji)", " (not tested)"))
+  ).join("");
+}
+function modelOptions(selected) {
+  return MODELS.map((m) => `<option ${m === selected ? "selected" : ""}>${esc(m)}</option>`).join("");
+}
+function numField(label, key, val, help, badgeHtml = LIVE()) {
+  const locked = !!S.env_locks[key];
+  return `<div class="field mt0"><div class="lab">${label} ${badgeHtml}</div>
+    <input class="input" type="number" inputmode="numeric" value="${val}" data-dirty ${locked ? "disabled" : ""}>
+    <div class="help"><code>${key}</code> ${help}</div>${envLock(key)}</div>`;
+}
+function statusCard(icon, kind, k, v, s, to) {
+  return `<a class="row link srow" href="#/${to}"><span class="row-ic ${kind}">${ic(icon)}</span>
+    <div class="grow"><div class="k">${k}</div><div class="v">${v}</div><div class="hint">${s}</div></div>${ic("chev")}</a>`;
+}
+function confirmSheet(title, text, label, act, data = {}, danger = true) {
+  const attrs = Object.entries(data).map(([k, v]) => `data-${k}="${esc(v)}"`).join(" ");
+  openSheet(`<h3>${title}</h3><div class="sub">${text}</div>
+    <div class="actions end"><button class="btn ghost" data-act="close">${L("Batal", "Cancel")}</button>
+    <button class="btn ${danger ? "danger solid" : "primary"}" data-act="${act}" ${attrs}>${label}</button></div>`);
+}
+
+/* ---------- Answer markdown ----------
+   Escapes first, then allows only code, bold, bullet lists and pipe tables.
+   The real build renders the same subset with Vue templates, never v-html. */
+function mdInline(s) {
+  return esc(s).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+}
+function md(src) {
+  const out = [];
+  const lines = String(src).split("\n");
+  for (let i = 0; i < lines.length;) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    if (line.startsWith("|")) {
+      const rows = [];
+      while (i < lines.length && lines[i].startsWith("|")) rows.push(lines[i++]);
+      const cells = (r) => r.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+      const [h, , ...body] = rows;
+      out.push(`<div class="md-tbl"><table><thead><tr>${cells(h).map((c) => `<th>${mdInline(c)}</th>`).join("")}</tr></thead><tbody>${body.map((r) => `<tr>${cells(r).map((c) => `<td>${mdInline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
+      continue;
+    }
+    if (line.startsWith("- ")) {
+      const items = [];
+      while (i < lines.length && lines[i].startsWith("- ")) items.push(lines[i++].slice(2));
+      out.push(`<ul>${items.map((x) => `<li>${mdInline(x)}</li>`).join("")}</ul>`);
+      continue;
+    }
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !lines[i].startsWith("|") && !lines[i].startsWith("- ")) para.push(lines[i++]);
+    out.push(`<p>${para.map(mdInline).join("<br>")}</p>`);
+  }
+  return out.join("");
+}
+
+/* ================= Home ================= */
+PAGES.home = () => {
+  const main = S.providers.find((p) => p.active);
+  const tg = S.telegram;
+  const keyed = ["BRAVE_API_KEY", "TAVILY_API_KEY", "EXA_API_KEY"].filter((k) => S.secrets[k].set);
+  const scopes = allScopes();
+  const msgs = scopes.reduce((a, s) => a + s.messages, 0);
+  const att = [];
+  if (failedCount()) att.push(["err", "inbox", L(`${failedCount()} update gagal diproses`, `${failedCount()} updates failed`), L("Lihat alasannya, lalu coba lagi atau abaikan.", "See why, then retry or dismiss them."), "queue"]);
+  if (!tg.bot.can_read_all_group_messages) att.push(["warn", "send", L("Privacy mode grup masih aktif", "Group privacy mode is still on"), L(`Sebutan @${tg.bot.username} di grup tidak sampai ke bot.`, `Mentions of @${tg.bot.username} in groups do not reach the bot.`), "telegram"]);
+  att.push(["warn", "send", L("Inline feedback belum aktif", "Inline feedback is off"), L("Jawaban inline tertahan di “Xiao sedang berpikir…”.", "Inline answers stay stuck at “Xiao is thinking…”."), "telegram"]);
+  if (!keyed.length) att.push(["warn", "search", L("Belum ada kunci mesin pencari", "No search engine key yet"), L("Exa MCP dan DuckDuckGo sedang dijeda; hasil jatuh ke Wikipedia.", "Exa MCP and DuckDuckGo are paused, so results fall back to Wikipedia."), "search"]);
+  if (!S.whatsapp.linked) att.push(["info", "phone", L("WhatsApp belum ditautkan", "WhatsApp is not linked"), L("Tautkan dengan kode pairing langsung dari HP.", "Link it with a pairing code, right from your phone."), "whatsapp"]);
+  const cool = S.search.engines.filter((e) => e.state === "cool").map((e) => e.name);
+  const firstOn = S.search.engines.find((e) => e.state === "on");
+  const fc = failedCount();
+  const pending = S.queue.telegram.pending + S.queue.whatsapp.pending;
+  return `
+  ${head(L("Beranda", "Home"), L(
+    `<b${fc ? ` class="err"` : ""}>${fc} gagal</b> dan <b>${pending}</b> menunggu di antrean. <b>${nf(msgs)}</b> pesan tersimpan di ${scopes.length} percakapan, <b>${S.memories.length}</b> fakta di memori.`,
+    `<b${fc ? ` class="err"` : ""}>${fc} failed</b> and <b>${pending}</b> waiting in the queue. <b>${nf(msgs)}</b> messages stored across ${scopes.length} conversations, <b>${S.memories.length}</b> facts in memory.`))}
+  ${att.length ? sec(L("Perlu perhatian", "Needs attention"), badge(String(att.length), "warn")) + `<div class="card rows">${att.map(([k, icn, t, h, to]) => `
+    <a class="row link" href="#/${to}"><span class="row-ic ${k}">${ic(icn)}</span>
+      <div class="grow"><div class="label">${t}</div><div class="hint">${h}</div></div>${ic("chev")}</a>`).join("")}</div>` : ""}
+  ${sec("Status")}
+  <div class="card rows">
+    ${statusCard("power", "ok", "Daemon", L("Berjalan ", "Running for ") + esc(T(S.system.uptime)), `v${S.system.version}, PID ${S.system.pid}, ${S.system.host}`, "system")}
+    ${statusCard("send", "ok", "Telegram", "@" + tg.bot.username, `Online, owner ${tg.owner_id}, poll ${esc(T(tg.last_poll))}`, "telegram")}
+    ${statusCard("phone", S.whatsapp.linked ? "ok" : "", "WhatsApp", S.whatsapp.linked ? L("Tertaut", "Linked") : L("Belum ditautkan", "Not linked"), S.whatsapp.linked ? "Online" : L("Gateway nonaktif", "Gateway off"), "whatsapp")}
+    ${statusCard("cpu", "info", L("Model utama", "Main model"), esc(main.active_model), L(`${esc(main.name)}, ${main.models} model di katalog`, `${esc(main.name)}, ${main.models} models in the catalogue`), "ai")}
+    ${statusCard("search", cool.length ? "warn" : "ok", L("Pencarian", "Search"), firstOn ? firstOn.name : L("Tidak ada", "None"), cool.length ? L(`${cool.join(", ")} sedang dijeda`, `${cool.join(", ")} paused`) : L("Semua mesin siap", "Every engine is ready"), "search")}
+    ${statusCard("db", "", L("Penyimpanan", "Storage"), esc(T(S.system.db_size)) + " database", L(`Lampiran ${esc(T(S.system.attachments))}, ${S.memories.length} memori`, `Attachments ${esc(T(S.system.attachments))}, ${S.memories.length} memories`), "system")}
+  </div>
+  ${sec(L("Aksi cepat", "Quick actions"))}
+  <div class="actions">
+    <a class="btn primary" href="#/chat">${ic("chat", "sm")}${L("Chat dengan Xiao", "Chat with Xiao")}</a>
+    <button class="btn" data-act="test-ai">${ic("play", "sm")}${L("Uji model utama", "Test main model")}</button>
+    <button class="btn" data-act="tg-check">${ic("send", "sm")}${L("Periksa Telegram", "Check Telegram")}</button>
+    <a class="btn" href="#/search">${ic("search", "sm")}${L("Uji pencarian", "Test search")}</a>
+    <button class="btn danger" data-act="restart">${ic("power", "sm")}Restart daemon</button>
+  </div>`;
+};
+
+/* ================= AI and models ================= */
+function routeSelect(role) {
+  const r = role.route;
+  const val = r.type === "specific" ? "m:" + r.model : r.type;
+  return `<select class="select" data-dirty aria-label="${L("Model untuk", "Model for")} ${role.name}">
+    <option value="main_model" ${val === "main_model" ? "selected" : ""}>${L("Ikuti model utama", "Follow main model")}</option>
+    <option value="disabled" ${val === "disabled" ? "selected" : ""}>${L("Nonaktif", "Off")}</option>
+    <optgroup label="cpa (127.0.0.1:8317)">${MODELS.map((m) => `<option value="m:${esc(m)}" ${val === "m:" + m ? "selected" : ""}>${esc(m)}</option>`).join("")}</optgroup>
+  </select>`;
+}
+function providerCard(p) {
+  return `<div class="card">
+    <div class="card-head"><span class="row-ic ${p.active ? "ok" : ""}">${ic("cpu")}</span>
+      <div class="grow"><h4>${esc(p.name)} ${p.active ? badge(L("Aktif", "Active"), "ok") : ""}</h4><div class="sub mono">${esc(p.endpoint)}</div></div></div>
+    <div class="card-body">
+      <dl class="kv"><dt>${L("Katalog", "Catalogue")}</dt><dd>${L(`${p.models} model, diambil 2 hari lalu`, `${p.models} models, fetched 2 days ago`)}</dd><dt>ID</dt><dd class="mono">${esc(p.id)}</dd></dl>
+      <div class="field mt12"><div class="lab">API key ${SECRET()}</div>${secretField(p.key, S.secrets[p.key])}</div>
+      <div class="actions mt12">
+        <button class="btn sm" data-act="refresh-catalog">${ic("refresh", "sm")}${L("Ambil ulang katalog", "Refresh catalogue")}</button>
+        <button class="btn sm" data-act="edit-provider" data-id="${esc(p.id)}">${ic("edit", "sm")}${L("Ubah", "Edit")}</button>
+        <button class="btn sm danger" ${p.active ? `disabled title="${L("Provider aktif tidak bisa dihapus", "The active provider cannot be removed")}"` : `data-act="rm-provider" data-id="${esc(p.id)}"`}>${ic("trash", "sm")}${L("Hapus", "Remove")}</button>
+      </div>
+    </div></div>`;
+}
+function roleCard(r) {
+  return `<div class="card">
+    <div class="card-head"><span class="row-ic">${ic(r.icon)}</span><div class="grow"><h4>${r.name}</h4><div class="sub">${esc(T(r.desc))}</div></div></div>
+    <div class="card-body">
+      ${routeSelect(r)}
+      <div class="badges mt12">${capChips(r.caps)}</div>
+      <div class="flex mt12"><span class="small faint grow">${L("Diuji", "Tested")} ${esc(T(r.checked))}</span>
+        <button class="btn sm" data-act="probe" data-role="${r.id}">${ic("play", "sm")}${L("Uji", "Test")}</button>
+        <button class="btn sm ghost" data-act="override" data-role="${r.id}" title="${L("Koreksi kemampuan", "Correct capabilities")}" aria-label="${L("Koreksi kemampuan", "Correct capabilities")}">${ic("edit", "sm")}</button></div>
+    </div></div>`;
+}
+PAGES.ai = () => {
+  const p = S.providers.find((x) => x.active);
+  const mainRole = S.roles.find((r) => r.id === "main");
+  const secs = L("detik, maks 600", "seconds, at most 600");
+  return `
+  ${head(L("AI dan model", "AI and models"), L("Provider, model utama, dan model spesialis. Perubahan langsung dipakai daemon tanpa restart.", "Providers, the main model and specialist models. The daemon uses changes right away, without a restart."))}
+  ${sec(L("Model utama", "Main model"), LIVE())}
+  <div class="card card-body">
+    <div class="grid two">
+      <div class="field mt0"><div class="lab">Provider</div><select class="select" data-dirty>${S.providers.map((x) => `<option ${x.active ? "selected" : ""}>${esc(x.name)} (${esc(x.endpoint)})</option>`).join("")}</select></div>
+      <div class="field mt0"><div class="lab">Model</div><select class="select" data-dirty>${modelOptions(p.active_model)}</select></div>
+    </div>
+    <div class="help">${L("Dipakai untuk percakapan, tool, dan riwayat. Spesialis di bawah hanya menerima media dan pertanyaan saat itu.", "Used for conversations, tools and history. The specialists below only receive the media and the question at hand.")}</div>
+    <div class="badges mt12">${capChips(mainRole.caps)}</div>
+    <div class="actions mt12">
+      <button class="btn" data-act="probe" data-role="main">${ic("play", "sm")}${L("Uji model", "Test model")}</button>
+      <button class="btn ghost" data-act="override" data-role="main">${ic("edit", "sm")}${L("Koreksi kemampuan", "Correct capabilities")}</button>
+    </div>
+  </div>
+  ${sec("Provider", `<button class="btn sm" data-act="add-provider">${ic("plus", "sm")}${L("Tambah", "Add")}</button>`)}
+  <div class="stack">${S.providers.map(providerCard).join("")}</div>
+  ${sec(L("Model spesialis", "Specialist models"), `<button class="btn sm" data-act="probe-all">${ic("play", "sm")}${L("Uji semua", "Test all")}</button>`)}
+  <div class="grid two">${S.roles.filter((r) => !r.fixed).map(roleCard).join("")}</div>
+  ${sec(L("Pembuatan gambar", "Image generation"))}
+  <div class="card card-body">
+    <div class="field mt0"><div class="lab">${L("Cadangan bila provider gagal", "Fallback when the provider fails")} ${LIVE()}</div>
+      <select class="select" data-dirty ${S.env_locks.IMAGE_FALLBACK_PROVIDER ? "disabled" : ""}>
+        <option value="none">${L("Tidak ada", "None")}</option><option value="pollinations" selected>${L("Pollinations (model flux)", "Pollinations (flux model)")}</option></select>
+      <div class="help"><code>IMAGE_FALLBACK_PROVIDER</code> ${L("dipakai hanya kalau rute Image Generation gagal.", "is used only when the Image Generation route fails.")}</div>
+      ${envLock("IMAGE_FALLBACK_PROVIDER")}</div>
+    <div class="grid three mt16">
+      ${numField(L("Batas waktu membuat", "Generation timeout"), "IMAGE_GENERATION_TIMEOUT_SECS", S.image.gen_timeout, secs)}
+      ${numField(L("Batas waktu sambung", "Connect timeout"), "IMAGE_PROVIDER_CONNECT_TIMEOUT_SECS", S.image.connect_timeout, secs)}
+      ${numField(L("Batas waktu unduh", "Download timeout"), "IMAGE_DOWNLOAD_TIMEOUT_SECS", S.image.download_timeout, secs)}
+    </div>
+  </div>
+  ${sec(L("Koneksi provider", "Provider connection"))}
+  <div class="card card-body">
+    ${numField(L("Batas waktu sambung ke provider", "Provider connect timeout"), "AI_PROVIDER_CONNECT_TIMEOUT_SECS", S.ai_limits.connect_timeout,
+      L("detik, maks 600. Berlaku untuk chat, uji model, dan transkripsi.", "seconds, at most 600. Applies to chat, model tests and transcription."), RESTART())}
+  </div>`;
+};
+
+/* ================= Telegram ================= */
+function chanSwitch(on) {
+  return `<div class="seg chan-switch">
+    <button class="${on === "telegram" ? "on" : ""}" data-act="goto" data-to="telegram">Telegram</button>
+    <button class="${on === "whatsapp" ? "on" : ""}" data-act="goto" data-to="whatsapp">WhatsApp</button></div>`;
+}
+function checkRow(state, title, text, fix, src) {
+  const k = { ok: ["ok", "check"], warn: ["warn", "alert"], info: ["info", "info"] }[state];
+  return `<div class="row top"><span class="row-ic ${k[0]}">${ic(k[1])}</span>
+    <div class="grow"><div class="label">${title}</div><div class="hint">${text}</div>
+    ${fix ? `<div class="hint mt8"><b>${L("Cara memperbaiki:", "How to fix:")}</b> ${fix}</div>` : ""}
+    ${src ? `<div class="hint faint mt8">${L("Sumber:", "Source:")} ${src}</div>` : ""}</div></div>`;
+}
+PAGES.telegram = () => {
+  const t = S.telegram;
+  const b = t.bot;
+  return `
+  ${chanSwitch("telegram")}
+  ${head("Telegram", L("Token bot, owner, grup yang dilayani, dan pemeriksaan pengaturan @BotFather.", "Bot token, owner, the groups Xiao serves, and a check of the @BotFather settings."))}
+  <div class="card">
+    <div class="card-head"><span class="row-ic ok">${ic("send")}</span>
+      <div class="grow"><h4>@${b.username} ${badge("Online", "ok")}</h4><div class="sub">${esc(b.name)}, ID ${b.id}, ${esc(T(t.polling))}</div></div>
+      <button class="btn sm" data-act="tg-check">${ic("refresh", "sm")}${L("Periksa", "Check")}</button></div>
+    <div class="card-body" id="tg-check-out"><div class="small muted">${L(`Polling terakhir ${esc(T(t.last_poll))}. Bot API 10.3. Menu slash dikosongkan saat start.`, `Last poll ${esc(T(t.last_poll))}. Bot API 10.3. The slash menu is cleared at start.`)}</div></div>
+  </div>
+  ${sec(L("Akses", "Access"))}
+  <div class="card card-body">
+    <div class="field"><div class="lab">${L("Token bot", "Bot token")} ${SECRET()} ${badge(L("Sambung ulang otomatis", "Reconnects on its own"), "info", "refresh")}</div>
+      ${secretField("BOT_TOKEN", S.secrets.BOT_TOKEN)}
+      <div class="help">${L("Diperiksa dengan getMe sebelum disimpan. Polling berhenti sebentar, lalu tersambung dengan token baru.", "Checked with getMe before it is saved. Polling pauses briefly, then reconnects with the new token.")}</div></div>
+    <div class="field"><div class="lab">Owner user ID ${LIVE()}</div>
+      <input class="input mono" inputmode="numeric" value="${esc(t.owner_id)}" data-dirty>
+      <div class="help"><code>OWNER_USER_ID</code> ${L("hanya akun ini yang dilayani; pesan orang lain dibuang tanpa balasan.", "only this account is served; messages from anyone else are dropped without a reply.")}</div></div>
+  </div>
+  ${sec(L("Grup", "Groups"))}
+  <div class="card card-body">
+    <div class="field"><div class="lab">${L("Grup yang diizinkan", "Allowed groups")} ${LIVE()}</div>
+      <input class="input mono" id="allowed" placeholder="${L("Kosong = semua grup", "Empty = every group")}" value="${esc(t.allowed_chat_ids)}" data-dirty>
+      <div class="help"><code>ALLOWED_CHAT_IDS</code> ${L("pisahkan dengan koma. Chat pribadi dan grup khusus selalu dilayani.", "separated by commas. The private chat and dedicated groups are always served.")}</div></div>
+    <div class="field"><div class="lab">${L("Grup khusus Xiao", "Dedicated Xiao groups")} ${LIVE()}</div>
+      <input class="input mono" id="dedicated" value="${esc(t.dedicated_chat_ids)}" data-dirty>
+      <div class="help"><code>DEDICATED_CHAT_IDS</code> ${L("setiap pesan owner dijawab tanpa perlu menyebut bot. Forum tempat bot jadi admin otomatis dianggap khusus.", "every owner message is answered without mentioning the bot. Forums where the bot is an admin count as dedicated on their own.")}</div></div>
+    <div class="small muted mt16">${L("Grup yang pernah terlihat di riwayat:", "Groups seen in the history:")}</div>
+    <div class="actions mt8">
+      <button class="btn sm" data-act="chip-add" data-target="allowed" data-id="-1003900000001">${ic("plus", "sm")}${L("Izinkan “Xiao Lab”", "Allow “Xiao Lab”")}</button>
+      <button class="btn sm" data-act="chip-add" data-target="dedicated" data-id="-1003900000001">${ic("plus", "sm")}${L("Jadikan khusus “Xiao Lab”", "Make “Xiao Lab” dedicated")}</button>
+    </div>
+  </div>
+  ${sec(L("Pemeriksaan @BotFather", "@BotFather check"))}
+  <div class="card rows">
+    ${b.can_read_all_group_messages
+      ? checkRow("ok", L("Privacy mode mati", "Privacy mode is off"), L("Bot menerima semua pesan grup.", "The bot receives every group message."), "", "getMe: can_read_all_group_messages")
+      : checkRow("warn", L("Privacy mode masih aktif", "Privacy mode is still on"),
+        L(`Di grup, bot hanya menerima reply ke bot, pesan berawalan /, dan semua pesan bila bot admin. Sebutan “@${b.username}” biasa tidak sampai.`, `In groups the bot only receives replies to it, messages starting with /, and everything when it is an admin. A plain “@${b.username}” mention does not arrive.`),
+        L("Di @BotFather kirim /setprivacy, pilih bot, lalu Disable. Setelah itu keluarkan lalu masukkan lagi bot ke grup, atau jadikan bot admin.", "In @BotFather send /setprivacy, pick the bot, then Disable. Then remove the bot from the group and add it again, or make it an admin."),
+        "getMe: can_read_all_group_messages = false")}
+    ${checkRow("ok", L("Inline mode aktif", "Inline mode is on"), L(`Pertanyaan “@${b.username} …” di chat mana pun dijawab untuk owner.`, `Questions like “@${b.username} …” in any chat are answered for the owner.`), "", "getMe: supports_inline_queries")}
+    ${checkRow("warn", L("Inline feedback kemungkinan belum aktif", "Inline feedback is probably off"),
+      L("Belum pernah ada chosen_inline_result yang masuk, padahal inline query sudah 5 kali. Tanpa ini jawaban inline berhenti di placeholder.", "No chosen_inline_result has arrived yet, although there have been 5 inline queries. Without it, inline answers stop at the placeholder."),
+      L("Di @BotFather kirim /setinlinefeedback, pilih bot, lalu Enabled.", "In @BotFather send /setinlinefeedback, pick the bot, then Enabled."),
+      L("riwayat antrean (Telegram tidak menyediakan cek langsung)", "queue history (Telegram offers no direct check)"))}
+    ${checkRow("ok", L("Bisa dimasukkan ke grup", "Can join groups"), L("Grup baru bisa menambahkan bot.", "New groups can add the bot."), "", "getMe: can_join_groups")}
+  </div>`;
+};
+
+/* ================= WhatsApp ================= */
+function fakeQR(seed) {
+  const n = 29;
+  let s = seed;
+  const rnd = () => (s = (s * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const inFinder = (x, y) => (x < 8 && y < 8) || (x > n - 9 && y < 8) || (x < 8 && y > n - 9);
+  let cells = "";
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) if (!inFinder(x, y) && rnd() > 0.5) cells += `M${x} ${y}h1v1h-1z`;
+  const finder = (x, y) => `M${x} ${y}h7v7h-7zM${x + 1} ${y + 1}v5h5v-5zM${x + 2} ${y + 2}h3v3h-3z`;
+  return `<svg class="qr" viewBox="-2 -2 ${n + 4} ${n + 4}" shape-rendering="crispEdges" role="img" aria-label="${L("Kode QR contoh", "Sample QR code")}">
+    <path fill="currentColor" fill-rule="evenodd" d="${cells}${finder(0, 0)}${finder(n - 7, 0)}${finder(0, n - 7)}"/></svg>`;
+}
+let pairMode = window.matchMedia("(max-width: 899px)").matches ? "code" : "qr";
+function pairBody() {
+  if (pairMode === "qr") {
+    return `${fakeQR(Date.now() % 100000)}
+      <ol class="steps small muted mt12">
+        <li>${L("Di HP, buka WhatsApp, lalu <b>Perangkat tertaut</b> dan <b>Tautkan perangkat</b>.", "On your phone, open WhatsApp, then <b>Linked devices</b> and <b>Link a device</b>.")}</li>
+        <li>${L("Pindai kode ini. Kode diganti setiap 20 detik.", "Scan this code. It changes every 20 seconds.")}</li></ol>
+      <div class="note warn mt12">${ic("phone", "sm")}<div>${L("QR tidak bisa dipindai dari HP yang sedang membuka halaman ini. Di HP, pakai <b>Kode pairing</b>.", "A phone cannot scan a QR code shown on its own screen. On a phone, use the <b>Pairing code</b>.")}</div></div>`;
+  }
+  return `<div class="field mt0"><div class="lab">${L("Nomor WhatsApp yang akan ditautkan", "WhatsApp number to link")}</div>
+      <div class="inline"><input class="input mono" id="wa-num" type="tel" inputmode="numeric" placeholder="628123456789">
+      <button class="btn primary" data-act="pair-request">${L("Minta kode", "Get code")}</button></div>
+      <div class="help">${L("Format internasional tanpa “+”. Nomor ini akan menjadi perangkat tempat Xiao berjalan.", "International format without “+”. Xiao runs as a linked device of this number.")}</div></div>
+    <div id="pair-out"></div>`;
+}
+PAGES.whatsapp = () => {
+  const w = S.whatsapp;
+  const pairing = `
+    <div class="card card-body">
+      <div class="seg"><button class="${pairMode === "code" ? "on" : ""}" data-act="pairmode" data-mode="code">${L("Kode pairing", "Pairing code")}</button>
+        <button class="${pairMode === "qr" ? "on" : ""}" data-act="pairmode" data-mode="qr">${L("Kode QR", "QR code")}</button></div>
+      <div id="pair-body" class="mt16">${pairBody()}</div>
+      <div class="help mt12">${L("Penautan berjalan di dalam daemon, jadi layanan tidak perlu dihentikan (berbeda dengan <code>xiao gateway wa pair</code>).", "Linking runs inside the daemon, so the service keeps running (unlike <code>xiao gateway wa pair</code>).")}</div>
+    </div>`;
+  const linked = `
+    <div class="card card-body">
+      <dl class="kv"><dt>${L("Nomor", "Number")}</dt><dd class="mono">+${esc(w.linked_number)}</dd><dt>${L("Perangkat", "Device")}</dt><dd>Xiao (whatsapp-rust)</dd><dt>${L("Ditautkan", "Linked")}</dt><dd>${L("baru saja", "just now")}</dd><dt>${L("Antrean", "Queue")}</dt><dd>${L("0 menunggu, 0 gagal", "0 pending, 0 failed")}</dd></dl>
+      <div class="actions mt16"><button class="btn danger" data-act="wa-unlink">${ic("unlink", "sm")}${L("Putuskan tautan", "Unlink")}</button></div>
+    </div>`;
+  return `
+  ${chanSwitch("whatsapp")}
+  ${head("WhatsApp", L("Tautkan Xiao sebagai perangkat WhatsApp, lalu atur owner dan grup.", "Link Xiao as a WhatsApp device, then set the owner and groups."))}
+  <div class="card"><div class="card-head">
+    <span class="row-ic ${w.linked ? "ok" : ""}">${ic("phone")}</span>
+    <div class="grow"><h4>${w.linked ? L("Tertaut ", "Linked ") + badge("Online", "ok") : L("Belum ditautkan", "Not linked")}</h4>
+      <div class="sub">${w.linked ? L("Gateway berjalan dan diawasi. Restart otomatis bila putus.", "The gateway runs under supervision and restarts if it drops.") : L("Sesi akan disimpan di whatsapp.db (izin 0600)", "The session will be stored in whatsapp.db (mode 0600)")}</div></div>
+    <label class="flex small" title="WHATSAPP_ENABLED">${L("Aktif", "On")} ${toggle("wa-en", w.enabled || w.linked)}</label></div></div>
+  ${sec(w.linked ? L("Sesi", "Session") : L("Tautkan", "Link"))}
+  ${w.linked ? linked : pairing}
+  ${sec(L("Akses", "Access"), badge(L("Gateway dimulai ulang", "Gateway restarts"), "info", "refresh"))}
+  <div class="card card-body">
+    <div class="field"><div class="lab">${L("Nomor owner", "Owner number")}</div>
+      <input class="input mono" type="tel" inputmode="numeric" placeholder="628123456789" value="${esc(w.owner_number)}" data-dirty>
+      <div class="help"><code>WHATSAPP_OWNER_NUMBER</code> ${L("hanya nomor ini yang dilayani. Kosong = semua pesan dibuang.", "only this number is served. Empty = every message is dropped.")}</div></div>
+    <div class="field"><div class="lab">${L("Grup khusus", "Dedicated groups")}</div>
+      <input class="input mono" placeholder="120363000000000000@g.us" value="${esc(w.dedicated_groups)}" data-dirty>
+      <div class="help"><code>WHATSAPP_DEDICATED_GROUPS</code> ${L("di grup lain Xiao hanya menjawab bila disebut, di-reply, atau pesan diawali “/”.", "in other groups Xiao only answers when mentioned, replied to, or when the message starts with “/”.")}</div></div>
+  </div>`;
+};
+
+/* ================= Search ================= */
+PAGES.search = () => {
+  const chain = S.search.engines.map((e, i) => `${i ? `<span class="arr" aria-hidden="true">${ic("chev", "sm")}</span>` : ""}
+    <span class="eng ${e.state === "off" ? "off" : e.state === "cool" ? "cool" : ""}" title="${esc(T(e.note))}">
+      <span class="dot ${e.state === "on" ? "ok" : e.state === "cool" ? "warn" : ""}"></span>${e.name}</span>`).join("");
+  const keyRow = (key, name, url, note) => `
+    <div class="field"><div class="lab">${name} ${SECRET()}</div>${secretField(key, S.secrets[key])}
+      <div class="help"><code>${key}</code> ${note} <a href="${url}" target="_blank" rel="noopener">${L("Dapatkan kunci", "Get a key")}${ic("link", "sm")}</a></div></div>`;
+  return `
+  ${head(L("Pencarian web", "Web search"), L("Urutan mesin dipilih otomatis dari kunci yang terisi. Kunci baru langsung dipakai pencarian berikutnya.", "The engine order follows the keys you have set. A new key is used from the next search on."))}
+  ${sec(L("Rantai mesin saat ini", "Current engine chain"))}
+  <div class="card card-body">
+    <div class="chain">${chain}</div>
+    <div class="legend">${S.search.engines.filter((e) => e.state !== "on").map((e) => `<div><span class="dot ${e.state === "cool" ? "warn" : ""}"></span>${e.name}<span class="n">${esc(T(e.note))}</span></div>`).join("")}</div>
+    <div class="help mt12">${L("Mesin yang baru gagal dilewati sementara: Exa MCP 10 menit setelah 429 (atau sesuai Retry-After) dan 2 menit untuk kegagalan lain; DuckDuckGo 10 menit.", "An engine that just failed is skipped for a while: Exa MCP for 10 minutes after a 429 (or its Retry-After) and 2 minutes after other failures; DuckDuckGo for 10 minutes.")}</div>
+    <div class="actions mt12"><button class="btn sm" data-act="reset-cooldown">${ic("refresh", "sm")}${L("Akhiri jeda sekarang", "End the pauses now")}</button></div>
+  </div>
+  ${sec(L("Kunci API", "API keys"), LIVE())}
+  <div class="card card-body">
+    ${keyRow("BRAVE_API_KEY", "Brave Search", "https://brave.com/search/api/", L("Dicoba pertama.", "Tried first."))}
+    ${keyRow("TAVILY_API_KEY", "Tavily", "https://app.tavily.com/", L("Rekomendasi: stabil untuk riset, ada paket gratis.", "Recommended: steady for research, with a free plan."))}
+    ${keyRow("EXA_API_KEY", "Exa", "https://dashboard.exa.ai/", L("REST API resmi, terpisah dari Exa MCP tanpa kunci.", "The official REST API, separate from the keyless Exa MCP."))}
+  </div>
+  ${sec(L("Uji pencarian", "Test a search"))}
+  <div class="card card-body">
+    <div class="inline"><input class="input" id="sq" aria-label="${L("Kata kunci", "Search terms")}" value="${L("sejarah Colosseum", "history of the Colosseum")}">
+      <button class="btn primary" data-act="search-test">${ic("search", "sm")}${L("Uji", "Test")}</button></div>
+    <label class="flex small mt12">${toggle("simg", false, "data-nodirty")} ${L("Mode gambar (cari foto, minimal 3)", "Picture mode (finds photos, at least 3)")}</label>
+    <div id="sres"></div>
+  </div>`;
+};
+
+/* ================= MCP ================= */
+PAGES.mcp = () => `
+  ${head("MCP", L("Xiao memakai satu endpoint MCP untuk pencarian tanpa kunci (Exa MCP). Tool bawaan di bawah selalu tersedia untuk model.", "Xiao uses one MCP endpoint for keyless search (Exa MCP). The built-in tools below are always available to the model."))}
+  ${sec("Endpoint", LIVE())}
+  <div class="card card-body">
+    <div class="field mt0"><div class="lab">${L("URL endpoint", "Endpoint URL")}</div>
+      <input class="input mono" id="mcpurl" value="${esc(S.mcp.url)}" data-dirty>
+      <div class="help"><code>EXA_MCP_URL</code> ${L("diperiksa firewall SSRF sebelum disimpan: alamat loopback, privat, dan link-local ditolak.", "is checked by the SSRF firewall before it is saved: loopback, private and link-local addresses are refused.")}</div></div>
+    <div class="actions mt12">
+      <button class="btn" data-act="mcp-test">${ic("play", "sm")}${L("Uji koneksi", "Test connection")}</button>
+      <button class="btn ghost" data-act="mcp-reset">${ic("refresh", "sm")}${L("Pulihkan default", "Restore default")}</button></div>
+    <div id="mcpres"></div>
+  </div>
+  ${sec(L("Tool bawaan", "Built-in tools"), badge(S.mcp.tools.length + L(" tool", S.mcp.tools.length === 1 ? " tool" : " tools")))}
+  <div class="card rows">${S.mcp.tools.map(([n, d, guest]) => `
+    <div class="row"><div class="grow"><div class="label mono">${n}</div><div class="hint">${esc(T(d))}</div></div>
+    ${guest ? badge(L("Juga guest dan inline", "Also guest and inline"), "info") : ""}</div>`).join("")}</div>
+  <div class="small muted mt8">${L("Mode guest dan inline hanya boleh memakai tool baca: web_search dan fetch_url. Chat di WebUI memakai semua tool.", "Guest and inline mode may only use the read tools: web_search and fetch_url. Chat in the WebUI uses every tool.")}</div>`;
+
+/* ================= Memory ================= */
+function memRows(q = "") {
+  const list = S.memories.filter((m) => !q || (T(m.key) + " " + T(m.fact)).toLowerCase().includes(q.toLowerCase()));
+  if (!list.length) return `<div class="empty">${L("Tidak ada memori yang cocok.", "No memories match.")}</div>`;
+  return list.map((m) => `
+    <div class="row top">
+      <div class="grow"><div class="mono small faint">${esc(T(m.key))}</div><div>${esc(T(m.fact))}</div><div class="hint">${L("Diperbarui", "Updated")} ${esc(T(m.updated))}</div></div>
+      <button class="btn sm ghost" data-act="mem-edit" data-key="${esc(T(m.key))}" aria-label="${L("Ubah", "Edit")} ${esc(T(m.key))}">${ic("edit", "sm")}</button>
+      <button class="btn sm ghost" data-act="mem-del" data-key="${esc(T(m.key))}" aria-label="${L("Hapus", "Delete")} ${esc(T(m.key))}">${ic("trash", "sm")}</button>
+    </div>`).join("");
+}
+PAGES.memory = () => `
+  ${head(L("Memori", "Memory"), L("Fakta jangka panjang tentang owner. Curator mengisinya otomatis dari percakapan; di sini bisa dikoreksi.", "Long-term facts about the owner. The curator fills them in from conversations; you can correct them here."))}
+  <div class="toolbar">
+    <input class="input" id="memq" placeholder="${L("Cari memori…", "Search memories…")}" aria-label="${L("Cari memori", "Search memories")}">
+    <button class="btn primary" data-act="mem-add">${ic("plus", "sm")}${L("Tambah", "Add")}</button></div>
+  <div class="card rows" id="memlist">${memRows()}</div>
+  <div class="small muted mt8">${L("Paling banyak 40 fakta masuk ke prompt, masing-masing dipotong 300 karakter. Isi memori diperlakukan sebagai data, bukan perintah.", "At most 40 facts go into the prompt, each cut to 300 characters. Memory content is treated as data, never as instructions.")}</div>
+  ${sec(L("Zona berbahaya", "Danger zone"))}
+  <div class="card card-body danger-zone">
+    <div class="grow"><div class="label">${L("Hapus semua memori", "Delete every memory")}</div><div class="small muted">${L("Riwayat chat dan ringkasan tidak ikut terhapus.", "Chat history and summaries are kept.")}</div></div>
+    <button class="btn danger" data-act="mem-clear">${ic("trash", "sm")}${L("Hapus semua", "Delete all")}</button></div>`;
+INPUTS.memq = (el) => { $("#memlist").innerHTML = memRows(el.value); };
+
+/* ================= Queue ================= */
+function queueKpis(q) {
+  return `<dl class="card qstats">
+    <div><dt>${L("Menunggu", "Pending")}</dt><dd>${nf(q.pending)}</dd></div>
+    <div><dt>${L("Diproses", "Processing")}</dt><dd>${nf(q.processing)}</dd></div>
+    <div><dt>${L("Selesai", "Completed")}</dt><dd>${nf(q.completed)}</dd></div>
+    <div${q.failed ? ` class="err"` : ""}><dt>${L("Gagal", "Failed")}</dt><dd>${nf(q.failed)}</dd></div></dl>`;
+}
+PAGES.queue = () => {
+  const f = S.queue.failed;
+  const kind = (k) => ({ message: L("pesan", "message"), inline: "inline" }[k] || k);
+  const c = { upd: "Update", kind: L("Jenis", "Kind"), scope: L("Percakapan", "Conversation"), att: L("Coba", "Tries"), when: L("Waktu", "Time"), why: L("Alasan", "Reason") };
+  return `
+  ${head(L("Antrean", "Queue"), L("Setiap pesan masuk disimpan dulu ke database, baru diproses. Yang gagal berulang dikarantina di sini.", "Every incoming message is saved to the database before it is handled. Messages that keep failing are quarantined here."))}
+  ${sec("Telegram")}${queueKpis(S.queue.telegram)}
+  ${sec("WhatsApp")}${queueKpis(S.queue.whatsapp)}
+  ${sec(L("Dikarantina", "Quarantined"), f.length ? badge(f.length + L(" update", f.length === 1 ? " update" : " updates"), "err") : "")}
+  ${f.length ? `<div class="card"><table class="tbl">
+    <thead><tr><th>${c.upd}</th><th>${c.kind}</th><th>${c.scope}</th><th>${c.att}</th><th>${c.when}</th><th>${c.why}</th><th></th></tr></thead>
+    <tbody>${f.map((r) => `<tr>
+      <td data-l="${c.upd}" class="mono">${r.id}</td><td data-l="${c.kind}">${kind(r.kind)}</td><td data-l="${c.scope}">${esc(T(r.scope))}</td>
+      <td data-l="${c.att}">${r.attempts}×</td><td data-l="${c.when}">${r.when}</td>
+      <td data-l="${c.why}" class="full"><span class="small err-text">${esc(r.error)}</span></td>
+      <td class="full"><div class="actions">
+        <button class="btn sm" ${r.retry ? `data-act="q-retry" data-id="${r.id}"` : `disabled title="${L("Inline query yang sudah lewat tidak bisa dijawab lagi", "An expired inline query cannot be answered again")}"`}>${ic("refresh", "sm")}${L("Coba lagi", "Retry")}</button>
+        <button class="btn sm ghost" data-act="q-dismiss" data-id="${r.id}">${L("Abaikan", "Dismiss")}</button></div></td>
+    </tr>`).join("")}</tbody></table></div>
+    <div class="note warn mt12">${ic("alert", "sm")}<div>${L("“Coba lagi” memproses ulang pesan dari awal. Bila sebagian jawaban sempat terkirim sebelum gagal, bagian itu bisa terkirim dua kali.", "“Retry” handles the message again from the start. If part of the answer went out before the failure, that part can arrive twice.")}</div></div>`
+    : `<div class="card"><div class="empty">${ic("check", "lg")}<div class="empty-title mt8">${L("Tidak ada update yang dikarantina.", "No updates are quarantined.")}</div></div></div>`}`;
+};
+
+/* ================= Context ================= */
+let ctxIndex = 0;
+function renderCtx(i) {
+  const list = allScopes();
+  ctxIndex = Math.min(i, list.length - 1);
+  const s = list[ctxIndex];
+  const t = s.tokens;
+  const used = t.system + t.memory + t.summary + t.history;
+  const pct = (n) => (n / t.budget * 100).toFixed(2) + "%";
+  const parts = [["System prompt", t.system, "var(--violet)"], [L("Memori", "Memory"), t.memory, "var(--info)"], [L("Ringkasan lama", "Older summary"), t.summary, "var(--warn)"], [L("Riwayat terbaru", "Recent history"), t.history, "var(--accent)"]];
+  $("#ctx").innerHTML = `
+  <div class="card card-body mt12">
+    <div class="flex top"><div class="grow"><div class="ctx-total">${nf(used)} <span>/ ${nf(t.budget)} token</span></div>
+      <div class="small muted">${L(`${nf(s.messages)} pesan tersimpan`, `${nf(s.messages)} stored messages`)}, chat <span class="mono">${s.chat}</span>, thread <span class="mono">${s.thread}</span></div></div>
+      ${badge(L(`${Math.round(used / t.budget * 100)}% terpakai`, `${Math.round(used / t.budget * 100)}% used`), used / t.budget > .8 ? "warn" : "ok")}</div>
+    <div class="bar mt12">${parts.map(([, n, c]) => `<i style="width:${pct(n)};background:${c}"></i>`).join("")}</div>
+    <div class="legend">${parts.map(([l, n, c]) => `<div><span class="sw" style="background:${c}"></span>${l}<span class="n">${nf(n)}</span></div>`).join("")}</div>
+  </div>
+  <div class="card card-body mt12">
+    <div class="card-title">${L("Ringkasan lama", "Older summary")}</div>
+    ${s.summary ? `<p class="small muted para">${L("Owner sedang mengembangkan xiaobot (Rust) dan menguji kuis bergambar, album, dan mode inline di Telegram. Sebelumnya membahas penyebab gambar gagal terkirim di Armbian…", "The owner is building xiaobot (Rust) and testing picture quizzes, albums and inline mode on Telegram. Earlier they looked into why pictures failed to send on Armbian…")}</p>` : `<p class="small muted para">${L("Belum ada. Curator merangkum riwayat lama saat percakapan mulai panjang.", "None yet. The curator summarizes older history once a conversation grows long.")}</p>`}
+    <div class="actions mt12">
+      <button class="btn sm" ${s.summary ? `data-act="ctx-clear-summary"` : "disabled"}>${ic("trash", "sm")}${L("Hapus ringkasan", "Delete summary")}</button>
+      <button class="btn sm danger" data-act="ctx-clear-history" data-label="${esc(T(s.label))}">${ic("trash", "sm")}${L("Bersihkan riwayat percakapan ini", "Clear this conversation's history")}</button></div>
+  </div>`;
+}
+PAGES.context = () => `
+  ${head(L("Konteks dan sesi", "Context and sessions"), L("Isi jendela konteks per chat atau topik, ringkasan lama, dan batas riwayat. Sesi chat WebUI dan <code>xiao chat</code> ikut tercantum.", "What fills the context window for each chat or topic, the older summary, and the history limit. WebUI and <code>xiao chat</code> sessions are listed too."))}
+  <div class="field mt0"><div class="lab">${L("Percakapan", "Conversation")}</div>
+    <select class="select" id="scopesel" data-change="scope">${allScopes().map((s, i) => `<option value="${i}" ${i === ctxIndex ? "selected" : ""}>${esc(T(s.label))} (${nf(s.messages)} ${L("pesan", "messages")})</option>`).join("")}</select></div>
+  <div id="ctx"></div>
+  ${sec(L("Riwayat", "History"))}
+  <div class="card card-body">
+    ${numField(L("Pesan disimpan per chat atau topik", "Messages kept per chat or topic"), "XIAO_HISTORY_RETENTION", S.history.retention, L("0 = tanpa batas. Pesan tertua dipangkas saat pesan baru disimpan.", "0 = no limit. The oldest messages are pruned when new ones are saved."))}
+  </div>`;
+AFTER.context = () => renderCtx(ctxIndex);
+CHANGES.scope = (el) => renderCtx(Number(el.value));
+
+/* ================= Logs ================= */
+let logLevel = "all";
+let logPaused = false;
+let logTimer = null;
+const SAMPLE_LOG = [
+  ["INFO", "xiao::bot::daemon", "getUpdates: 0 updates"],
+  ["INFO", "xiao::bot::worker", "scope 6120045871/0 · update claimed"],
+  ["INFO", "xiao::ai::service::curator", "curator: 1 fact updated"],
+  ["WARN", "xiao::ai::tools::search", "DuckDuckGo still cooling down; skipped"],
+];
+function renderLogs() {
+  const box = $("#logbox");
+  if (!box) return;
+  const q = ($("#logq")?.value || "").toLowerCase();
+  const lines = S.logs.filter(([, l, m, x]) => (logLevel === "all" || l === logLevel) && (!q || (m + " " + x).toLowerCase().includes(q)));
+  box.innerHTML = lines.map(([t, l, m, x]) => `<div><span class="t">${t}</span> <span class="${l}">${l.padEnd(5, " ")}</span> <span class="t">${esc(m)}</span> ${esc(x)}</div>`).join("")
+    || `<div class="t">${L("Tidak ada baris yang cocok.", "No lines match.")}</div>`;
+}
+PAGES.logs = () => `
+  ${head(L("Log", "Logs"), L("Baris terbaru dari daemon, langsung dari memori. Tidak perlu journalctl.", "The latest daemon lines, straight from memory. No journalctl needed."))}
+  <div class="toolbar">
+    <div class="seg">${["all", "INFO", "WARN", "ERROR"].map((l) => `<button class="${logLevel === l ? "on" : ""}" data-act="lvl" data-l="${l}">${l === "all" ? L("Semua", "All") : l}</button>`).join("")}</div>
+    <input class="input" id="logq" placeholder="${L("Filter teks…", "Filter text…")}" aria-label="${L("Filter teks", "Filter text")}">
+    <button class="btn" data-act="log-pause">${ic(logPaused ? "play" : "clock", "sm")}${logPaused ? L("Lanjut", "Resume") : L("Jeda", "Pause")}</button>
+    <button class="btn ghost" data-act="log-dl" aria-label="${L("Unduh", "Download")}">${ic("down", "sm")}</button>
+  </div>
+  <div class="log" id="logbox"></div>
+  <div class="small muted mt8">${L(`Menyimpan 500 baris terakhir. Level saat ini <code>${S.system.rust_log}</code>, diatur di Sistem.`, `Keeps the last 500 lines. The level is <code>${S.system.rust_log}</code>, set on the System page.`)}</div>`;
+AFTER.logs = () => {
+  renderLogs();
+  logTimer = setInterval(() => {
+    if (logPaused || !$("#logbox")) return;
+    const [l, m, x] = SAMPLE_LOG[Math.floor(Math.random() * SAMPLE_LOG.length)];
+    const d = new Date();
+    S.logs.unshift([d.toTimeString().slice(0, 8), l, m, x]);
+    S.logs = S.logs.slice(0, 500);
+    renderLogs();
+  }, 3500);
+};
+INPUTS.logq = renderLogs;
+
+/* ================= System ================= */
+/* [key, where the value comes from, effective value, when a change applies] */
+const SETTINGS_TABLE = () => [
+  ["BOT_TOKEN", "vault", "••••Q9kA", "reconnect"],
+  ["OWNER_USER_ID", "database", "6120045871", "live"],
+  ["ALLOWED_CHAT_IDS", "default", L("(semua grup)", "(every group)"), "live"],
+  ["DEDICATED_CHAT_IDS", "database", "-1003900000001", "live"],
+  ["WHATSAPP_ENABLED", "default", "false", "gateway"],
+  ["WHATSAPP_OWNER_NUMBER", "default", L("(kosong)", "(empty)"), "gateway"],
+  ["WHATSAPP_DEDICATED_GROUPS", "default", L("(kosong)", "(empty)"), "gateway"],
+  [L("Provider dan model", "Provider and model"), "database", "claude-opus-4-6-thinking (cpa)", "live"],
+  [L("Rute spesialis", "Specialist routes"), "database", L("4 khusus, 1 ikut utama", "4 specific, 1 follows main"), "live"],
+  ["AI_PROVIDER_CONNECT_TIMEOUT_SECS", "default", "10", "restart"],
+  ["IMAGE_FALLBACK_PROVIDER", "environment", "pollinations", "locked"],
+  ["IMAGE_GENERATION_TIMEOUT_SECS", "default", "120", "live"],
+  ["IMAGE_PROVIDER_CONNECT_TIMEOUT_SECS", "default", "10", "live"],
+  ["IMAGE_DOWNLOAD_TIMEOUT_SECS", "default", "30", "live"],
+  ["BRAVE_API_KEY", "none", L("(kosong)", "(empty)"), "live"],
+  ["TAVILY_API_KEY", "none", L("(kosong)", "(empty)"), "live"],
+  ["EXA_API_KEY", "none", L("(kosong)", "(empty)"), "live"],
+  ["EXA_MCP_URL", "default", "https://mcp.exa.ai/", "live"],
+  ["XIAO_HISTORY_RETENTION", "default", "2000", "live"],
+  ["RUST_LOG", "environment", "info", "locked"],
+  ["XIAO_DATA_DIR", "default", "/root/.local/share/xiaoai", "readonly"],
+  ["XIAO_WEB_BIND", "default", `${S.security.lan ? "0.0.0.0" : "127.0.0.1"}:${S.security.port}`, "restart"],
+  ["XIAO_WEB_ALLOWED_NETWORKS", "default", S.security.lan ? S.security.allowed : L("(tidak dipakai di mode lokal)", "(unused in local mode)"), "restart"],
+  ["XIAO_WEB_PASSWORD", "vault", L("(hash)", "(hash)"), "live"],
+];
+const SRC_NAME = () => ({ vault: "vault", environment: "environment", database: "database", default: L("bawaan", "default"), none: L("tidak ada", "none") });
+const EFFECT = () => ({
+  live: [L("langsung", "now"), "ok"], restart: ["restart", "warn"], locked: [L("terkunci", "locked"), "err"],
+  reconnect: [L("sambung ulang", "reconnects"), "info"], gateway: [L("gateway ulang", "gateway restarts"), "info"], readonly: [L("hanya baca", "read-only"), ""],
+});
+PAGES.system = () => {
+  const y = S.system;
+  const c = { key: L("Kunci", "Key"), src: L("Asal nilai", "Source"), val: L("Nilai efektif", "Effective value"), eff: L("Perubahan", "Takes effect") };
+  return `
+  ${head(L("Sistem", "System"), L("Informasi daemon, semua pengaturan beserta asal nilainya, dan tindakan perawatan.", "Daemon details, every setting with the source of its value, and maintenance actions."))}
+  ${sec("Daemon")}
+  <div class="card card-body">
+    <dl class="kv">
+      <dt>${L("Versi", "Version")}</dt><dd>xiao ${y.version}</dd><dt>Host</dt><dd>${y.host}</dd>
+      <dt>${L("Berjalan", "Running")}</dt><dd>${L(`${esc(T(y.uptime))}, sejak ${y.started}, PID ${y.pid}`, `${esc(T(y.uptime))}, since ${y.started}, PID ${y.pid}`)}</dd>
+      <dt>${L("Layanan", "Service")}</dt><dd>${esc(T(y.service))}</dd>
+      <dt>Data</dt><dd class="mono">${y.data_dir}</dd><dt>${L("Konfigurasi", "Config")}</dt><dd>${esc(T(y.config_file))}</dd>
+      <dt>${L("Ukuran", "Size")}</dt><dd>${L(`database ${T(y.db_size)}, lampiran ${T(y.attachments)}`, `database ${T(y.db_size)}, attachments ${T(y.attachments)}`)}</dd>
+    </dl>
+    <div class="actions mt16">
+      <button class="btn danger" data-act="restart">${ic("power", "sm")}${L("Restart daemon", "Restart daemon")}</button>
+      <button class="btn" data-act="backup">${ic("down", "sm")}${L("Unduh cadangan database", "Download a database backup")}</button></div>
+    <div class="help">${L("Cadangan berisi database saja (riwayat, memori, pengaturan). Kunci rahasia di vault tidak ikut.", "The backup holds the database only (history, memory, settings). Secrets in the vault are left out.")}</div>
+  </div>
+  ${sec(L("Log", "Logs"))}
+  <div class="card card-body">
+    <div class="field mt0"><div class="lab">${L("Level log", "Log level")} ${LIVE()}</div>
+      <select class="select" disabled aria-label="${L("Level log", "Log level")}"><option>error</option><option>warn</option><option selected>info</option><option>debug</option></select>
+      <div class="help"><code>RUST_LOG</code></div>${envLock("RUST_LOG")}</div>
+  </div>
+  ${sec(L("Semua pengaturan", "Every setting"))}
+  <div class="card"><table class="tbl">
+    <thead><tr><th>${c.key}</th><th>${c.src}</th><th>${c.val}</th><th>${c.eff}</th></tr></thead>
+    <tbody>${SETTINGS_TABLE().map(([k, src, v, eff]) => `<tr>
+      <td data-l="${c.key}" class="mono small">${esc(k)}</td>
+      <td data-l="${c.src}">${src === "environment" ? badge("environment", "warn", "lock") : src === "vault" ? badge("vault", "violet", "lock") : esc(SRC_NAME()[src])}</td>
+      <td data-l="${c.val}" class="mono small break">${esc(v)}</td>
+      <td data-l="${c.eff}">${badge(EFFECT()[eff][0], EFFECT()[eff][1])}</td></tr>`).join("")}</tbody></table></div>
+  <div class="small muted mt8">${L("Urutan prioritas: environment (termasuk .env dan Environment= di systemd), lalu database, lalu bawaan. Nilai rahasia tidak pernah dikirim ke browser.", "Priority order: the environment (including .env and Environment= in systemd), then the database, then the default. Secret values are never sent to the browser.")}</div>`;
+};
+
+/* ================= WebUI security ================= */
+const webBind = () => `${S.security.lan ? "0.0.0.0" : "127.0.0.1"}:${S.security.port}`;
+PAGES.security = () => {
+  const sc = S.security;
+  const preset = (lan, icon, title, addr, text) => `
+    <button class="preset ${sc.lan === lan ? "on" : ""}" data-act="bind" data-lan="${lan ? 1 : 0}" aria-pressed="${sc.lan === lan}">
+      <span class="preset-top"><span class="row-ic">${ic(icon)}</span><b>${title}</b><span class="preset-check">${ic("check", "sm")}</span></span>
+      <span class="mono small">${addr}:${sc.port}</span><span class="hint">${text}</span></button>`;
+  const days = [1, 7, 30];
+  return `
+  ${head(L("Keamanan WebUI", "WebUI security"), L("Dari mana konsol ini bisa dibuka, dan bagaimana owner masuk.", "Where this console can be opened from, and how the owner signs in."))}
+  ${sec(L("Alamat", "Address"), RESTART())}
+  <div class="grid two">
+    ${preset(false, "lock", L("Hanya server ini", "This server only"), "127.0.0.1", L("Dibuka di server sendiri, atau dari HP lewat tunnel SSH atau Cloudflare.", "Opened on the server itself, or from a phone through an SSH or Cloudflare tunnel."))}
+    ${preset(true, "globe", L("Jaringan lokal (LAN)", "Local network (LAN)"), "0.0.0.0", L("HP dan laptop di Wi-Fi yang sama bisa membukanya langsung.", "Phones and laptops on the same Wi-Fi can open it directly."))}
+  </div>
+  <div class="card card-body mt12">
+    <div class="grid two">
+      <div class="field mt0"><div class="lab">${L("Alamat", "Address")}</div><input class="input mono" value="${sc.lan ? "0.0.0.0" : "127.0.0.1"}" disabled aria-label="${L("Alamat", "Address")}"></div>
+      <div class="field mt0"><div class="lab">Port</div><input class="input mono" id="webport" type="number" min="1024" max="65535" value="${sc.port}" data-dirty></div></div>
+    <div class="help"><code>XIAO_WEB_BIND</code> = <span class="mono">${webBind()}</span></div>
+    ${sc.lan ? `
+    <div class="field"><div class="lab">${L("Jaringan yang diizinkan", "Allowed networks")}</div>
+      <input class="input mono" id="webnets" value="${esc(sc.allowed)}" data-dirty>
+      <div class="help"><code>XIAO_WEB_ALLOWED_NETWORKS</code> ${L("alamat di luar daftar ini ditolak sebelum halaman masuk. Loopback selalu diizinkan.", "addresses outside this list are refused before the sign-in page. Loopback is always allowed.")}</div></div>
+    <div class="field"><div class="lab">${L("Buka dari HP atau laptop", "Open from a phone or laptop")}</div>
+      <div class="inline"><input class="input mono" id="weburl" readonly value="http://${sc.lan_ip}:${sc.port}" aria-label="${L("Alamat konsol", "Console address")}">
+      <button class="btn" data-act="copy-url">${ic("copy", "sm")}${L("Salin", "Copy")}</button></div></div>
+    <div class="note warn mt12">${ic("alert", "sm")}<div>${L("Lalu lintas HTTP tidak terenkripsi. Pakai mode ini hanya di jaringan rumah yang tepercaya, atau pasang HTTPS di depannya (Caddy atau Cloudflare Tunnel).", "HTTP traffic is not encrypted. Use this mode only on a trusted home network, or put HTTPS in front of it (Caddy or Cloudflare Tunnel).")}</div></div>`
+    : `<div class="note mt12">${ic("info", "sm")}<div>${L(
+      `Dari HP atau laptop, buka lewat tunnel: <b>SSH</b> (<code>ssh -L ${sc.port}:127.0.0.1:${sc.port} root@${sc.lan_ip}</code>, lalu buka <span class="mono">http://127.0.0.1:${sc.port}</span>) atau <b>Cloudflare Tunnel + Access</b>.`,
+      `From a phone or laptop, go through a tunnel: <b>SSH</b> (<code>ssh -L ${sc.port}:127.0.0.1:${sc.port} root@${sc.lan_ip}</code>, then open <span class="mono">http://127.0.0.1:${sc.port}</span>) or <b>Cloudflare Tunnel + Access</b>.`)}</div></div>`}
+  </div>
+  ${sec(L("Cara masuk", "Sign-in"))}
+  <div class="card rows">
+    <div class="row"><span class="row-ic ok">${ic("send")}</span><div class="grow"><div class="label">${L("Kode lewat Telegram", "Code on Telegram")}</div><div class="hint">${L("Kode 6 digit dikirim ke chat pribadi owner, berlaku 5 menit.", "A 6-digit code is sent to the owner's private chat and lasts 5 minutes.")}</div></div>${toggle("otp", sc.tg_code)}</div>
+    <div class="row wrap"><span class="row-ic">${ic("key")}</span><div class="grow"><div class="label">${L("Kata sandi cadangan", "Backup password")} ${SECRET()}</div><div class="hint">${L("Untuk saat Telegram tidak bisa dipakai. Disimpan sebagai hash di vault.", "For when Telegram is unavailable. Stored as a hash in the vault.")}</div></div>
+      <div class="full">${secretField("XIAO_WEB_PASSWORD", S.secrets.XIAO_WEB_PASSWORD)}</div></div>
+    <div class="row"><span class="row-ic">${ic("clock")}</span><div class="grow"><div class="label">${L("Lama sesi", "Session length")}</div><div class="hint">${L("Setelah itu harus masuk lagi.", "After this, you sign in again.")}</div></div>
+      <select class="select fit" data-dirty aria-label="${L("Lama sesi", "Session length")}">${days.map((d) => `<option ${d === sc.session_days ? "selected" : ""}>${L(`${d} hari`, d === 1 ? "1 day" : `${d} days`)}</option>`).join("")}</select></div>
+    <div class="row"><span class="row-ic">${ic("shield")}</span><div class="grow"><div class="label">${L("Batas salah masuk", "Failed sign-in limit")}</div><div class="hint">${L("5 kali salah dalam 15 menit mengunci alamat itu selama 15 menit.", "5 wrong attempts in 15 minutes lock that address for 15 minutes.")}</div></div></div>
+  </div>
+  <div class="small muted mt8">${L("Masuk selalu diperlukan, juga dari 127.0.0.1, karena tunnel meneruskan koneksi sebagai koneksi lokal.", "Sign-in is always required, also from 127.0.0.1, because a tunnel forwards connections as local ones.")}</div>
+  ${sec(L("Perangkat yang masuk", "Signed-in devices"))}
+  <div class="card rows">${sc.sessions.map((d, i) => `
+    <div class="row"><span class="row-ic">${ic(d.os === "android" ? "phone" : "term")}</span>
+      <div class="grow"><div class="label">${esc(T(d.device))} ${d.current ? badge(L("Perangkat ini", "This device"), "ok") : ""}</div><div class="hint">${esc(T(d.ip))}, ${esc(T(d.last))}</div></div>
+      ${d.current ? "" : `<button class="btn sm danger" data-act="sess-revoke" data-i="${i}">${L("Cabut", "Revoke")}</button>`}</div>`).join("")}</div>
+  <div class="actions mt12"><button class="btn danger" data-act="sess-revoke-all">${ic("logout", "sm")}${L("Keluar dari semua perangkat", "Sign out everywhere")}</button></div>`;
+};
+
+/* ================= Login ================= */
+PAGES.login = () => `
+  <div class="login-wrap"><div class="login-card">
+    <div class="login-brand">
+      <div class="brandmark" aria-hidden="true">小</div>
+      <h2>Xiao Console</h2><div class="muted small">${L("Hanya untuk owner", "Owner only")}</div></div>
+    <div class="card card-body" id="loginbox">
+      <p class="mt0">${L(`Kode masuk akan dikirim ke chat pribadi owner oleh <b>@${S.telegram.bot.username}</b>.`, `A sign-in code will be sent to the owner's private chat by <b>@${S.telegram.bot.username}</b>.`)}</p>
+      <button class="btn primary block" data-act="login-send">${ic("send", "sm")}${L("Kirim kode ke Telegram", "Send a code on Telegram")}</button>
+      <button class="btn ghost block mt8" data-act="login-pass">${L("Masuk dengan kata sandi", "Sign in with a password")}</button>
+    </div>
+    <div class="login-foot"><span class="small faint">xiao ${S.system.version}, ${webBind()}</span>
+      <button class="btn ghost sm" data-act="lang" lang="${LANG === "en" ? "id" : "en"}">${LANG === "en" ? "Bahasa Indonesia" : "English"}</button></div>
+  </div></div>`;
+
+/* ================= Chat ================= */
+const chatActive = () => S.chat.sessions.find((s) => s.id === S.chat.active) || S.chat.sessions[0];
+const mainModel = () => (S.providers.find((p) => p.active) || S.providers[0]).active_model;
+const ROUTE = () => ({ vision: ["Vision", "image"], stt: ["Audio STT", "mic"], video: ["Video", "video"], doc: [L("Dokumen", "Document"), "file"] });
+function fmtSize(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${nf(Math.round(n / 1024))} KB`;
+  return `${nf(Math.round(n / 1048576 * 10) / 10)} MB`;
+}
+function fileChip(f, extra = "") {
+  const icon = f.route ? ROUTE()[f.route][1] : "file";
+  return `<span class="fchip">${ic(icon, "sm")}<span class="fname" title="${esc(T(f.name))}">${esc(T(f.name))}</span><span class="fmeta">${esc(f.size)}</span>${extra}</span>`;
+}
+function pendingHtml() {
+  return S.chat.pending.map((f, i) => `<span class="fchip">${ic(ROUTE()[f.route][1], "sm")}<span class="fname" title="${esc(f.name)}">${esc(f.name)}</span>
+    <span class="fmeta">${esc(f.size)}, ${ROUTE()[f.route][0]}</span>
+    <button data-act="chat-unattach" data-i="${i}" aria-label="${L("Lepas", "Remove")} ${esc(f.name)}">${ic("x", "sm")}</button></span>`).join("");
+}
+function msgHtml(m, i, s) {
+  if (m.role === "user") {
+    return `<div class="msg me"><div class="col">
+      ${m.files && m.files.length ? `<div class="chat-files">${m.files.map((f) => fileChip(f)).join("")}</div>` : ""}
+      ${T(m.text) ? `<div class="bubble"><span class="sr">${L("Anda:", "You:")} </span>${esc(T(m.text))}</div>` : ""}</div></div>`;
+  }
+  const last = i === s.messages.length - 1;
+  const live = s.busy && last;
+  const think = T(m.think);
+  const text = T(m.md);
+  const thinkOpen = m.thinkOpen ?? (live && !text);
+  const dl = (f) => `<button data-act="chat-dl" data-name="${esc(T(f.name))}" aria-label="${L("Unduh", "Download")} ${esc(T(f.name))}">${ic("down", "sm")}</button>`;
+  return `<div class="msg"><div class="brandmark av" aria-hidden="true">小</div><div class="body"><span class="sr">Xiao: </span>
+    ${think ? `<details class="think" ${thinkOpen ? "open" : ""}><summary data-act="think" data-i="${i}">${ic("chev", "sm")}${live && !text ? L("Berpikir…", "Thinking…") : L("Proses berpikir", "Reasoning")}</summary><div>${esc(think)}</div></details>` : ""}
+    ${m.tools && m.tools.length ? `<div class="tools">${m.tools.map(([n, a]) => `<span class="tool"><b>${esc(n)}</b><span>${esc(T(a))}</span></span>`).join("")}</div>` : ""}
+    ${text ? `<div class="md">${md(text)}</div>` : ""}
+    ${live && m.status ? `<div class="msg-status"><span class="spin"></span>${esc(T(m.status))}</div>` : ""}
+    ${m.error ? `<div class="note warn">${ic("alert", "sm")}<div>${esc(T(m.error))}${last && !s.busy ? `<div class="actions mt8"><button class="btn sm" data-act="chat-retry">${ic("refresh", "sm")}${L("Coba lagi", "Try again")}</button></div>` : ""}</div></div>` : ""}
+    ${m.files && m.files.length ? `<div class="chat-files mt8">${m.files.map((f) => fileChip(f, dl(f))).join("")}</div>` : ""}
+    ${live ? "" : `<div class="msg-meta">${m.stopped ? badge(L("Dihentikan", "Stopped"), "warn") : ""}${m.secs ? `<span>${nf(m.secs)} ${L("dtk", "s")}</span>` : ""}<span class="mono">${esc(m.model)}</span>
+      ${text ? `<button class="btn sm ghost" data-act="chat-copy" data-i="${i}">${ic("copy", "sm")}${L("Salin", "Copy")}</button>` : ""}</div>`}
+  </div></div>`;
+}
+function chatLogHtml(s) {
+  if (!s.messages.length) {
+    return `<div class="chat-empty"><div class="brandmark" aria-hidden="true">小</div>
+      <b>${L("Sesi ini masih kosong", "This session is empty")}</b>
+      <p>${L("Sesi di sini sama dengan sesi <code>xiao chat</code> di terminal. Model, memori, dan tool-nya sama dengan di Telegram.", "Sessions here are the same as <code>xiao chat</code> in the terminal. The model, memory and tools match Telegram.")}</p>
+      <p>${L("Kuis tampil sebagai teks dan live photo sebagai tautan. Foto, album, voice note, dan dokumen dilampirkan ke jawaban.", "Quizzes arrive as text and live photos as a link. Photos, albums, voice notes and documents are attached to the answer.")}</p></div>`;
+  }
+  return s.messages.map((m, i) => msgHtml(m, i, s)).join("");
+}
+function chatBtnHtml(s) {
+  return s.busy
+    ? `<button class="btn" data-act="chat-stop">${ic("stop", "sm")}<span class="send-t">${L("Hentikan", "Stop")}</span></button>`
+    : `<button class="btn primary" data-act="chat-send">${ic("send", "sm")}<span class="send-t">${L("Kirim", "Send")}</span></button>`;
+}
+function sessListHtml() {
+  return S.chat.sessions.map((s) => {
+    const on = s.id === S.chat.active;
+    const sub = s.busy ? L("Menjawab…", "Answering…") : `${nf(s.messages.length)} ${L("pesan", "messages")}, ${esc(T(s.when))}`;
+    return `<a class="sess ${on ? "on" : ""}" href="#/chat" data-act="chat-switch-to" data-id="${s.id}" ${on ? `aria-current="true"` : ""}>
+      <span class="grow"><span class="n">${esc(T(s.name))}</span><span class="s">${sub}</span></span>
+      ${s.busy ? `<span class="spin spin-inline" aria-hidden="true"></span>` : `<span class="id">#${s.id}</span>`}</a>`;
+  }).join("");
+}
+function sessOptions() {
+  return S.chat.sessions.map((s) => `<option value="${s.id}" ${s.id === S.chat.active ? "selected" : ""}>#${s.id} ${esc(T(s.name))}${s.busy ? ` (${L("menjawab", "answering")})` : ""}</option>`).join("");
+}
+const chatSub = (s) => `${nf(s.messages.length)} ${L("pesan", "messages")}, model <span class="mono">${esc(mainModel())}</span>`;
+PAGES.chat = () => {
+  const s = chatActive();
+  const menu = L("Menu sesi", "Session menu");
+  return `<h2 class="sr">Chat</h2>
+  <div class="chat">
+    <aside class="chat-side" aria-label="${L("Sesi chat", "Chat sessions")}">
+      <div class="chat-side-head"><h3>${L("Sesi", "Sessions")}</h3><button class="btn sm" data-act="chat-new">${ic("plus", "sm")}${L("Baru", "New")}</button></div>
+      <nav class="sess-list" id="sess-list" aria-label="${L("Daftar sesi", "Session list")}">${sessListHtml()}</nav>
+      <p class="chat-side-foot small faint">${L("Daftar yang sama dengan <code>xiao chat</code> di terminal.", "The same list as <code>xiao chat</code> in the terminal.")}</p>
+    </aside>
+    <div class="chat-bar only-phone">
+      <select class="select" id="chat-pick" data-change="chat-switch" aria-label="${L("Pilih sesi", "Pick a session")}">${sessOptions()}</select>
+      <button class="iconbtn" data-act="chat-new" title="${L("Sesi baru", "New session")}" aria-label="${L("Sesi baru", "New session")}">${ic("plus")}</button>
+      <button class="iconbtn" data-act="chat-menu" title="${menu}" aria-label="${menu}">${ic("dots")}</button>
+    </div>
+    <section class="chat-main" aria-label="${esc(T(s.name))}">
+      <div class="chat-head"><div class="grow"><h3>${esc(T(s.name))}</h3><div class="sub" id="chat-sub">${chatSub(s)}</div></div>
+        <button class="iconbtn" data-act="chat-menu" title="${menu}" aria-label="${menu}">${ic("dots")}</button></div>
+      <div class="chat-log" id="chatlog">${chatLogHtml(s)}</div>
+      <div class="composer" id="composer">
+        <div class="chat-files" id="chat-pending">${pendingHtml()}</div>
+        <div class="composer-row">
+          <input type="file" id="chat-file" multiple hidden data-change="chat-file">
+          <button class="iconbtn" data-act="chat-attach" title="${L("Lampirkan berkas", "Attach files")}" aria-label="${L("Lampirkan berkas", "Attach files")}">${ic("clip")}</button>
+          <textarea class="input" id="chat-in" rows="1" placeholder="${L("Tulis pesan untuk Xiao", "Write a message to Xiao")}" aria-label="${L("Pesan", "Message")}">${esc(S.chat.draft)}</textarea>
+          <span id="chat-btn">${chatBtnHtml(s)}</span>
+        </div>
+        <div class="composer-hint only-desk">${L("Enter mengirim, Shift+Enter untuk baris baru. Lampiran sampai 20 MB per berkas.", "Enter sends, Shift+Enter adds a new line. Attachments up to 20 MB each.")}</div>
+      </div>
+      <div class="sr" aria-live="polite" id="chat-live"></div>
+    </section>
+  </div>`;
+};
+
+/* ================= Actions ================= */
+ACTIONS.close = closeSheet;
+ACTIONS.goto = (el) => {
+  closeSheet();
+  location.hash = "#/" + el.dataset.to;
+};
+ACTIONS.more = () => {
+  const fc = failedCount();
+  const items = [["whatsapp", "WhatsApp", "phone"], ["search", L("Pencarian", "Search"), "search"], ["mcp", "MCP", "plug"],
+    ["memory", L("Memori", "Memory"), "book"], ["queue", L("Antrean", "Queue"), "inbox"], ["context", L("Konteks", "Context"), "layers"],
+    ["logs", L("Log", "Logs"), "term"], ["system", L("Sistem", "System"), "sliders"], ["security", L("Keamanan", "Security"), "shield"]];
+  openSheet(`<h3>${L("Menu lainnya", "More")}</h3><div class="sub">${L("Bagian Xiao Console yang tidak ada di bilah bawah.", "The parts of Xiao Console that are not in the bottom bar.")}</div>
+    <div class="more-grid">${items.map(([id, t, icon]) => `<a href="#/${id}" data-act="goto" data-to="${id}"><span class="more-ic ${id === "queue" && fc ? "err" : ""}">${ic(icon)}</span>${t}${id === "queue" && fc ? ` (${fc})` : ""}</a>`).join("")}</div>
+    <div class="sheet-rows mt16"><button class="row" data-act="logout"><span class="row-ic">${ic("logout")}</span><span class="grow label">${L("Keluar", "Sign out")}</span></button></div>`);
+};
+ACTIONS.theme = () => {
+  S.ui.theme = { auto: "light", light: "dark", dark: "auto" }[S.ui.theme];
+  try { localStorage.setItem("xiao-theme", S.ui.theme); } catch (_) { /* storage may be blocked */ }
+  applyTheme();
+  rerender();
+};
+ACTIONS.lang = () => {
+  LANG = LANG === "en" ? "id" : "en";
+  try { localStorage.setItem("xiao-lang", LANG); } catch (_) { /* storage may be blocked */ }
+  applyLang();
+  rerender();
+};
+ACTIONS.logout = () => { closeSheet(); location.hash = "#/login"; };
+ACTIONS.save = () => {
+  markDirty(false);
+  const msg = {
+    telegram: L("Disimpan. Aturan akses dimuat ulang tanpa restart.", "Saved. Access rules reloaded without a restart."),
+    whatsapp: L("Disimpan. Gateway WhatsApp dimulai ulang.", "Saved. The WhatsApp gateway restarted."),
+    ai: L("Disimpan. Daemon langsung memakai model baru.", "Saved. The daemon uses the new model right away."),
+    security: L("Disimpan. Berlaku setelah restart.", "Saved. Applies after a restart."),
+  }[currentPage] || L("Pengaturan disimpan", "Settings saved");
+  toast(msg);
+};
+ACTIONS.discard = () => { markDirty(false); rerender(); };
+ACTIONS.restart = () => confirmSheet(L("Restart daemon?", "Restart the daemon?"),
+  L("Pesan yang sedang dijawab dihentikan lalu dijawab lagi setelah hidup kembali (antrean tidak hilang). systemd menyalakan Xiao lagi dalam ±5 detik.",
+    "Answers in progress stop and are answered again once it is back (the queue is kept). systemd starts Xiao again in about 5 seconds."), "Restart", "restart-go");
+ACTIONS["restart-go"] = async (el) => {
+  await busy(el, 2400, L("Merestart…", "Restarting…"));
+  closeSheet();
+  S.system.uptime = tx("0 mnt", "0m");
+  rerender();
+  toast(L("Daemon kembali online. 0 update tertunda dipulihkan.", "The daemon is back online. 0 pending updates recovered."));
+};
+ACTIONS["test-ai"] = async (el) => {
+  await busy(el, 1800, L("Menguji…", "Testing…"));
+  toast(L(`${esc(mainModel())} menjawab dalam 2,1 dtk`, `${esc(mainModel())} answered in 2.1 s`));
+};
+ACTIONS["tg-check"] = async (el) => {
+  await busy(el, 1200, L("Memeriksa…", "Checking…"));
+  const out = $("#tg-check-out");
+  const b = S.telegram.bot;
+  if (out) {
+    const on = L("aktif", "on");
+    const off = L("mati", "off");
+    out.innerHTML = `<dl class="kv"><dt>getMe</dt><dd>OK, 184 ms</dd><dt>Username</dt><dd>@${esc(b.username)}</dd><dt>Privacy mode</dt><dd>${b.can_read_all_group_messages ? off : on}</dd>
+      <dt>Inline</dt><dd>${b.supports_inline_queries ? on : off}</dd><dt>Webhook</dt><dd>${L("tidak ada (long polling)", "none (long polling)")}</dd><dt>${L("Update tertunda", "Pending updates")}</dt><dd>0</dd></dl>`;
+  }
+  toast(L("Telegram terhubung sebagai @", "Telegram connected as @") + esc(b.username));
+};
+
+/* secrets */
+ACTIONS["secret-edit"] = (el) => {
+  const key = el.dataset.key;
+  const box = document.getElementById("sec-" + key);
+  box.outerHTML = `<div id="sec-${key}">
+    <div class="inline"><input class="input mono" type="password" autocomplete="off" placeholder="${L("Tempel nilai baru", "Paste the new value")}" id="in-${key}" aria-label="${esc(key)}">
+      <button class="btn primary" data-act="secret-save" data-key="${key}">${L("Simpan", "Save")}</button></div>
+    <div class="flex mt8"><button class="btn sm ghost" data-act="secret-cancel">${L("Batal", "Cancel")}</button>
+      <span class="small muted">${L("Setelah disimpan, nilai tidak pernah dikirim balik ke browser.", "Once saved, the value is never sent back to the browser.")}</span></div></div>`;
+  document.getElementById("in-" + key).focus();
+};
+ACTIONS["secret-cancel"] = () => rerender();
+ACTIONS["secret-save"] = async (el) => {
+  const key = el.dataset.key;
+  const v = document.getElementById("in-" + key).value.trim();
+  if (!v) { toast(L("Isi dulu nilainya", "Enter a value first"), true); return; }
+  const isToken = key === "BOT_TOKEN";
+  await busy(el, isToken ? 1300 : 700, isToken ? L("Memeriksa…", "Checking…") : L("Menyimpan…", "Saving…"));
+  if (isToken && !/^\d+:[\w-]{20,}$/.test(v)) { toast(L("Token ditolak Telegram (getMe: 401 Unauthorized)", "Telegram refused the token (getMe: 401 Unauthorized)"), true); return; }
+  const where = { BOT_TOKEN: "vault/telegram", XIAO_WEB_PASSWORD: tx("vault/web, disimpan sebagai hash", "vault/web, stored as a hash") }[key]
+    || (key.startsWith("provider:") ? "vault/provider" : "vault/search");
+  S.secrets[key] = { set: true, tail: key === "XIAO_WEB_PASSWORD" ? "" : v.slice(-4), where };
+  const engine = { BRAVE_API_KEY: "brave", TAVILY_API_KEY: "tavily", EXA_API_KEY: "exa" }[key];
+  if (engine) {
+    const e = S.search.engines.find((x) => x.id === engine);
+    e.state = "on";
+    e.note = tx("siap", "ready");
+  }
+  rerender();
+  toast(isToken ? L(`Token valid untuk @${esc(S.telegram.bot.username)}. Polling tersambung ulang.`, `The token is valid for @${esc(S.telegram.bot.username)}. Polling reconnected.`)
+    : L("Tersimpan di vault dan langsung dipakai.", "Stored in the vault and in use now."));
+};
+ACTIONS["secret-clear"] = (el) => {
+  const key = el.dataset.key;
+  const warn = key === "BOT_TOKEN" ? L("Tanpa token, Telegram berhenti sampai token baru diisi.", "Without a token, Telegram stops until a new one is set.")
+    : key === "XIAO_WEB_PASSWORD" ? L("Masuk hanya bisa lewat kode Telegram.", "Sign-in then only works with a Telegram code.")
+    : L("Mesin atau provider ini tidak akan dipakai lagi.", "This engine or provider will no longer be used.");
+  confirmSheet(L("Hapus kunci ini?", "Delete this key?"), L(`<code>${esc(key)}</code> dihapus dari vault. ${warn}`, `<code>${esc(key)}</code> is removed from the vault. ${warn}`), L("Hapus", "Delete"), "secret-clear-go", { key });
+};
+ACTIONS["secret-clear-go"] = (el) => {
+  S.secrets[el.dataset.key] = { set: false };
+  closeSheet();
+  rerender();
+  toast(L("Kunci dihapus dari vault", "Key removed from the vault"));
+};
+
+ACTIONS["chip-add"] = (el) => {
+  const input = document.getElementById(el.dataset.target);
+  const ids = input.value.split(",").map((x) => x.trim()).filter(Boolean);
+  if (!ids.includes(el.dataset.id)) ids.push(el.dataset.id);
+  input.value = ids.join(", ");
+  markDirty(true);
+};
+
+/* AI */
+ACTIONS.probe = async (el) => {
+  const r = S.roles.find((x) => x.id === el.dataset.role);
+  await busy(el, 1600, L("Menguji…", "Testing…"));
+  Object.keys(r.caps).forEach((k) => { if (r.caps[k] === null) r.caps[k] = true; });
+  r.checked = tx("baru saja", "just now");
+  rerender();
+  toast(L(`${r.name}: pengujian selesai`, `${r.name}: test finished`));
+};
+ACTIONS["probe-all"] = async (el) => {
+  await busy(el, 3000, L("Menguji 5 model…", "Testing 5 models…"));
+  S.roles.forEach((r) => { if (!r.fixed) r.checked = tx("baru saja", "just now"); });
+  rerender();
+  toast(L("5 spesialis diuji. Audio STT memakai input audio (transkripsi khusus tidak didukung).", "5 specialists tested. Audio STT uses audio input (dedicated transcription is not supported)."));
+};
+ACTIONS.override = (el) => {
+  const r = S.roles.find((x) => x.id === el.dataset.role);
+  const model = r.route.type === "specific" ? r.route.model : mainModel();
+  const keys = ["text_chat", "tools", "reasoning", "image_input", "video_input", "audio_input", "audio_transcription", "image_generation", "image_editing", "structured_output", "native_file_input"];
+  const rows = keys.map((k) => {
+    const v = r.caps[k];
+    const now = v === true ? L("ya", "yes") : v === false ? L("tidak", "no") : L("belum diuji", "not tested");
+    return `<div class="row flush"><div class="grow">${capName(k)}<div class="hint">${L("Hasil uji", "Test result")}: ${now}</div></div>
+      <div class="seg">${[["auto", L("Otomatis", "Auto")], ["yes", L("Ya", "Yes")], ["no", L("Tidak", "No")]].map(([id, t]) => `<button class="${id === "auto" ? "on" : ""}" data-act="seg-pick">${t}</button>`).join("")}</div></div>`;
+  }).join("");
+  openSheet(`<h3>${L("Koreksi kemampuan", "Correct capabilities")}</h3><div class="sub"><code>${esc(model)}</code>. ${L("“Otomatis” memakai hasil uji dan metadata provider. Koreksi manual tidak kedaluwarsa dan menang atas hasil uji.", "“Auto” uses the test results and provider metadata. A manual correction does not expire and wins over test results.")}</div>
+    <div class="rows">${rows}</div>
+    <div class="actions end mt12"><button class="btn ghost" data-act="close">${L("Batal", "Cancel")}</button><button class="btn primary" data-act="override-save">${L("Simpan koreksi", "Save corrections")}</button></div>`);
+};
+ACTIONS["seg-pick"] = (el) => {
+  el.parentElement.querySelectorAll("button").forEach((b) => b.classList.remove("on"));
+  el.classList.add("on");
+};
+ACTIONS["override-save"] = () => { closeSheet(); toast(L("Koreksi disimpan dan langsung dipakai pemilihan model.", "Corrections saved; model selection uses them now.")); };
+function providerSheet(p) {
+  openSheet(`<h3>${p ? L("Ubah provider", "Edit provider") : L("Tambah provider", "Add a provider")}</h3>
+    <div class="sub">${L("Endpoint kompatibel OpenAI (chat/completions). Katalog model diambil otomatis.", "An OpenAI-compatible endpoint (chat/completions). The model catalogue is fetched for you.")}</div>
+    <div class="field"><div class="lab">${L("Nama", "Name")}</div><input class="input" id="pv-name" value="${p ? esc(p.name) : ""}" placeholder="${L("mis. OpenRouter", "e.g. OpenRouter")}"></div>
+    <div class="field"><div class="lab">Endpoint</div><input class="input mono" id="pv-url" inputmode="url" value="${p ? esc(p.endpoint) : ""}" placeholder="https://openrouter.ai/api/v1"></div>
+    <div class="field"><div class="lab">API key ${SECRET()}</div><input class="input mono" type="password" autocomplete="off" aria-label="API key" placeholder="${p ? L("Kosongkan untuk tetap memakai kunci lama", "Leave empty to keep the current key") : L("sk-… atau kosong untuk endpoint lokal", "sk-… or empty for a local endpoint")}"></div>
+    <div id="pv-res"></div>
+    <div class="actions end mt16"><button class="btn ghost" data-act="close">${L("Batal", "Cancel")}</button>
+      <button class="btn" data-act="provider-test">${ic("play", "sm")}${L("Tes dan ambil katalog", "Test and fetch catalogue")}</button>
+      <button class="btn primary" data-act="provider-save" id="pv-save" ${p ? "" : "disabled"}>${L("Simpan", "Save")}</button></div>`);
+}
+ACTIONS["add-provider"] = () => providerSheet(null);
+ACTIONS["edit-provider"] = (el) => providerSheet(S.providers.find((p) => p.id === el.dataset.id));
+ACTIONS["provider-test"] = async (el) => {
+  await busy(el, 1500, L("Menghubungi…", "Connecting…"));
+  $("#pv-res").innerHTML = `<div class="note ok mt12">${ic("check", "sm")}<div>${L("Terhubung dalam 312 ms. <b>23 model</b> ditemukan, tool calling terdeteksi.", "Connected in 312 ms. <b>23 models</b> found, tool calling detected.")}</div></div>`;
+  $("#pv-save").disabled = false;
+};
+ACTIONS["provider-save"] = () => {
+  const name = $("#pv-name").value.trim() || L("provider baru", "new provider");
+  const url = $("#pv-url").value.trim();
+  if (!S.providers.find((p) => p.name === name)) {
+    const id = "prov_" + Math.random().toString(36).slice(2, 8);
+    S.providers.push({ id, name, endpoint: url || "https://openrouter.ai/api/v1", models: 23, active_model: "default", key: "provider:" + id, active: false });
+    S.secrets["provider:" + id] = { set: true, tail: "x7Qe", where: "vault/provider/" + id };
+  }
+  closeSheet();
+  rerender();
+  toast(L("Provider disimpan", "Provider saved"));
+};
+ACTIONS["rm-provider"] = (el) => confirmSheet(L("Hapus provider?", "Delete this provider?"),
+  L("Provider dan kuncinya dihapus. Rute spesialis yang memakainya kembali ke “Ikuti model utama”.", "The provider and its key are deleted. Specialist routes that used it go back to “Follow the main model”."),
+  L("Hapus", "Delete"), "rm-provider-go", { id: el.dataset.id });
+ACTIONS["rm-provider-go"] = (el) => {
+  S.providers = S.providers.filter((p) => p.id !== el.dataset.id);
+  closeSheet();
+  rerender();
+  toast(L("Provider dihapus", "Provider deleted"));
+};
+ACTIONS["refresh-catalog"] = async (el) => {
+  await busy(el, 1300, L("Mengambil…", "Fetching…"));
+  toast(L("Katalog diperbarui: 40 model (2 baru)", "Catalogue updated: 40 models (2 new)"));
+};
+
+/* WhatsApp */
+ACTIONS.pairmode = (el) => {
+  pairMode = el.dataset.mode;
+  el.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === el));
+  $("#pair-body").innerHTML = pairBody();
+};
+ACTIONS["pair-request"] = async (el) => {
+  const num = $("#wa-num").value.replace(/\D/g, "");
+  if (num.length < 8 || num.length > 15) { toast(L("Nomor harus 8 sampai 15 digit, format internasional", "The number needs 8 to 15 digits, in international format"), true); return; }
+  await busy(el, 1400, L("Meminta…", "Requesting…"));
+  $("#pair-out").innerHTML = `
+    <div class="pair-code mt16">K7QM-2XPA</div>
+    <ol class="steps small muted mt12">
+      <li>${L(`Di HP dengan nomor <b>+${num}</b>, buka WhatsApp, lalu <b>Perangkat tertaut</b> dan <b>Tautkan perangkat</b>.`, `On the phone with <b>+${num}</b>, open WhatsApp, then <b>Linked devices</b> and <b>Link a device</b>.`)}</li>
+      <li>${L("Pilih <b>Tautkan dengan nomor telepon saja</b>, lalu masukkan kode di atas.", "Choose <b>Link with phone number instead</b>, then enter the code above.")}</li></ol>
+    <div class="flex small muted mt12"><span class="spin-inline" aria-hidden="true"></span>${L("Menunggu konfirmasi dari WhatsApp…", "Waiting for WhatsApp to confirm…")}</div>`;
+  await sleep(5000);
+  if (currentPage !== "whatsapp") return;
+  S.whatsapp.linked = true;
+  S.whatsapp.enabled = true;
+  S.whatsapp.linked_number = num;
+  rerender();
+  toast(L("WhatsApp tertaut dan gateway berjalan.", "WhatsApp is linked and the gateway is running."));
+};
+ACTIONS["wa-unlink"] = () => confirmSheet(L("Putuskan tautan WhatsApp?", "Unlink WhatsApp?"),
+  L("Sesi di whatsapp.db dihapus dan Xiao keluar dari perangkat tertaut. Untuk memakai lagi, tautkan ulang.", "The session in whatsapp.db is deleted and Xiao leaves the linked devices. Link again to use it."),
+  L("Putuskan", "Unlink"), "wa-unlink-go");
+ACTIONS["wa-unlink-go"] = () => {
+  S.whatsapp.linked = false;
+  S.whatsapp.enabled = false;
+  closeSheet();
+  rerender();
+  toast(L("Tautan WhatsApp diputus", "WhatsApp unlinked"));
+};
+
+/* Search and MCP */
+ACTIONS["reset-cooldown"] = () => {
+  S.search.engines.forEach((e) => { if (e.state === "cool") { e.state = "on"; e.note = tx("siap", "ready"); } });
+  rerender();
+  toast(L("Jeda dihapus. Semua mesin dicoba lagi.", "Pauses cleared. Every engine is tried again."));
+};
+ACTIONS["search-test"] = async (el) => {
+  const q = $("#sq").value.trim() || L("sejarah Colosseum", "history of the Colosseum");
+  await busy(el, 1500, L("Mencari…", "Searching…"));
+  const eng = S.search.engines.find((e) => e.state === "on");
+  const skipped = S.search.engines.filter((e) => e.state === "cool").map((e) => badge(L(`${e.name} dilewati`, `${e.name} skipped`), "warn")).join("");
+  $("#sres").innerHTML = `<div class="result">
+    <div class="flex wrap">${badge(L("Dijawab ", "Answered by ") + eng.name, "ok", "check")}${skipped}<span class="small faint">${L("1,4 dtk", "1.4 s")}</span></div>
+    <ol>
+      <li><a href="#" onclick="return false">${L("Colosseum: Wikipedia bahasa Indonesia", "Colosseum: Wikipedia")}</a><div class="small muted">${L("Amfiteater elips di pusat kota Roma, dibangun 70 sampai 80 M pada masa Dinasti Flavianus…", "An oval amphitheatre in the centre of Rome, built in AD 70 to 80 under the Flavian dynasty…")}</div></li>
+      <li><a href="#" onclick="return false">${L("Sejarah Colosseum: dari arena gladiator ke situs warisan", "The Colosseum: from gladiator arena to heritage site")}</a><div class="small muted">${L("Dibuka oleh Kaisar Titus pada 80 M dengan 100 hari permainan…", "Opened by Emperor Titus in AD 80 with 100 days of games…")}</div></li>
+      <li><a href="#" onclick="return false">Flavian Amphitheatre: Wikimedia Commons</a><div class="small muted">${L("4 gambar terverifikasi", "4 verified pictures")}</div></li>
+    </ol><div class="small faint mt8">${L("Kueri", "Query")}: “${esc(q)}”</div></div>`;
+};
+ACTIONS["mcp-test"] = async (el) => {
+  await busy(el, 1300, L("Menghubungi…", "Connecting…"));
+  let host = "";
+  try { host = new URL($("#mcpurl").value).host; } catch (_) { /* shown below */ }
+  $("#mcpres").innerHTML = host
+    ? `<div class="note ok mt12">${ic("check", "sm")}<div>${L(`Terhubung ke <b>${esc(host)}</b> dalam 612 ms.`, `Connected to <b>${esc(host)}</b> in 612 ms.`)} tools/list: <code>web_search_exa</code></div></div>`
+    : `<div class="note err mt12">${ic("alert", "sm")}<div>${L("Alamat tidak valid. Tulis lengkap dengan https://.", "Not a valid address. Include https://.")}</div></div>`;
+};
+ACTIONS["mcp-reset"] = () => { $("#mcpurl").value = S.mcp.default_url; markDirty(true); };
+
+/* Memory */
+function memSheet(m) {
+  openSheet(`<h3>${m ? L("Ubah memori", "Edit memory") : L("Tambah memori", "Add a memory")}</h3><div class="sub">${L("Tulis sebagai fakta singkat tentang owner.", "Write it as a short fact about the owner.")}</div>
+    <div class="field"><div class="lab">${L("Kunci", "Key")}</div><input class="input mono" id="mk" value="${m ? esc(T(m.key)) : ""}" placeholder="${L("mis. hobi", "e.g. hobby")}" ${m ? "disabled" : ""}></div>
+    <div class="field"><div class="lab">${L("Fakta", "Fact")}</div><textarea class="input" id="mf" maxlength="300" placeholder="${L("mis. Suka fotografi jalanan.", "e.g. Enjoys street photography.")}">${m ? esc(T(m.fact)) : ""}</textarea><div class="help">${L("Paling banyak 300 karakter.", "Up to 300 characters.")}</div></div>
+    <div class="actions end mt16"><button class="btn ghost" data-act="close">${L("Batal", "Cancel")}</button><button class="btn primary" data-act="mem-save" data-key="${m ? esc(T(m.key)) : ""}">${L("Simpan", "Save")}</button></div>`);
+}
+const memByKey = (key) => S.memories.find((m) => T(m.key) === key);
+ACTIONS["mem-add"] = () => memSheet(null);
+ACTIONS["mem-edit"] = (el) => memSheet(memByKey(el.dataset.key));
+ACTIONS["mem-save"] = (el) => {
+  const key = el.dataset.key || $("#mk").value.trim().toLowerCase().replace(/\s+/g, "_");
+  const fact = $("#mf").value.trim();
+  if (!key || !fact) { toast(L("Kunci dan fakta wajib diisi", "Both the key and the fact are required"), true); return; }
+  const m = memByKey(key);
+  if (m) { m.fact = fact; m.updated = tx("baru saja", "just now"); } else S.memories.unshift({ key, fact, updated: tx("baru saja", "just now") });
+  closeSheet();
+  rerender();
+  toast(L("Memori disimpan", "Memory saved"));
+};
+ACTIONS["mem-del"] = (el) => {
+  S.memories = S.memories.filter((m) => T(m.key) !== el.dataset.key);
+  $("#memlist").innerHTML = memRows($("#memq").value);
+  toast(L(`Memori “${esc(el.dataset.key)}” dihapus`, `Memory “${esc(el.dataset.key)}” deleted`));
+};
+ACTIONS["mem-clear"] = () => {
+  const word = L("HAPUS", "DELETE");
+  openSheet(`<h3>${L("Hapus semua memori?", "Delete every memory?")}</h3><div class="sub">${L(`${S.memories.length} fakta akan dihapus permanen. Ketik <b>${word}</b> untuk melanjutkan.`, `${S.memories.length} facts will be deleted for good. Type <b>${word}</b> to continue.`)}</div>
+    <input class="input mono" id="clearconfirm" autocomplete="off" placeholder="${word}" aria-label="${L("Konfirmasi", "Confirmation")}">
+    <div class="actions end mt16"><button class="btn ghost" data-act="close">${L("Batal", "Cancel")}</button><button class="btn danger solid" id="clearbtn" data-act="mem-clear-go" disabled>${L("Hapus semua", "Delete all")}</button></div>`);
+};
+INPUTS.clearconfirm = (el) => { $("#clearbtn").disabled = el.value.trim() !== L("HAPUS", "DELETE"); };
+ACTIONS["mem-clear-go"] = () => { S.memories = []; closeSheet(); rerender(); toast(L("Semua memori dihapus", "Every memory deleted")); };
+
+/* Queue */
+function takeFailed(id) {
+  const i = S.queue.failed.findIndex((r) => String(r.id) === String(id));
+  const [row] = S.queue.failed.splice(i, 1);
+  S.queue[row.ch].failed -= 1;
+  return row;
+}
+ACTIONS["q-retry"] = async (el) => {
+  const row = takeFailed(el.dataset.id);
+  S.queue[row.ch].pending += 1;
+  rerender();
+  toast(L(`Update ${row.id} dikembalikan ke antrean`, `Update ${row.id} is back in the queue`));
+  await sleep(2200);
+  S.queue[row.ch].pending -= 1;
+  S.queue[row.ch].completed += 1;
+  if (currentPage === "queue" || currentPage === "home") rerender();
+  toast(L(`Update ${row.id} selesai dijawab`, `Update ${row.id} answered`));
+};
+ACTIONS["q-dismiss"] = (el) => {
+  const row = takeFailed(el.dataset.id);
+  S.queue[row.ch].completed += 1;
+  rerender();
+  toast(L(`Update ${row.id} ditandai selesai`, `Update ${row.id} marked as done`));
+};
+
+/* Context */
+ACTIONS["ctx-clear-summary"] = () => confirmSheet(L("Hapus ringkasan?", "Delete the summary?"),
+  L("Ringkasan lama untuk percakapan ini dihapus. Curator akan membuatnya lagi saat diperlukan.", "The older summary for this conversation is deleted. The curator writes a new one when it is needed."),
+  L("Hapus", "Delete"), "ctx-done", { op: "summary" });
+ACTIONS["ctx-clear-history"] = (el) => confirmSheet(L("Bersihkan riwayat?", "Clear the history?"),
+  L(`Semua pesan tersimpan di “${esc(el.dataset.label)}” dihapus. Memori jangka panjang tidak ikut terhapus.`, `Every stored message in “${esc(el.dataset.label)}” is deleted. Long-term memory is kept.`),
+  L("Bersihkan", "Clear"), "ctx-done", { op: "history" });
+ACTIONS["ctx-done"] = (el) => {
+  const scope = allScopes()[ctxIndex];
+  const chatSess = scope.kind === "cli" ? S.chat.sessions.find((s) => -s.id === scope.thread) : null;
+  const tg = S.scopes.find((s) => s.chat === scope.chat && s.thread === scope.thread);
+  if (el.dataset.op === "summary" && tg) { tg.summary = false; tg.tokens.summary = 0; }
+  if (el.dataset.op === "history") {
+    if (chatSess) chatSess.messages = [];
+    if (tg) { tg.messages = 0; tg.tokens.history = 0; }
+  }
+  closeSheet();
+  rerender();
+  toast(el.dataset.op === "summary" ? L("Ringkasan dihapus", "Summary deleted") : L("Riwayat dibersihkan", "History cleared"));
+};
+
+/* Logs */
+ACTIONS.lvl = (el) => {
+  logLevel = el.dataset.l;
+  el.parentElement.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b === el));
+  renderLogs();
+};
+ACTIONS["log-pause"] = (el) => {
+  logPaused = !logPaused;
+  el.innerHTML = `${ic(logPaused ? "play" : "clock", "sm")}${logPaused ? L("Lanjut", "Resume") : L("Jeda", "Pause")}`;
+};
+ACTIONS["log-dl"] = () => toast(L("xiao-log-2026-09-29.txt diunduh", "Downloaded xiao-log-2026-09-29.txt"));
+ACTIONS.backup = async (el) => {
+  await busy(el, 1400, L("Menyiapkan…", "Preparing…"));
+  toast(L("xiaoai-backup-2026-09-29.db diunduh (1,7 MB)", "Downloaded xiaoai-backup-2026-09-29.db (1.7 MB)"));
+};
+
+/* Security */
+ACTIONS.bind = (el) => {
+  const lan = el.dataset.lan === "1";
+  if (lan === S.security.lan) return;
+  S.security.lan = lan;
+  rerender();
+  markDirty(true);
+};
+INPUTS.webport = (el) => {
+  const n = Number(el.value);
+  if (Number.isInteger(n) && n >= 1024 && n <= 65535) {
+    S.security.port = n;
+    const url = $("#weburl");
+    if (url) url.value = `http://${S.security.lan_ip}:${n}`;
+  }
+};
+ACTIONS["copy-url"] = () => {
+  const v = ($("#weburl") || {}).value || "";
+  try { navigator.clipboard.writeText(v).catch(() => {}); } catch (_) { /* clipboard may be blocked */ }
+  toast(L("Alamat disalin", "Address copied"));
+};
+ACTIONS["sess-revoke"] = (el) => { S.security.sessions.splice(Number(el.dataset.i), 1); rerender(); toast(L("Sesi dicabut", "Session revoked")); };
+ACTIONS["sess-revoke-all"] = () => confirmSheet(L("Keluar dari semua perangkat?", "Sign out everywhere?"),
+  L("Semua sesi dicabut, termasuk perangkat ini.", "Every session is revoked, this device included."), L("Keluar semua", "Sign out all"), "logout-all");
+ACTIONS["logout-all"] = () => { closeSheet(); location.hash = "#/login"; };
+
+/* Login */
+ACTIONS["login-send"] = async (el) => {
+  await busy(el, 1100, L("Mengirim…", "Sending…"));
+  $("#loginbox").innerHTML = `
+    <p class="mt0">${L("Kode dikirim ke Telegram. Berlaku <b id=\"otp-left\">5:00</b>.", "The code is on Telegram. It lasts <b id=\"otp-left\">5:00</b>.")}</p>
+    <div class="otp">${Array.from({ length: 6 }, (_, i) => `<input class="input" inputmode="numeric" maxlength="1" aria-label="${L("Digit", "Digit")} ${i + 1}">`).join("")}</div>
+    <button class="btn primary block mt16" data-act="login-verify">${L("Masuk", "Sign in")}</button>
+    <button class="btn ghost block mt8" data-act="login-send">${L("Kirim ulang", "Send again")}</button>`;
+  $(".otp input").focus();
+};
+ACTIONS["login-pass"] = () => {
+  $("#loginbox").innerHTML = `<div class="field mt0"><div class="lab">${L("Kata sandi", "Password")}</div><input class="input" type="password" autocomplete="current-password" aria-label="${L("Kata sandi", "Password")}"></div>
+    <button class="btn primary block mt16" data-act="login-verify">${L("Masuk", "Sign in")}</button>
+    <button class="btn ghost block mt8" data-act="login-back">${L("Pakai kode Telegram", "Use a Telegram code")}</button>`;
+};
+ACTIONS["login-back"] = () => route();
+ACTIONS["login-verify"] = async (el) => { await busy(el, 900, L("Memeriksa…", "Checking…")); location.hash = "#/home"; };
+document.addEventListener("input", (e) => {
+  if (e.target.parentElement && e.target.parentElement.classList.contains("otp") && e.target.value) {
+    const next = e.target.nextElementSibling;
+    if (next) next.focus();
+  }
+});
+
+/* ================= Chat actions =================
+   The real build posts to /api/chat and reads the answer as SSE; Stop calls
+   /api/chat/stop, which trips the same cancel token as Telegram's stop button. */
+const FILE_LIMIT = 20 * 1024 * 1024;
+const isDesk = () => !!(window.matchMedia && window.matchMedia("(min-width: 900px)").matches);
+function fileRoute(f) {
+  const t = f.type || "";
+  if (t.startsWith("image/")) return "vision";
+  if (t.startsWith("audio/")) return "stt";
+  if (t.startsWith("video/")) return "video";
+  return "doc";
+}
+/* The phone composer is fixed; the page keeps room for its current height. */
+function syncComposer() {
+  const c = $("#composer");
+  const root = document.documentElement;
+  if (c && c.offsetHeight && root && root.style) root.style.setProperty("--composer-h", c.offsetHeight + "px");
+}
+function autoGrow(el) {
+  if (!el || !el.style) return;
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight || 44, 168) + "px";
+  syncComposer();
+}
+function nearBottom() {
+  const log = $("#chatlog");
+  if (!log) return false;
+  if (isDesk()) return (log.scrollHeight || 0) - (log.scrollTop || 0) - (log.clientHeight || 0) < 96;
+  const doc = document.documentElement;
+  return ((doc && doc.scrollHeight) || 0) - (window.scrollY || 0) - (window.innerHeight || 0) < 200;
+}
+function toBottom() {
+  const log = $("#chatlog");
+  if (!log) return;
+  if (isDesk()) log.scrollTop = log.scrollHeight || 0;
+  else window.scrollTo(0, (document.documentElement && document.documentElement.scrollHeight) || 0);
+}
+function renderPending() {
+  const box = $("#chat-pending");
+  if (box) box.innerHTML = pendingHtml();
+  syncComposer();
+}
+/* Updates only the parts of the chat page that change while an answer streams. */
+function renderChatLive(s) {
+  if (currentPage !== "chat") return;
+  const list = $("#sess-list");
+  if (list) list.innerHTML = sessListHtml();
+  const pick = $("#chat-pick");
+  if (pick) pick.innerHTML = sessOptions();
+  if (chatActive() !== s) return;
+  const stick = nearBottom();
+  $("#chatlog").innerHTML = chatLogHtml(s);
+  $("#chat-btn").innerHTML = chatBtnHtml(s);
+  $("#chat-sub").innerHTML = chatSub(s);
+  if (stick) toBottom();
+}
+function answerFor(prompt, files) {
+  const doc = files.find((f) => f.route === "doc");
+  const media = files.find((f) => f.route !== "doc");
+  if (doc) {
+    return tx(`Isi **${doc.name}** sudah dibaca. Di versi asli, teks berkas diambil oleh ekstraktor dokumen yang sama dengan Telegram (PDF, DOCX, XLSX, arsip), lalu diringkas di sini.\n\n- Berkas disimpan di folder lampiran sesi ini.\n- Pertanyaan lanjutan tentang berkas ini tetap memakai isinya.`,
+      `I read **${doc.name}**. In the real build, its text comes from the same document extractor Telegram uses (PDF, DOCX, XLSX, archives) and is summarized here.\n\n- The file is kept in this session's attachment folder.\n- Follow-up questions about it keep using its content.`);
+  }
+  if (media) {
+    const who = ROUTE()[media.route][0];
+    return tx(`Lampiran **${media.name}** dikirim ke model ${who}, dan hasil pengamatannya diteruskan ke model utama, persis seperti di Telegram.\n\nIni jawaban simulasi, jadi isi gambarnya tidak benar-benar dibaca.`,
+      `The attachment **${media.name}** went to the ${who} model, and its observation was passed to the main model, exactly as on Telegram.\n\nThis is a simulated answer, so the picture is not actually read.`);
+  }
+  return tx(`Ini jawaban simulasi. Di versi asli, pesan dikirim ke \`${mainModel()}\` dan jawabannya mengalir lewat SSE, sama seperti draft di Telegram.\n\n- Riwayatnya tersimpan di sesi #${chatActive().id}, jadi \`xiao chat\` di terminal melihat percakapan yang sama.\n- Tombol **Hentikan** memutus jawaban seperti tombol stop di Telegram, dan teks yang sudah ada tetap disimpan.`,
+    `This is a simulated answer. In the real build, the message goes to \`${mainModel()}\` and the answer streams over SSE, like a Telegram draft.\n\n- Its history is stored in session #${chatActive().id}, so \`xiao chat\` in the terminal sees the same conversation.\n- **Stop** cuts the answer like Telegram's stop button, and the text so far is kept.`);
+}
+async function streamAnswer(s, prompt, files) {
+  const t0 = Date.now();
+  const m = { role: "xiao", model: mainModel(), md: tx("", ""), tools: [],
+    think: tx("Membaca pertanyaan, memeriksa apakah perlu data terbaru atau lampiran, lalu menyusun jawaban singkat.",
+      "Reading the question, checking whether it needs fresh data or an attachment, then writing a short answer."),
+    status: tx("Berpikir…", "Thinking…") };
+  s.messages.push(m);
+  s.busy = true;
+  s.stop = false;
+  s.when = tx("baru saja", "just now");
+  renderChatLive(s);
+  toBottom();
+  const wait = async (ms) => { for (let t = 0; t < ms && !s.stop; t += 100) await sleep(100); };
+  await wait(900);
+  const media = files.find((f) => f.route !== "doc");
+  if (media && !s.stop) {
+    m.status = tx(`Membaca lampiran lewat ${ROUTE()[media.route][0]}…`, `Reading the attachment with ${ROUTE()[media.route][0]}…`);
+    renderChatLive(s);
+    await wait(1000);
+  }
+  if (/\b(cari|search|terbaru|latest|berita|news|harga|price)\b/i.test(prompt) && !s.stop) {
+    m.tools.push(["web_search", prompt.slice(0, 48)]);
+    m.status = tx("Mencari di web…", "Searching the web…");
+    renderChatLive(s);
+    await wait(1200);
+  }
+  const full = answerFor(prompt, files);
+  m.status = null;
+  const steps = 36;
+  for (let i = 1; i <= steps && !s.stop; i++) {
+    m.md = tx(full.id.slice(0, Math.round(full.id.length * i / steps)), full.en.slice(0, Math.round(full.en.length * i / steps)));
+    renderChatLive(s);
+    await sleep(70);
+  }
+  m.stopped = s.stop;
+  m.secs = Math.round((Date.now() - t0) / 100) / 10;
+  s.busy = false;
+  s.stop = false;
+  renderChatLive(s);
+  const live = $("#chat-live");
+  if (live) live.textContent = m.stopped ? L("Jawaban dihentikan.", "Answer stopped.") : L("Xiao selesai menjawab.", "Xiao finished answering.");
+}
+ACTIONS["chat-send"] = () => {
+  const s = chatActive();
+  if (s.busy) return;
+  const input = $("#chat-in");
+  const text = (input ? input.value : S.chat.draft).trim();
+  if (!text && !S.chat.pending.length) { if (input && input.focus) input.focus(); return; }
+  const files = S.chat.pending.map((f) => ({ name: f.name, size: f.size, route: f.route }));
+  s.messages.push({ role: "user", text, files });
+  S.chat.pending = [];
+  S.chat.draft = "";
+  if (input) { input.value = ""; autoGrow(input); }
+  renderPending();
+  streamAnswer(s, text, files);
+};
+ACTIONS["chat-stop"] = () => { chatActive().stop = true; };
+ACTIONS["chat-retry"] = () => {
+  const s = chatActive();
+  if (s.busy) return;
+  const failed = s.messages[s.messages.length - 1];
+  if (!failed || !failed.error) return;
+  s.messages.pop();
+  const ask = [...s.messages].reverse().find((m) => m.role === "user");
+  streamAnswer(s, ask ? String(T(ask.text) || "") : "", ask && ask.files ? ask.files : []);
+};
+ACTIONS["chat-copy"] = (el) => {
+  const m = chatActive().messages[Number(el.dataset.i)];
+  try { navigator.clipboard.writeText(msgText(m)).catch(() => {}); } catch (_) { /* clipboard may be blocked */ }
+  toast(L("Jawaban disalin", "Answer copied"));
+};
+ACTIONS["chat-dl"] = (el) => toast(L(`${esc(el.dataset.name)} diunduh`, `Downloaded ${esc(el.dataset.name)}`));
+ACTIONS["chat-attach"] = () => { const f = $("#chat-file"); if (f && f.click) f.click(); };
+CHANGES["chat-file"] = (el) => {
+  const files = Array.from(el.files || []);
+  const tooBig = files.filter((f) => f.size > FILE_LIMIT);
+  files.filter((f) => f.size <= FILE_LIMIT).forEach((f) => S.chat.pending.push({ name: f.name, size: fmtSize(f.size), route: fileRoute(f) }));
+  if (tooBig.length) toast(L(`${esc(tooBig[0].name)} lebih dari 20 MB dan tidak dilampirkan`, `${esc(tooBig[0].name)} is over 20 MB and was not attached`), true);
+  el.value = "";
+  renderPending();
+};
+ACTIONS["chat-unattach"] = (el) => { S.chat.pending.splice(Number(el.dataset.i), 1); renderPending(); };
+function switchSession(id) {
+  const from = chatActive();
+  const input = $("#chat-in");
+  from.draft = input ? input.value : S.chat.draft;
+  S.chat.active = id;
+  S.chat.draft = chatActive().draft || "";
+  S.chat.pending = [];
+  rerender();
+  toBottom();
+}
+ACTIONS["chat-switch-to"] = (el) => { if (Number(el.dataset.id) !== S.chat.active) switchSession(Number(el.dataset.id)); };
+CHANGES["chat-switch"] = (el) => switchSession(Number(el.value));
+ACTIONS["chat-new"] = () => {
+  const s = { id: S.chat.next++, name: sessionStamp(), when: tx("baru saja", "just now"), busy: false, messages: [] };
+  S.chat.sessions.unshift(s);
+  switchSession(s.id);
+  const input = $("#chat-in");
+  if (input && input.focus) input.focus();
+};
+ACTIONS["chat-menu"] = () => {
+  const s = chatActive();
+  const n = s.messages.length;
+  const row = (act, icon, label, hint, off, cls = "") => `<button class="row ${cls}" data-act="${act}" ${off ? "disabled" : ""}><span class="row-ic">${ic(icon)}</span>
+    <span class="grow"><span class="label">${label}</span><span class="hint">${hint}</span></span></button>`;
+  openSheet(`<h3>${esc(T(s.name))}</h3><div class="sub">${L(`Sesi #${s.id}, ${nf(n)} pesan. Juga terlihat di <code>xiao chat</code>.`, `Session #${s.id}, ${nf(n)} messages. Also listed in <code>xiao chat</code>.`)}</div>
+    <div class="sheet-rows rows">
+      ${row("chat-rename", "edit", L("Ganti nama", "Rename"), L("Hanya nama yang berubah.", "Only the name changes."), false)}
+      ${row("chat-clear", "refresh", L("Kosongkan riwayat", "Clear history"), L("Sesi tetap ada, pesannya dihapus.", "The session stays; its messages are deleted."), !n || s.busy)}
+      ${row("chat-del", "trash", L("Hapus sesi", "Delete session"), L("Sesi dan riwayatnya dihapus.", "The session and its history are deleted."), s.busy, "danger-row")}
+    </div>`);
+};
+ACTIONS["chat-rename"] = () => {
+  const s = chatActive();
+  openSheet(`<h3>${L("Ganti nama sesi", "Rename session")}</h3><div class="sub">${L(`Sesi #${s.id}. Nama baru juga tampil di <code>xiao chat</code>.`, `Session #${s.id}. The new name also shows in <code>xiao chat</code>.`)}</div>
+    <div class="field mt0"><div class="lab">${L("Nama", "Name")}</div><input class="input" id="chat-name" maxlength="60" value="${esc(T(s.name))}"></div>
+    <div class="actions end mt16"><button class="btn ghost" data-act="close">${L("Batal", "Cancel")}</button><button class="btn primary" data-act="chat-rename-save">${L("Simpan", "Save")}</button></div>`);
+  const input = $("#chat-name");
+  if (input && input.focus) input.focus();
+};
+ACTIONS["chat-rename-save"] = () => {
+  const name = $("#chat-name").value.trim();
+  if (!name) { toast(L("Nama tidak boleh kosong", "The name cannot be empty"), true); return; }
+  chatActive().name = name;
+  closeSheet();
+  rerender();
+  toast(L("Nama sesi diganti", "Session renamed"));
+};
+ACTIONS["chat-clear"] = () => {
+  const s = chatActive();
+  confirmSheet(L("Kosongkan sesi ini?", "Clear this session?"),
+    L(`${nf(s.messages.length)} pesan di sesi #${s.id} dihapus dari database. Memori jangka panjang tetap ada.`, `${nf(s.messages.length)} messages in session #${s.id} are deleted from the database. Long-term memory is kept.`),
+    L("Kosongkan", "Clear"), "chat-clear-go");
+};
+ACTIONS["chat-clear-go"] = () => { chatActive().messages = []; closeSheet(); rerender(); toast(L("Riwayat sesi dikosongkan", "Session history cleared")); };
+ACTIONS["chat-del"] = () => {
+  const s = chatActive();
+  confirmSheet(L("Hapus sesi?", "Delete this session?"),
+    L(`Sesi #${s.id} dan riwayatnya dihapus, juga dari daftar <code>xiao chat</code>.`, `Session #${s.id} and its history are deleted, also from the <code>xiao chat</code> list.`),
+    L("Hapus", "Delete"), "chat-del-go");
+};
+ACTIONS["chat-del-go"] = () => {
+  const s = chatActive();
+  S.chat.sessions = S.chat.sessions.filter((x) => x !== s);
+  if (!S.chat.sessions.length) S.chat.sessions.push({ id: S.chat.next++, name: sessionStamp(), when: tx("baru saja", "just now"), busy: false, messages: [] });
+  S.chat.active = S.chat.sessions[0].id;
+  S.chat.draft = S.chat.sessions[0].draft || "";
+  S.chat.pending = [];
+  closeSheet();
+  rerender();
+  toast(L(`Sesi #${s.id} dihapus`, `Session #${s.id} deleted`));
+};
+ACTIONS.think = (el) => {
+  const details = el.parentElement;
+  const m = chatActive().messages[Number(el.dataset.i)];
+  if (m && details) m.thinkOpen = !details.open;
+};
+INPUTS["chat-in"] = (el) => { S.chat.draft = el.value; autoGrow(el); };
+AFTER.chat = () => {
+  const input = $("#chat-in");
+  if (input && S.chat.draft) autoGrow(input);
+  syncComposer();
+  toBottom();
+};
+
+function rerender() {
+  const y = window.scrollY;
+  clearInterval(logTimer);
+  if (currentPage === "login") {
+    $("#root").innerHTML = PAGES.login();
+    return;
+  }
+  $("#root").innerHTML = shell(currentPage, PAGES[currentPage]());
+  if (AFTER[currentPage]) AFTER[currentPage]();
+  window.scrollTo(0, y);
+}
+
+/* ---------- Router ---------- */
+function route() {
+  closeSheet();
+  markDirty(false);
+  clearInterval(logTimer);
+  const want = (location.hash.replace(/^#\/?/, "") || "home").split("?")[0];
+  if (want === "login") {
+    currentPage = "login";
+    $("#root").innerHTML = PAGES.login();
+    return;
+  }
+  currentPage = PAGES[want] && want !== "login" ? want : "home";
+  $("#root").innerHTML = shell(currentPage, PAGES[currentPage]());
+  window.scrollTo(0, 0);
+  if (AFTER[currentPage]) AFTER[currentPage]();
+}
+
+function applyTheme() {
+  const t = S.ui.theme;
+  if (t === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", t);
+}
+
+document.addEventListener("click", async (e) => {
+  const el = e.target.closest("[data-act]");
+  if (!el) return;
+  const act = el.dataset.act;
+  if (el.tagName === "A") e.preventDefault();
+  if (ACTIONS[act]) await ACTIONS[act](el, e);
+});
+document.addEventListener("input", (e) => {
+  if (e.target.matches("[data-dirty]")) markDirty(true);
+  if (e.target.id && INPUTS[e.target.id]) INPUTS[e.target.id](e.target);
+});
+document.addEventListener("change", (e) => {
+  if (e.target.matches("[data-dirty]")) markDirty(true);
+  if (e.target.dataset.change && CHANGES[e.target.dataset.change]) CHANGES[e.target.dataset.change](e.target);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { closeSheet(); return; }
+  if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+  /* Enter sends on a keyboard; on a touch screen it adds a line, like Telegram. */
+  if (e.target.id === "chat-in" && !(window.matchMedia && window.matchMedia("(pointer: coarse)").matches)) {
+    e.preventDefault();
+    ACTIONS["chat-send"]();
+  }
+  if (e.target.id === "chat-name") { e.preventDefault(); ACTIONS["chat-rename-save"](); }
+});
+$("#scrim").addEventListener("click", closeSheet);
+window.addEventListener("hashchange", route);
+window.addEventListener("resize", () => { if (currentPage === "chat") syncComposer(); });
+try {
+  const saved = localStorage.getItem("xiao-theme");
+  if (["auto", "light", "dark"].includes(saved)) S.ui.theme = saved;
+} catch (_) { /* storage may be blocked */ }
+LANG = pickLang();
+applyLang();
+applyTheme();
+route();
+</script>
+</body>
+</html>

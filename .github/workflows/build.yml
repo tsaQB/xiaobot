@@ -17,8 +17,46 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  webui:
+    name: WebUI build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Type check
+        run: npx vue-tsc --noEmit
+
+      - name: Build
+        run: npx vite build
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=moderate
+
+      - name: Upload WebUI build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: webui-dist
+          path: webui/dist
+          if-no-files-found: error
+
   quality:
     name: Rust quality gates
+    needs: webui
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -26,6 +64,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Download WebUI build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: webui-dist
+          path: webui/dist
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
@@ -84,7 +128,7 @@ jobs:
 
   armbian:
     name: Linux ARM64 (Armbian)
-    needs: [quality, security]
+    needs: [webui, quality, security]
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -92,6 +136,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Download WebUI build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: webui-dist
+          path: webui/dist
 
       - name: Install ARM64 toolchain
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
@@ -116,7 +166,7 @@ jobs:
 
   android:
     name: Android ARM64
-    needs: [quality, security]
+    needs: [webui, quality, security]
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
@@ -124,6 +174,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Download WebUI build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: webui-dist
+          path: webui/dist
 
       - name: Setup JDK 17
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
@@ -160,7 +216,7 @@ jobs:
 
   windows:
     name: Windows x86_64
-    needs: [quality, security]
+    needs: [webui, quality, security]
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
@@ -168,6 +224,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Download WebUI build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: webui-dist
+          path: webui/dist
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772

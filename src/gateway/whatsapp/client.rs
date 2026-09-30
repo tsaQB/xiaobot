@@ -742,33 +742,88 @@ impl WhatsAppClientRunner {
         let connected_runtime = Arc::clone(&runtime_cell);
         let connected_make = make_runtime.clone();
         let logout_flag = Arc::clone(&logged_out);
+        let qr_hooks = config.hooks.clone();
+        let code_hooks = config.hooks.clone();
+        let code_error_hooks = config.hooks.clone();
+        let connected_hooks = config.hooks.clone();
+        let logout_hooks = config.hooks.clone();
         let mut builder = Bot::builder()
             .with_backend(store)
             .with_event_delivery(EventDelivery::Ordered { capacity: 256 })
             .with_inbound_durability_hook(DurableIntakeHook {
                 policy: policy.clone(),
             })
-            .on_qr_code(|code, timeout| async move {
-                println!("\n  \x1b[38;2;16;185;129m╭──────────────────────────────────────────────────────────╮\x1b[0m");
-                println!("  \x1b[38;2;16;185;129m│\x1b[0m \x1b[1;37m📲 SCAN QR CODE WHATSAPP (Batas: {}s)\x1b[0m                    \x1b[38;2;16;185;129m│\x1b[0m", timeout.as_secs());
-                println!("  \x1b[38;2;16;185;129m╰──────────────────────────────────────────────────────────╯\x1b[0m\n");
-                if qr2term::print_qr(&code).is_err() {
-                    println!("  Gagal merender QR visual. Kode mentah:\n  {code}\n");
+            .on_qr_code(move |code, timeout| {
+                let hooks = qr_hooks.clone();
+                async move {
+                    // Under the WebUI the QR code is shown there, not in the log.
+                    if let Some(hooks) = hooks {
+                        hooks.update(|state| {
+                            state.phase = super::LinkPhase::Pairing;
+                            state.qr = Some(code);
+                            state.expires_at = Some(std::time::Instant::now() + timeout);
+                            state.error = None;
+                        });
+                        return;
+                    }
+                    println!("\n  \x1b[38;2;16;185;129m╭──────────────────────────────────────────────────────────╮\x1b[0m");
+                    println!("  \x1b[38;2;16;185;129m│\x1b[0m \x1b[1;37m📲 SCAN QR CODE WHATSAPP (Batas: {}s)\x1b[0m                    \x1b[38;2;16;185;129m│\x1b[0m", timeout.as_secs());
+                    println!("  \x1b[38;2;16;185;129m╰──────────────────────────────────────────────────────────╯\x1b[0m\n");
+                    if qr2term::print_qr(&code).is_err() {
+                        println!("  Gagal merender QR visual. Kode mentah:\n  {code}\n");
+                    }
+                    println!("\n  \x1b[38;5;244mBuka WhatsApp HP > Perangkat Tertaut > Tautkan Perangkat\x1b[0m\n");
                 }
-                println!("\n  \x1b[38;5;244mBuka WhatsApp HP > Perangkat Tertaut > Tautkan Perangkat\x1b[0m\n");
             })
-            .on_pair_code(|code, timeout| async move {
-                // Kode ini harus terlihat oleh pemilik agar bisa diketik di HP;
-                // ia dicetak ke terminal, tidak pernah ke log, dan kedaluwarsa cepat.
-                println!("\n  \x1b[1;32m🔑 KODE PAIRING WHATSAPP (Batas: {}s): \x1b[1;37m>>> \x1b[1;33m{}\x1b[1;37m <<<\x1b[0m", timeout.as_secs(), code);
-                println!("  \x1b[38;5;244mBuka WhatsApp HP > Perangkat Tertaut > Tautkan dengan nomor telepon\x1b[0m\n");
+            .on_pair_code(move |code, timeout| {
+                let hooks = code_hooks.clone();
+                async move {
+                    if let Some(hooks) = hooks {
+                        hooks.update(|state| {
+                            state.phase = super::LinkPhase::Pairing;
+                            state.code = Some(code);
+                            state.expires_at = Some(std::time::Instant::now() + timeout);
+                            state.error = None;
+                        });
+                        return;
+                    }
+                    // Kode ini harus terlihat oleh pemilik agar bisa diketik di HP;
+                    // ia dicetak ke terminal, tidak pernah ke log, dan kedaluwarsa cepat.
+                    println!("\n  \x1b[1;32m🔑 KODE PAIRING WHATSAPP (Batas: {}s): \x1b[1;37m>>> \x1b[1;33m{}\x1b[1;37m <<<\x1b[0m", timeout.as_secs(), code);
+                    println!("  \x1b[38;5;244mBuka WhatsApp HP > Perangkat Tertaut > Tautkan dengan nomor telepon\x1b[0m\n");
+                }
+            })
+            .on_pair_code_error(move |error, _client| {
+                let hooks = code_error_hooks.clone();
+                async move {
+                    warn!("Permintaan kode pairing WhatsApp gagal");
+                    match hooks {
+                        Some(hooks) => hooks.update(|state| state.error = Some(error.error)),
+                        None => println!(
+                            "\n  \x1b[31m✖ Kode pairing tidak dapat dibuat: {}\x1b[0m\n",
+                            error.error
+                        ),
+                    }
+                }
             })
             .on_connected(move |client| {
                 let cell = Arc::clone(&connected_runtime);
                 let make = connected_make.clone();
+                let hooks = connected_hooks.clone();
                 async move {
                     info!("Berhasil terhubung ke jaringan WhatsApp! Gateway siap aktif.");
-                    println!("\n  \x1b[1;32m●\x1b[0m \x1b[1;37mWhatsApp Gateway: Terhubung dan Aktif!\x1b[0m\n");
+                    match hooks {
+                        Some(hooks) => hooks.update(|state| {
+                            state.phase = super::LinkPhase::Online;
+                            state.qr = None;
+                            state.code = None;
+                            state.expires_at = None;
+                            state.error = None;
+                        }),
+                        None => println!(
+                            "\n  \x1b[1;32m●\x1b[0m \x1b[1;37mWhatsApp Gateway: Terhubung dan Aktif!\x1b[0m\n"
+                        ),
+                    }
                     let runtime = cell
                         .get_or_init(|| async { make(Arc::clone(&client)) })
                         .await
@@ -778,10 +833,18 @@ impl WhatsAppClientRunner {
             })
             .on_logged_out(move |_info| {
                 let flag = Arc::clone(&logout_flag);
+                let hooks = logout_hooks.clone();
                 async move {
                     flag.store(true, Ordering::SeqCst);
                     warn!("Sesi WhatsApp telah dikeluarkan / di-logout dari perangkat utama.");
-                    println!("\n  \x1b[31m✖ Sesi WhatsApp telah dikeluarkan / logout.\x1b[0m\n");
+                    match hooks {
+                        Some(hooks) => {
+                            hooks.update(|state| state.phase = super::LinkPhase::LoggedOut)
+                        }
+                        None => println!(
+                            "\n  \x1b[31m✖ Sesi WhatsApp telah dikeluarkan / logout.\x1b[0m\n"
+                        ),
+                    }
                 }
             });
 
@@ -840,6 +903,20 @@ impl WhatsAppClientRunner {
         };
         info!("Client WhatsApp terinisialisasi. Menghubungkan...");
 
+        // The WebUI asks for a replay of pending rows after a manual retry.
+        let replay_task = config.hooks.as_ref().map(|hooks| {
+            let notify = Arc::clone(&hooks.replay);
+            let cell = Arc::clone(&runtime_cell);
+            tokio::spawn(async move {
+                loop {
+                    notify.notified().await;
+                    if let Some(runtime) = cell.get().cloned() {
+                        replay_pending_messages(&runtime).await;
+                    }
+                }
+            })
+        });
+
         let mut handle = bot.spawn();
         let exit = tokio::select! {
             _ = &mut handle => {
@@ -856,6 +933,10 @@ impl WhatsAppClientRunner {
                 WhatsAppExit::Shutdown
             }
         };
+
+        if let Some(task) = replay_task {
+            task.abort();
+        }
 
         if exit == WhatsAppExit::LoggedOut {
             // The linked-device credentials are dead after a server-side

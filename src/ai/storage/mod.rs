@@ -4,6 +4,7 @@ pub mod provider;
 pub mod secrets;
 pub mod session;
 pub mod wa_inbox;
+pub mod web;
 
 #[allow(unused_imports)]
 pub use inbox::{
@@ -307,6 +308,7 @@ fn ensure_database_initialized(conn: &Connection, path: &Path) -> rusqlite::Resu
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_messages_chat_thread ON messages(chat_id, thread_id);",
     )?;
+    conn.execute_batch(web::WEB_SCHEMA)?;
     // WAL/SHM files may be created lazily. The private 0700 parent directory
     // is the primary boundary; harden sidecars whenever they already exist.
     if let Some(name) = path.file_name().and_then(|name| name.to_str()) {

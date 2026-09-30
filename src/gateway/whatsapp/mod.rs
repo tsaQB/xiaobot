@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub mod client;
 pub mod delivery;
@@ -15,6 +16,57 @@ pub struct WhatsAppConfig {
     /// without mentioning the bot. Elsewhere in groups a mention, a reply to
     /// the bot, or a leading `/` is required.
     pub dedicated_groups: Vec<String>,
+    /// Set when the WebUI controls the gateway: pairing codes and the link
+    /// state are reported here instead of being printed to the terminal.
+    pub hooks: Option<WaHooks>,
+}
+
+/// Where the gateway is in its lifecycle, as shown in the WebUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkPhase {
+    #[default]
+    Off,
+    Starting,
+    Pairing,
+    Online,
+    Retrying,
+    LoggedOut,
+}
+
+/// Live link state of a gateway run.
+#[derive(Debug, Clone, Default)]
+pub struct LinkState {
+    pub phase: LinkPhase,
+    /// Current pairing QR payload.
+    pub qr: Option<String>,
+    /// Current 8-character pairing code.
+    pub code: Option<String>,
+    /// When the current QR or code stops being valid.
+    pub expires_at: Option<std::time::Instant>,
+    pub error: Option<String>,
+}
+
+/// Shared between the WebUI and a gateway run it started.
+#[derive(Debug, Clone, Default)]
+pub struct WaHooks {
+    pub link: Arc<std::sync::Mutex<LinkState>>,
+    /// Notified to process pending durable rows now (after a retry).
+    pub replay: Arc<tokio::sync::Notify>,
+}
+
+impl WaHooks {
+    pub fn update(&self, change: impl FnOnce(&mut LinkState)) {
+        if let Ok(mut state) = self.link.lock() {
+            change(&mut state);
+        }
+    }
+
+    pub fn snapshot(&self) -> LinkState {
+        self.link
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

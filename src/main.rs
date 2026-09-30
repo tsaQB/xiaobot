@@ -7,6 +7,7 @@ pub mod gateway;
 mod parser;
 mod timeline;
 mod util;
+mod web;
 
 use std::env;
 use std::io;
@@ -129,7 +130,7 @@ fn is_trusted_env_file(_path: &Path) -> bool {
     true
 }
 
-fn get_config_path() -> std::path::PathBuf {
+pub(crate) fn get_config_path() -> std::path::PathBuf {
     // 1. Current working directory .env (only when it is trusted)
     if Path::new(".env").exists() && is_trusted_env_file(Path::new(".env")) {
         return Path::new(".env").to_path_buf();
@@ -267,15 +268,19 @@ pub(crate) fn get_configured_token() -> Option<String> {
 
 fn init_tracing() {
     use std::sync::Once;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
     static TRACING_INIT: Once = Once::new();
     TRACING_INIT.call_once(|| {
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
         // Logs go to stderr so they never interleave with the CLI spinner or
         // with answers printed to stdout (`xiao "question" > answer.txt`).
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(std::io::stderr)
+        // The ring layer keeps the latest lines for the WebUI log page.
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+            .with(web::logs::RingLayer)
             .try_init();
     });
 }
@@ -386,8 +391,19 @@ async fn main() {
             print_cli_help();
             return;
         }
+        Some("web") => {
+            let action_arg = args.get(2).map(|s| s.as_str());
+            let target_arg = args.get(3).map(|s| s.as_str());
+            web::cli::run_cli_web(action_arg, target_arg).await;
+            return;
+        }
         Some("start") => {
             crate::bot::daemon::run_daemon(ai_service).await;
+            if web::restart_requested() {
+                // Asked from the WebUI: a non-zero status makes systemd
+                // (Restart=on-failure or always) start the daemon again.
+                std::process::exit(web::RESTART_EXIT_CODE);
+            }
         }
         Some(unknown) => {
             if unknown.starts_with('-') {

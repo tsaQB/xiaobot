@@ -11,3 +11,7 @@ multi_*.jpg
 picoclaw/
 .agents/
 skills-lock.json
+
+# WebUI (Vue) dependencies and build output
+webui/node_modules/
+webui/dist/

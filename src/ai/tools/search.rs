@@ -69,6 +69,20 @@ impl Cooldown {
             .unwrap_or(false)
     }
 
+    /// Time left in the cooldown, `None` when it is not active.
+    fn remaining(&self) -> Option<Duration> {
+        let until = self.until.lock().ok()?;
+        until
+            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+            .filter(|left| !left.is_zero())
+    }
+
+    fn clear(&self) {
+        if let Ok(mut until) = self.until.lock() {
+            *until = None;
+        }
+    }
+
     /// Starts the cooldown, keeping an earlier one that lasts longer.
     fn trip(&self, duration: Duration) {
         let deadline = Instant::now() + duration;
@@ -82,6 +96,20 @@ impl Cooldown {
 
 static EXA_MCP_COOLDOWN: Cooldown = Cooldown::new();
 static DUCKDUCKGO_COOLDOWN: Cooldown = Cooldown::new();
+
+/// Time left before keyless Exa MCP and DuckDuckGo are tried again.
+pub fn search_cooldowns() -> (Option<Duration>, Option<Duration>) {
+    (
+        EXA_MCP_COOLDOWN.remaining(),
+        DUCKDUCKGO_COOLDOWN.remaining(),
+    )
+}
+
+/// Ends both cooldowns so the next search tries every engine again.
+pub fn reset_search_cooldowns() {
+    EXA_MCP_COOLDOWN.clear();
+    DUCKDUCKGO_COOLDOWN.clear();
+}
 
 /// Cooldown after an HTTP 429: the server's `Retry-After` seconds when given
 /// (kept between one minute and one hour), otherwise ten minutes.
@@ -1955,6 +1983,11 @@ mod tests {
         assert!(cooldown.is_active());
         cooldown.trip(Duration::ZERO);
         assert!(cooldown.is_active(), "a shorter trip must not end it early");
+        let left = cooldown.remaining().expect("time left");
+        assert!(left > Duration::from_secs(590) && left <= Duration::from_secs(600));
+        cooldown.clear();
+        assert!(!cooldown.is_active());
+        assert_eq!(cooldown.remaining(), None);
     }
 
     #[test]
