@@ -500,6 +500,94 @@ pub(crate) async fn storage_stats_async(owner: i64) -> StorageStats {
     .unwrap_or_default()
 }
 
+/* ------------------------------ activity ------------------------------ */
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct ActivityDay {
+    pub date: String,
+    pub prompts: u64,
+    pub answers: u64,
+    pub telegram: u64,
+    pub whatsapp: u64,
+}
+
+/// Counts per local date (`YYYY-MM-DD`, the first ten characters of the
+/// stored RFC 3339 times) since `since`.
+fn activity_on_conn(
+    conn: &Connection,
+    since: &str,
+) -> rusqlite::Result<HashMap<String, ActivityDay>> {
+    let mut days: HashMap<String, ActivityDay> = HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT substr(created_at,1,10), role, COUNT(*) FROM messages
+         WHERE created_at >= ?1 GROUP BY 1, 2",
+    )?;
+    let rows = stmt.query_map(params![since], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (date, role, count) = row?;
+        let count = u64::try_from(count).unwrap_or_default();
+        let day = days.entry(date).or_default();
+        match role.as_str() {
+            "user" => day.prompts += count,
+            "assistant" => day.answers += count,
+            _ => {}
+        }
+    }
+    for (table, whatsapp) in [("telegram_inbox", false), ("whatsapp_inbox", true)] {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT substr(received_at,1,10), COUNT(*) FROM {table}
+             WHERE received_at >= ?1 GROUP BY 1"
+        ))?;
+        let rows = stmt.query_map(params![since], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (date, count) = row?;
+            let count = u64::try_from(count).unwrap_or_default();
+            let day = days.entry(date).or_default();
+            if whatsapp {
+                day.whatsapp += count;
+            } else {
+                day.telegram += count;
+            }
+        }
+    }
+    Ok(days)
+}
+
+/// The last `days` days including today, oldest first.
+pub(crate) async fn activity_async(days: i64) -> Vec<ActivityDay> {
+    let today = Local::now().date_naive();
+    let dates: Vec<String> = (0..days.max(1))
+        .rev()
+        .map(|back| {
+            (today - chrono::Duration::days(back))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .collect();
+    let since = dates.first().cloned().unwrap_or_default();
+    let counts = run_db("activity", move || {
+        with_conn(|conn| activity_on_conn(conn, &since))
+    })
+    .await
+    .unwrap_or_default();
+    dates
+        .into_iter()
+        .map(|date| {
+            let mut day = counts.get(&date).cloned().unwrap_or_default();
+            day.date = date;
+            day
+        })
+        .collect()
+}
+
 /* ------------------------------ memories ------------------------------ */
 
 #[derive(Debug, Clone, Serialize)]
@@ -617,6 +705,30 @@ mod tests {
             list_web_sessions_on_conn(&conn, 1_500).expect("list").len(),
             1
         );
+    }
+
+    #[test]
+    fn activity_is_counted_per_day() {
+        let conn = test_conn();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                user_id INTEGER NOT NULL, session_id INTEGER NOT NULL DEFAULT 0,
+                chat_id INTEGER NOT NULL DEFAULT 0, thread_id INTEGER NOT NULL DEFAULT 0,
+                role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            INSERT INTO messages VALUES (1,0,1,0,'user','a','2026-09-29T10:00:00+08:00');
+            INSERT INTO messages VALUES (1,0,1,0,'assistant','b','2026-09-29T10:00:05+08:00');
+            INSERT INTO messages VALUES (1,0,1,0,'user','c','2026-09-30T09:00:00+08:00');
+            INSERT INTO messages VALUES (1,0,1,0,'user','old','2026-09-01T09:00:00+08:00');
+            INSERT INTO telegram_inbox VALUES (1, '{}', 'completed', 1, '2026-09-30T09:00:00+08:00', NULL);",
+        )
+        .expect("seed");
+        let days = activity_on_conn(&conn, "2026-09-24").expect("activity");
+        let monday = days.get("2026-09-29").expect("29th");
+        assert_eq!((monday.prompts, monday.answers), (1, 1));
+        let tuesday = days.get("2026-09-30").expect("30th");
+        assert_eq!((tuesday.prompts, tuesday.telegram), (1, 1));
+        assert!(!days.contains_key("2026-09-01"), "older days are left out");
     }
 
     #[test]

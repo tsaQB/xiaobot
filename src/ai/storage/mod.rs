@@ -309,6 +309,9 @@ fn ensure_database_initialized(conn: &Connection, path: &Path) -> rusqlite::Resu
         "CREATE INDEX IF NOT EXISTS idx_messages_chat_thread ON messages(chat_id, thread_id);",
     )?;
     conn.execute_batch(web::WEB_SCHEMA)?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);",
+    )?;
     // WAL/SHM files may be created lazily. The private 0700 parent directory
     // is the primary boundary; harden sidecars whenever they already exist.
     if let Some(name) = path.file_name().and_then(|name| name.to_str()) {

@@ -197,6 +197,44 @@ pub fn get_search_engine_status() -> (String, String) {
     (engine_name, mcp_url)
 }
 
+/// Engine ids of the `web_search` chain, in the order they are tried.
+pub const SEARCH_ENGINE_IDS: [&str; 6] = ["brave", "tavily", "exa", "exa_mcp", "ddg", "wiki"];
+
+/// Engine ids in a comma separated list, lower-cased and known ones only.
+fn parse_engine_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|id| id.trim().to_ascii_lowercase())
+        .filter(|id| SEARCH_ENGINE_IDS.contains(&id.as_str()))
+        .collect()
+}
+
+/// Engines the owner switched off (`XIAO_SEARCH_DISABLED`). Every engine is
+/// on by default; keyed engines additionally need their key.
+pub fn disabled_search_engines() -> Vec<String> {
+    setting(&["XIAO_SEARCH_DISABLED"])
+        .map(|raw| parse_engine_list(&raw))
+        .unwrap_or_default()
+}
+
+/// The `XIAO_SEARCH_DISABLED` value with `id` switched on or off.
+pub fn search_disabled_value(id: &str, enabled: bool) -> String {
+    let mut disabled = disabled_search_engines();
+    disabled.retain(|current| current != id);
+    if !enabled {
+        disabled.push(id.to_string());
+    }
+    SEARCH_ENGINE_IDS
+        .iter()
+        .filter(|known| disabled.iter().any(|current| current == *known))
+        .copied()
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn engine_on(disabled: &[String], id: &str) -> bool {
+    !disabled.iter().any(|current| current == id)
+}
+
 pub fn get_configured_mcp_url() -> String {
     setting(&["EXA_MCP_URL"]).unwrap_or_else(|| "https://mcp.exa.ai/".to_string())
 }
@@ -401,15 +439,23 @@ pub async fn execute_web_search(query: &str) -> String {
     };
 
     let visual = is_visual_search_query(q);
+    let disabled = disabled_search_engines();
+    let wiki_on = engine_on(&disabled, "wiki");
 
-    if let Some(mut findings) = primary_findings(&client, q).await {
-        if visual && findings.images.len() < MIN_VISUAL_IMAGES {
+    if let Some(mut findings) = primary_findings(&client, q, &disabled).await {
+        if wiki_on && visual && findings.images.len() < MIN_VISUAL_IMAGES {
             match search_wikipedia(&client, q).await {
                 Ok(wiki) => findings.push_images(wiki.images),
                 Err(e) => debug!("Wikipedia image top-up failed ({e})"),
             }
         }
         return findings.render(q, visual);
+    }
+
+    if !wiki_on {
+        return format!(
+            "[Informasi Pencarian Web]\nPencarian web untuk topik \"{q}\" tidak memberi hasil: mesin pencari yang aktif gagal, sedang dijeda, atau semuanya dimatikan di pengaturan.\n\nℹ️ **Panduan Asisten**: Berikan tanggapan deskriptif dan faktual mengenai topik \"{q}\" berdasarkan pengetahuan internal Anda, dan sampaikan bahwa pencarian web sedang tidak tersedia."
+        );
     }
 
     // Every web engine failed or was cooling down: Wikipedia is the last resort.
@@ -427,8 +473,12 @@ pub async fn execute_web_search(query: &str) -> String {
 /// Results of the first engine that has any, in order of preference: the
 /// keyed APIs, keyless Exa MCP, then DuckDuckGo. Engines in cooldown are
 /// skipped.
-async fn primary_findings(client: &reqwest::Client, q: &str) -> Option<SearchFindings> {
-    if let Some(brave_key) = get_brave_key() {
+async fn primary_findings(
+    client: &reqwest::Client,
+    q: &str,
+    disabled: &[String],
+) -> Option<SearchFindings> {
+    if let Some(brave_key) = get_brave_key().filter(|_| engine_on(disabled, "brave")) {
         debug!("Using Brave Search API");
         match search_brave(client, &brave_key, q).await {
             Ok(findings) if !findings.is_empty() => return Some(findings),
@@ -437,7 +487,7 @@ async fn primary_findings(client: &reqwest::Client, q: &str) -> Option<SearchFin
         }
     }
 
-    if let Some(tavily_key) = get_tavily_key() {
+    if let Some(tavily_key) = get_tavily_key().filter(|_| engine_on(disabled, "tavily")) {
         debug!("Using Tavily API");
         match search_tavily(client, &tavily_key, q).await {
             Ok(findings) if !findings.is_empty() => return Some(findings),
@@ -446,7 +496,7 @@ async fn primary_findings(client: &reqwest::Client, q: &str) -> Option<SearchFin
         }
     }
 
-    if let Some(exa_key) = get_exa_key() {
+    if let Some(exa_key) = get_exa_key().filter(|_| engine_on(disabled, "exa")) {
         debug!("Using Exa API");
         match search_exa_api(client, &exa_key, q).await {
             Ok(findings) if !findings.is_empty() => return Some(findings),
@@ -455,7 +505,9 @@ async fn primary_findings(client: &reqwest::Client, q: &str) -> Option<SearchFin
         }
     }
 
-    if EXA_MCP_COOLDOWN.is_active() {
+    if !engine_on(disabled, "exa_mcp") {
+        debug!("Exa MCP is switched off");
+    } else if EXA_MCP_COOLDOWN.is_active() {
         debug!("Skipping Exa MCP while it cools down after a failure");
     } else {
         debug!("Trying Exa Keyless MCP");
@@ -466,7 +518,9 @@ async fn primary_findings(client: &reqwest::Client, q: &str) -> Option<SearchFin
         }
     }
 
-    if DUCKDUCKGO_COOLDOWN.is_active() {
+    if !engine_on(disabled, "ddg") {
+        debug!("DuckDuckGo is switched off");
+    } else if DUCKDUCKGO_COOLDOWN.is_active() {
         debug!("Skipping DuckDuckGo while it cools down after a failure");
     } else {
         debug!("Using DuckDuckGo");
@@ -1973,6 +2027,17 @@ mod tests {
             compact_text("Caf\u{fffd} near the Colosseum, open daily", 100),
             "Caf\u{fffd} near the Colosseum, open daily"
         );
+    }
+
+    #[test]
+    fn engine_switch_lists_keep_known_ids_only() {
+        assert_eq!(
+            parse_engine_list(" DDG, wiki ,bing,,exa_mcp"),
+            vec!["ddg".to_string(), "wiki".to_string(), "exa_mcp".to_string()]
+        );
+        let disabled = vec!["ddg".to_string()];
+        assert!(!engine_on(&disabled, "ddg"));
+        assert!(engine_on(&disabled, "wiki"));
     }
 
     #[test]

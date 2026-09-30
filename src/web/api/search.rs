@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use axum::extract::Path;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -19,26 +20,45 @@ pub(crate) struct EngineInfo {
     pub id: &'static str,
     pub name: &'static str,
     pub keyed: bool,
-    /// "on", "off" (no key) or "cool" (skipped after a failure).
+    /// The owner's switch.
+    pub enabled: bool,
+    /// Keyless, or its key is set.
+    pub available: bool,
+    /// "on", "off" (switched off or no key) or "cool" (skipped after a failure).
     pub state: &'static str,
     pub cooldown: Option<Duration>,
 }
 
 pub(crate) fn engines() -> Vec<EngineInfo> {
     let (exa_mcp, ddg) = crate::ai::tools::search_cooldowns();
+    let disabled = crate::ai::tools::disabled_search_engines();
+    let enabled = |id: &str| !disabled.iter().any(|current| current == id);
+    let state = |on: bool, cooldown: Option<Duration>| {
+        if !on {
+            "off"
+        } else if cooldown.is_some() {
+            "cool"
+        } else {
+            "on"
+        }
+    };
     let keyed = |id, name, has_key: bool| EngineInfo {
         id,
         name,
         keyed: true,
-        state: if has_key { "on" } else { "off" },
+        enabled: enabled(id),
+        available: has_key,
+        state: state(has_key && enabled(id), None),
         cooldown: None,
     };
     let keyless = |id, name, cooldown: Option<Duration>| EngineInfo {
         id,
         name,
         keyed: false,
-        state: if cooldown.is_some() { "cool" } else { "on" },
-        cooldown,
+        enabled: enabled(id),
+        available: true,
+        state: state(enabled(id), cooldown),
+        cooldown: cooldown.filter(|_| enabled(id)),
     };
     vec![
         keyed(
@@ -67,6 +87,8 @@ pub(crate) async fn state() -> Json<Value> {
                 "id": engine.id,
                 "name": engine.name,
                 "keyed": engine.keyed,
+                "enabled": engine.enabled,
+                "available": engine.available,
                 "state": engine.state,
                 "cooldown_secs": engine.cooldown.map(|left| left.as_secs().max(1)),
             })
@@ -84,8 +106,34 @@ pub(crate) async fn state() -> Json<Value> {
     Json(json!({
         "engines": engines,
         "keys": keys,
-        "env_locks": settings::env_locks(["BRAVE_API_KEY", "TAVILY_API_KEY", "TAVILY_KEY", "EXA_API_KEY", "EXA_KEY"]),
+        "env_locks": settings::env_locks(["BRAVE_API_KEY", "TAVILY_API_KEY", "TAVILY_KEY", "EXA_API_KEY", "EXA_KEY", "XIAO_SEARCH_DISABLED"]),
     }))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct EngineToggleRequest {
+    enabled: bool,
+}
+
+/// PUT /api/search/engines/:id: switches one engine on or off.
+pub(crate) async fn set_engine(
+    Path(id): Path<String>,
+    Json(body): Json<EngineToggleRequest>,
+) -> ApiResult<Value> {
+    if !crate::ai::tools::SEARCH_ENGINE_IDS.contains(&id.as_str()) {
+        return Err(ApiError::not_found());
+    }
+    if settings::env_value("XIAO_SEARCH_DISABLED").is_some() {
+        return Err(ApiError::env_locked("XIAO_SEARCH_DISABLED"));
+    }
+    let value = crate::ai::tools::search_disabled_value(&id, body.enabled);
+    crate::ai::service::save_app_setting("XIAO_SEARCH_DISABLED", &value)
+        .map_err(ApiError::internal)?;
+    tracing::info!(
+        "Search engine {id} switched {} from the WebUI",
+        if body.enabled { "on" } else { "off" }
+    );
+    Ok(ok())
 }
 
 /// POST /api/search/cooldowns/reset

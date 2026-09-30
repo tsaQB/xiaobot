@@ -130,6 +130,7 @@ pub(crate) async fn telegram(State(state): State<Arc<WebState>>) -> Json<Value> 
         "dedicated_chat_ids": settings::effective("DEDICATED_CHAT_IDS"),
         "bot": bot,
         "bot_error": bot_error,
+        "running": state.telegram().is_some(),
         "online": telegram_online(&state),
         "last_poll_secs": crate::bot::daemon::last_poll_age_secs(),
         "poll_timeout": crate::bot::daemon::POLL_TIMEOUT_SECS,
@@ -285,6 +286,10 @@ pub(crate) async fn pair_state(State(state): State<Arc<WebState>>) -> Json<Value
 
 /// POST /api/whatsapp/pair/cancel
 pub(crate) async fn pair_cancel(State(state): State<Arc<WebState>>) -> Json<Value> {
+    // Otherwise the next start would begin pairing again.
+    if !WaController::linked() {
+        save_enabled(None);
+    }
     state.wa.cancel_pair().await;
     ok()
 }

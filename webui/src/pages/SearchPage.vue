@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { api } from '../api/client'
-import type { EngineView, Ok, SearchState, SearchTestRequest, SearchTestResult } from '../api/types'
+import { computed, reactive, ref } from 'vue'
+import { api, seg } from '../api/client'
+import type { EngineId, EngineToggleRequest, EngineView, Ok, SearchState, SearchTestRequest, SearchTestResult } from '../api/types'
 import Badge from '../components/Badge.vue'
 import BusyButton from '../components/BusyButton.vue'
 import EffectBadge from '../components/EffectBadge.vue'
@@ -14,22 +14,52 @@ import Toggle from '../components/Toggle.vue'
 import { useLoad } from '../composables/useLoad'
 import { fmtMs, safeHttpUrl } from '../format'
 import { L } from '../i18n'
-import { toast } from '../stores/ui'
+import { toast, toastError } from '../stores/ui'
 
 const { data, loading, error, reload } = useLoad(() => api.get<SearchState>('/api/search'))
 
-function note(e: EngineView): string {
-  if (e.state === 'cool') {
-    const mins = Math.max(1, Math.ceil((e.cooldown_secs ?? 60) / 60))
-    return L(`jeda ${mins} mnt`, `paused ${mins} min`)
-  }
-  if (e.state === 'off') return L('tanpa kunci', 'no key')
+function pausedMins(e: EngineView): number {
+  return Math.max(1, Math.ceil((e.cooldown_secs ?? 60) / 60))
+}
+
+/* Short state for the chain tooltip. */
+function chainNote(e: EngineView): string {
+  if (e.state === 'cool') return L(`jeda ${pausedMins(e)} mnt`, `paused ${pausedMins(e)} min`)
   if (e.id === 'wiki') return L('cadangan terakhir', 'last fallback')
   return L('siap', 'ready')
 }
 
-const legend = computed(() => (data.value ? data.value.engines.filter((e) => e.state !== 'on' || e.id === 'wiki') : []))
+/* The row note in the engines card. */
+function engineNote(e: EngineView): { text: string; kind: '' | 'warn' | 'ok' } {
+  if (e.keyed && !e.available) return { text: L('Perlu kunci API', 'Needs an API key'), kind: 'warn' }
+  if (e.state === 'cool') return { text: L(`Jeda ${pausedMins(e)} mnt`, `Paused ${pausedMins(e)} min`), kind: 'warn' }
+  if (!enabledOf(e)) return { text: L('Dimatikan', 'Switched off'), kind: '' }
+  return { text: L('Siap', 'Ready'), kind: 'ok' }
+}
+
+/* Only the engines that would be tried, in order. */
+const chain = computed(() => (data.value ? data.value.engines.filter((e) => e.state === 'on' || e.state === 'cool') : []))
 const anyCool = computed(() => !!data.value?.engines.some((e) => e.state === 'cool'))
+
+/* Engine switches apply at once (not through the save bar). */
+const pendingOn = reactive<Partial<Record<EngineId, boolean>>>({})
+const enabledOf = (e: EngineView): boolean => pendingOn[e.id] ?? e.enabled
+
+async function toggleEngine(e: EngineView, on: boolean): Promise<void> {
+  pendingOn[e.id] = on
+  try {
+    const body: EngineToggleRequest = { enabled: on }
+    await api.put<Ok>(`/api/search/engines/${seg(e.id)}`, body)
+    if (!on) toast(L(`${e.name} dimatikan`, `${e.name} switched off`))
+    else if (e.keyed && !e.available) toast(L(`${e.name} dinyalakan, tapi baru dipakai setelah kunci API diisi.`, `${e.name} switched on, but it is only used once its API key is set.`))
+    else toast(L(`${e.name} dinyalakan`, `${e.name} switched on`))
+    await reload(true)
+  } catch (err) {
+    toastError(err)
+  } finally {
+    delete pendingOn[e.id]
+  }
+}
 
 async function resetCooldowns(): Promise<void> {
   await api.post<Ok>('/api/search/cooldowns/reset')
@@ -64,7 +94,7 @@ const images = computed(() => (result.value ? result.value.images.map((u) => saf
 <template>
   <PageHead
     :title="L('Pencarian web', 'Web search')"
-    :text="L('Urutan mesin dipilih otomatis dari kunci yang terisi. Kunci baru langsung dipakai pencarian berikutnya.', 'The engine order follows the keys you have set. A new key is used from the next search on.')"
+    :text="L('Mesin dicoba berurutan sampai ada yang menjawab. Nyalakan atau matikan tiap mesin di bawah; perubahan langsung dipakai pencarian berikutnya.', 'Engines are tried in order until one answers. Switch each engine on or off below; changes apply from the next search on.')"
   />
 
   <LoadState v-if="!data" :loading="loading" :error="error" @retry="reload()" />
@@ -72,19 +102,19 @@ const images = computed(() => (result.value ? result.value.images.map((u) => saf
   <template v-else>
     <SectionTitle :title="L('Rantai mesin saat ini', 'Current engine chain')" />
     <div class="card card-body">
-      <div class="chain">
-        <template v-for="(e, i) in data.engines" :key="e.id">
+      <div v-if="chain.length" class="chain" role="list" :aria-label="L('Urutan mesin yang dicoba', 'Engines tried, in order')">
+        <template v-for="(e, i) in chain" :key="e.id">
           <span v-if="i" class="arr" aria-hidden="true"><Icon name="chev" size="sm" /></span>
-          <span class="eng" :class="{ off: e.state === 'off', cool: e.state === 'cool' }" :title="note(e)">
+          <span class="eng" role="listitem" :class="{ cool: e.state === 'cool' }" :title="chainNote(e)">
             <span class="dot" :class="{ ok: e.state === 'on', warn: e.state === 'cool' }"></span>{{ e.name }}
-            <span class="sr">({{ note(e) }})</span>
+            <span v-if="e.state === 'cool'" class="eng-n">{{ chainNote(e) }}</span>
+            <span v-else class="sr">({{ chainNote(e) }})</span>
           </span>
         </template>
       </div>
-      <div v-if="legend.length" class="legend">
-        <div v-for="e in legend" :key="e.id">
-          <span class="dot" :class="{ warn: e.state === 'cool', ok: e.state === 'on' }"></span>{{ e.name }}<span class="n">{{ note(e) }}</span>
-        </div>
+      <div v-else class="note warn" role="status">
+        <Icon name="alert" size="sm" />
+        <div>{{ L('Tidak ada mesin pencari aktif; web_search tidak akan memberi hasil.', 'No search engine is active; web_search will return nothing.') }}</div>
       </div>
       <div class="help mt12">
         {{ L('Mesin yang baru gagal dilewati sementara: Exa MCP 10 menit setelah 429 (atau sesuai Retry-After) dan 2 menit untuk kegagalan lain; DuckDuckGo 10 menit.', 'An engine that just failed is skipped for a while: Exa MCP for 10 minutes after a 429 (or its Retry-After) and 2 minutes after other failures; DuckDuckGo for 10 minutes.') }}
@@ -94,6 +124,26 @@ const images = computed(() => (result.value ? result.value.images.map((u) => saf
           <Icon name="refresh" size="sm" />{{ L('Akhiri jeda sekarang', 'End the pauses now') }}
         </BusyButton>
       </div>
+    </div>
+
+    <SectionTitle :title="L('Mesin pencari', 'Search engines')"><EffectBadge type="live" /></SectionTitle>
+    <div class="card rows">
+      <div v-for="e in data.engines" :key="e.id" class="row">
+        <span class="row-ic" :class="engineNote(e).kind"><Icon :name="e.keyed ? 'key' : 'globe'" /></span>
+        <div class="grow">
+          <div class="label">{{ e.name }}</div>
+          <div class="hint eng-note"><span class="dot" :class="engineNote(e).kind" aria-hidden="true"></span>{{ engineNote(e).text }}</div>
+        </div>
+        <Toggle
+          :model-value="enabledOf(e)"
+          :disabled="e.id in pendingOn"
+          :label="L(`Pakai ${e.name}`, `Use ${e.name}`)"
+          @update:model-value="(v: boolean) => toggleEngine(e, v)"
+        />
+      </div>
+    </div>
+    <div class="small muted mt8">
+      {{ L('Mesin berkunci yang dinyalakan tanpa kunci dilewati sampai kuncinya diisi di bawah.', 'A keyed engine that is switched on without a key is skipped until its key is set below.') }}
     </div>
 
     <SectionTitle :title="L('Kunci API', 'API keys')"><EffectBadge type="live" /></SectionTitle>

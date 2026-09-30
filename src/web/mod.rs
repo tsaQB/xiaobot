@@ -1,4 +1,4 @@
-//! Xiao Console: the WebUI served by `xiao start`.
+//! Xiao WebUI: the owner's dashboard served by `xiao start`.
 //!
 //! An axum server runs inside the daemon, next to the Telegram poller and
 //! the WhatsApp gateway. It serves the embedded Vue app and a JSON API under
@@ -43,6 +43,18 @@ pub(crate) fn restart_requested() -> bool {
     RESTART_REQUESTED.load(Ordering::SeqCst)
 }
 
+/// Called before the daemon starts again in the same process.
+pub(crate) fn clear_restart_request() {
+    RESTART_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+/// Running as a systemd service, which starts a fresh process (and so a
+/// newly installed binary) after an exit with [`RESTART_EXIT_CODE`]. From a
+/// terminal nobody would, so the daemon restarts in the same process.
+pub(crate) fn under_service_manager() -> bool {
+    std::env::var_os("INVOCATION_ID").is_some()
+}
+
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' blob: https:; connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
 /// The running Telegram side of the daemon, when it started.
@@ -67,6 +79,7 @@ pub(crate) struct WebState {
     pub chat: chat::ChatRuntime,
     telegram: RwLock<Option<TelegramLink>>,
     shutdown: watch::Sender<bool>,
+    server: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl WebState {
@@ -105,6 +118,14 @@ impl WebState {
                 updates,
             });
         }
+        // Telegram now runs with the current token, owner and groups, so
+        // saving them earlier no longer waits for a restart.
+        self.restart.rebaseline(&[
+            "BOT_TOKEN",
+            "OWNER_USER_ID",
+            "ALLOWED_CHAT_IDS",
+            "DEDICATED_CHAT_IDS",
+        ]);
     }
 
     /// Drops the update sender so the Telegram workers can finish.
@@ -118,13 +139,28 @@ impl WebState {
         self.started.elapsed().as_secs()
     }
 
+    /// Waits for the HTTP server to stop (it follows the daemon shutdown),
+    /// so a restart in the same process can bind the address again.
+    pub(crate) async fn stop_server(&self) {
+        let handle = self.server.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(mut handle) = handle {
+            if tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle)
+                .await
+                .is_err()
+            {
+                handle.abort();
+                let _ = handle.await;
+            }
+        }
+    }
+
     /// Restart-only settings saved since startup.
     pub(crate) fn restart_keys(&self) -> Vec<&'static str> {
         self.restart.pending()
     }
 
-    /// Stops the daemon gracefully; `main` then exits with
-    /// [`RESTART_EXIT_CODE`] so the service manager starts it again.
+    /// Stops the daemon gracefully; `main` then starts it again (in the same
+    /// process, or by exiting with [`RESTART_EXIT_CODE`] under systemd).
     pub(crate) fn request_restart(self: &Arc<Self>) {
         RESTART_REQUESTED.store(true, Ordering::SeqCst);
         let state = Arc::clone(self);
@@ -259,7 +295,9 @@ pub(crate) async fn start(
         chat: chat::ChatRuntime::default(),
         telegram: RwLock::new(None),
         shutdown,
+        server: std::sync::Mutex::new(None),
     });
+    state.auth.announce_setup_code();
 
     let app = api::router(Arc::clone(&state))
         .fallback(assets::serve)
@@ -271,7 +309,7 @@ pub(crate) async fn start(
         .layer(axum::middleware::from_fn(security_headers));
 
     let mut stop = shutdown_rx;
-    tokio::spawn(async move {
+    let server = tokio::spawn(async move {
         let server = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -287,13 +325,16 @@ pub(crate) async fn start(
             error!("WebUI server stopped: {err}");
         }
     });
+    if let Ok(mut slot) = state.server.lock() {
+        *slot = Some(server);
+    }
 
     if bind.ip().is_loopback() {
         info!(
-            "Xiao Console: http://{bind} (this machine only; use an SSH tunnel from other devices)"
+            "Xiao WebUI: http://{bind} (this machine only; use an SSH tunnel from other devices)"
         );
     } else {
-        info!("Xiao Console listening on {bind}");
+        info!("Xiao WebUI listening on {bind}");
     }
     if !assets::WEBUI_BUILT {
         warn!(

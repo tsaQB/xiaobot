@@ -6,12 +6,71 @@
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use serde::Serialize;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
+use tracing_subscriber::{reload, EnvFilter, Registry};
+
+/// Lets the WebUI change the log filter while the daemon runs.
+static FILTER_RELOAD: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
+
+/// `RUST_LOG` from the environment, which always decides when set.
+fn rust_log_env() -> Option<String> {
+    std::env::var("RUST_LOG")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// The saved `XIAO_LOG_LEVEL`, `info` when unset or unknown.
+pub(crate) fn configured_log_level() -> String {
+    crate::configured_setting("XIAO_LOG_LEVEL")
+        .map(|level| level.to_ascii_lowercase())
+        .filter(|level| super::settings::LOG_LEVELS.contains(&level.as_str()))
+        .unwrap_or_else(|| "info".to_string())
+}
+
+/// Filter directives for a level. Debug and trace apply to Xiao's own
+/// modules only; the libraries stay at info so the log stays readable.
+pub(crate) fn directives_for_level(level: &str) -> String {
+    match level {
+        "error" => "error".to_string(),
+        "warn" => "warn".to_string(),
+        "debug" => "info,xiao=debug".to_string(),
+        "trace" => "info,xiao=trace".to_string(),
+        _ => "info".to_string(),
+    }
+}
+
+/// Filter at startup: `RUST_LOG`, else `XIAO_LOG_LEVEL`, else info.
+pub(crate) fn startup_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(directives_for_level(&configured_log_level())))
+}
+
+pub(crate) fn install_reload_handle(handle: reload::Handle<EnvFilter, Registry>) {
+    let _ = FILTER_RELOAD.set(handle);
+}
+
+/// Applies a level at once; false while `RUST_LOG` decides.
+pub(crate) fn apply_log_level(level: &str) -> bool {
+    if rust_log_env().is_some() {
+        return false;
+    }
+    FILTER_RELOAD.get().is_some_and(|handle| {
+        handle
+            .reload(EnvFilter::new(directives_for_level(level)))
+            .is_ok()
+    })
+}
+
+/// The filter in use, for display.
+pub(crate) fn active_filter() -> String {
+    rust_log_env().unwrap_or_else(|| directives_for_level(&configured_log_level()))
+}
 
 /// Lines kept in memory.
 pub(crate) const LOG_CAPACITY: usize = 500;
@@ -121,6 +180,16 @@ impl<S: Subscriber> Layer<S> for RingLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn levels_map_to_filters() {
+        assert_eq!(directives_for_level("warn"), "warn");
+        assert_eq!(directives_for_level("debug"), "info,xiao=debug");
+        assert_eq!(directives_for_level("nonsense"), "info");
+        for level in crate::web::settings::LOG_LEVELS {
+            assert!(EnvFilter::try_new(directives_for_level(level)).is_ok());
+        }
+    }
 
     #[test]
     fn ring_keeps_the_newest_lines_in_order() {

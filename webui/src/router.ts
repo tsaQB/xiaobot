@@ -8,6 +8,7 @@ import LogsPage from './pages/LogsPage.vue'
 import McpPage from './pages/McpPage.vue'
 import MemoryPage from './pages/MemoryPage.vue'
 import QueuePage from './pages/QueuePage.vue'
+import QuickstartPage from './pages/QuickstartPage.vue'
 import SearchPage from './pages/SearchPage.vue'
 import SecurityPage from './pages/SecurityPage.vue'
 import SystemPage from './pages/SystemPage.vue'
@@ -20,6 +21,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/home' },
   { path: '/login', name: 'login', component: LoginPage },
   { path: '/home', name: 'home', component: HomePage },
+  { path: '/quickstart', name: 'quickstart', component: QuickstartPage },
   { path: '/chat', name: 'chat', component: ChatPage },
   { path: '/ai', name: 'ai', component: AiPage },
   { path: '/search', name: 'search', component: SearchPage },

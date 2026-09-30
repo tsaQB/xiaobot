@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { api } from '../api/client'
-import type { Ok, PairingView, PairRequest, SettingsRequest, WaPhase, WhatsAppState, WriteResult } from '../api/types'
+import type { Ok, PairingView, PairRequest, SettingsRequest, WhatsAppState, WriteResult } from '../api/types'
 import Badge from '../components/Badge.vue'
 import BusyButton from '../components/BusyButton.vue'
 import ChanSwitch from '../components/ChanSwitch.vue'
@@ -16,15 +16,52 @@ import Seg from '../components/Seg.vue'
 import Toggle from '../components/Toggle.vue'
 import { useForm } from '../composables/useForm'
 import { useInterval, useLoad } from '../composables/useLoad'
+import { now } from '../format'
 import { L, lang, nf } from '../i18n'
+import { clock, waPhaseText as phaseText } from '../lib/status'
 import { confirmAction, isDesk, toast, useSaveBar } from '../stores/ui'
 
-const pairing = ref<PairingView | null>(null)
+/* Pairing: a code (default on phones) or a QR code (default on desktop). */
+type Mode = 'code' | 'qr'
+const mode = ref<Mode>(isDesk() ? 'qr' : 'code')
+const phone = ref('')
+const modeOptions = computed<{ value: Mode; label: string }[]>(() => [
+  { value: 'code', label: L('Kode pairing', 'Pairing code') },
+  { value: 'qr', label: L('Kode QR', 'QR code') },
+])
 
+const pairing = ref<PairingView | null>(null)
+/** Wall-clock time the unfinished pairing stops by itself. */
+const stopsAt = ref<number | null>(null)
+/** False when the daemon started the pairing by itself (or another tab did). */
+const startedHere = ref(false)
+/** Why the last pairing ended without linking; shown above the start buttons. */
+const ended = ref<string | null>(null)
+
+/* An unfinished pairing that ran out of time, or failed with nothing left to show, is over. */
+function isOver(p: PairingView): boolean {
+  if (p.done) return false
+  if (p.stops_in !== null && p.stops_in <= 0) return true
+  return !!p.error && !p.qr && !p.code
+}
+
+function track(p: PairingView): void {
+  pairing.value = p
+  mode.value = p.mode
+  stopsAt.value = p.stops_in === null ? null : Date.now() + p.stops_in * 1000
+}
+
+const poller = useInterval(() => void pollPairing(), 2000)
+
+/* Polled every 10 s so a pairing the daemon starts by itself (or a phase change) shows up. */
 const { data, loading, error, reload } = useLoad(() => api.get<WhatsAppState>('/api/whatsapp'), {
+  pollMs: 10_000,
   onData: (d) => {
-    if (d.pairing && !d.pairing.done) {
-      pairing.value = d.pairing
+    /* The 2 s pairing poll owns an active pairing; this only picks up one we do not know yet. */
+    if (!pairing.value && d.pairing && !d.pairing.done && !isOver(d.pairing)) {
+      ended.value = null
+      startedHere.value = false
+      track(d.pairing)
       poller.start()
     }
   },
@@ -42,18 +79,6 @@ watch(data, (d) => {
 })
 
 const locks = computed(() => data.value?.env_locks ?? {})
-
-function phaseText(p: WaPhase): string {
-  const t: Record<WaPhase, string> = {
-    off: L('Gateway nonaktif', 'Gateway off'),
-    starting: L('Memulai', 'Starting'),
-    pairing: L('Menunggu penautan', 'Waiting to be linked'),
-    online: 'Online',
-    retrying: L('Mencoba ulang', 'Retrying'),
-    logged_out: L('Keluar dari WhatsApp', 'Logged out of WhatsApp'),
-  }
-  return t[p]
-}
 
 async function save(): Promise<void> {
   const was = initial()
@@ -87,36 +112,53 @@ function onOwner(e: Event): void {
   form.owner = digits
 }
 
-/* Pairing: a code (default on phones) or a QR code (default on desktop). */
-type Mode = 'code' | 'qr'
-const mode = ref<Mode>(isDesk() ? 'qr' : 'code')
-const phone = ref('')
-const modeOptions = computed<{ value: Mode; label: string }[]>(() => [
-  { value: 'code', label: L('Kode pairing', 'Pairing code') },
-  { value: 'qr', label: L('Kode QR', 'QR code') },
-])
+/* Any unfinished pairing, whichever mode and whoever started it. */
+const active = computed(() => (pairing.value && !pairing.value.done ? pairing.value : null))
+const stopsLeft = computed(() => (stopsAt.value === null ? null : Math.max(0, (stopsAt.value - now.value) / 1000)))
 
-const poller = useInterval(() => void pollPairing(), 2000)
-const active = computed(() => (pairing.value && !pairing.value.done && pairing.value.mode === mode.value ? pairing.value : null))
+async function finishLinked(): Promise<void> {
+  toast(L('WhatsApp tertaut dan gateway berjalan.', 'WhatsApp is linked and the gateway is running.'))
+  const d = await reload(true)
+  if (d) reset(fromState(d))
+}
+
+/* The pairing stopped without linking: back to the start buttons with the reason. */
+async function endPairing(reason: string | null): Promise<void> {
+  poller.stop()
+  const last = pairing.value
+  pairing.value = null
+  stopsAt.value = null
+  const d = await reload(true)
+  if (d?.linked) {
+    ended.value = null
+    await finishLinked()
+    return
+  }
+  ended.value =
+    reason ??
+    last?.error ??
+    d?.last_error ??
+    L('Penautan berhenti sebelum tertaut. Mulai lagi bila perlu.', 'Linking stopped before it finished. Start again if needed.')
+}
 
 async function pollPairing(): Promise<void> {
+  let p: PairingView | null
   try {
-    const p = await api.get<PairingView | null>('/api/whatsapp/pair')
-    if (!p) {
-      pairing.value = null
-      poller.stop()
-      return
-    }
-    pairing.value = p
-    if (p.done) {
-      poller.stop()
-      pairing.value = null
-      toast(L('WhatsApp tertaut dan gateway berjalan.', 'WhatsApp is linked and the gateway is running.'))
-      const d = await reload(true)
-      if (d) reset(fromState(d))
-    }
+    p = await api.get<PairingView | null>('/api/whatsapp/pair')
   } catch {
-    /* keep polling; a restart or a hiccup should not end the pairing view */
+    return /* keep polling; a restart or a hiccup should not end the pairing view */
+  }
+  if (!pairing.value) return /* cancelled meanwhile */
+  if (!p || isOver(p)) {
+    await endPairing(p?.error ?? null)
+    return
+  }
+  track(p)
+  if (p.done) {
+    poller.stop()
+    pairing.value = null
+    stopsAt.value = null
+    await finishLinked()
   }
 }
 
@@ -130,15 +172,21 @@ async function startPair(m: Mode): Promise<void> {
     }
     body.phone = num
   }
-  pairing.value = await api.post<PairingView>('/api/whatsapp/pair', body)
+  const p = await api.post<PairingView>('/api/whatsapp/pair', body)
+  ended.value = null
+  startedHere.value = true
+  track(p)
   poller.start()
 }
 
 async function cancelPair(): Promise<void> {
   await api.post<Ok>('/api/whatsapp/pair/cancel')
   pairing.value = null
+  stopsAt.value = null
+  ended.value = null
   poller.stop()
   toast(L('Penautan dibatalkan', 'Linking cancelled'))
+  void reload(true)
 }
 
 function unlink(): void {
@@ -180,7 +228,10 @@ function unlink(): void {
               <Badge v-else-if="data.phase === 'retrying'" kind="warn">{{ L('Mencoba ulang', 'Retrying') }}</Badge>
               <Badge v-else>{{ phaseText(data.phase) }}</Badge>
             </template>
-            <template v-else>{{ L('Belum ditautkan', 'Not linked') }}</template>
+            <template v-else>
+              {{ L('Belum ditautkan', 'Not linked') }}
+              <Badge v-if="active || data.phase === 'pairing'" kind="info">{{ L('Menunggu penautan', 'Waiting to be linked') }}</Badge>
+            </template>
           </h4>
           <div class="sub">
             <template v-if="data.phase === 'retrying' && data.last_error">{{ data.last_error }}</template>
@@ -218,86 +269,104 @@ function unlink(): void {
     <template v-else>
       <SectionTitle :title="L('Tautkan', 'Link')" />
       <div class="card card-body">
-        <Seg v-model="mode" :options="modeOptions" :label="L('Cara menautkan', 'How to link')" />
-        <div class="mt16">
-          <template v-if="mode === 'code'">
-            <template v-if="!active">
-              <form class="field mt0" @submit.prevent>
-                <label class="lab" for="wa-num">{{ L('Nomor WhatsApp yang akan ditautkan', 'WhatsApp number to link') }}</label>
-                <div class="inline">
-                  <input id="wa-num" v-model="phone" class="input mono" type="tel" inputmode="numeric" autocomplete="tel" placeholder="628123456789" />
-                  <BusyButton type="submit" class="btn primary" :run="() => startPair('code')" :label="L('Meminta…', 'Requesting…')">
-                    {{ L('Minta kode', 'Get code') }}
-                  </BusyButton>
-                </div>
-                <div class="help">
-                  {{ L('Format internasional tanpa “+”. Nomor ini akan menjadi perangkat tempat Xiao berjalan.', 'International format without “+”. Xiao runs as a linked device of this number.') }}
-                </div>
-              </form>
-            </template>
-            <template v-else>
-              <div class="pair-code" aria-live="polite">{{ active.code ?? '…' }}</div>
-              <ol class="steps small muted mt12">
-                <li>
+        <template v-if="active">
+          <div v-if="!startedHere" class="note mb16">
+            <Icon name="info" size="sm" />
+            <div>{{ L('Penautan ini dimulai oleh daemon, bukan dari halaman ini. Batalkan bila tidak dipakai.', 'The daemon started this linking by itself, not this page. Cancel it if you do not need it.') }}</div>
+          </div>
+
+          <template v-if="active.mode === 'code'">
+            <div class="pair-code" aria-live="polite">{{ active.code ?? '…' }}</div>
+            <ol class="steps small muted mt12">
+              <li>
+                <template v-if="active.phone">
                   <template v-if="lang === 'en'">On the phone with <b>+{{ active.phone }}</b>, open WhatsApp, then <b>Linked devices</b> and <b>Link a device</b>.</template>
                   <template v-else>Di HP dengan nomor <b>+{{ active.phone }}</b>, buka WhatsApp, lalu <b>Perangkat tertaut</b> dan <b>Tautkan perangkat</b>.</template>
-                </li>
-                <li>
-                  <template v-if="lang === 'en'">Choose <b>Link with phone number instead</b>, then enter the code above.</template>
-                  <template v-else>Pilih <b>Tautkan dengan nomor telepon saja</b>, lalu masukkan kode di atas.</template>
-                </li>
-              </ol>
-              <div class="flex wrap small muted mt12">
-                <span class="spin-inline" aria-hidden="true"></span>
-                <span class="grow">{{ L('Menunggu konfirmasi dari WhatsApp…', 'Waiting for WhatsApp to confirm…') }}</span>
-                <BusyButton class="btn sm ghost" :run="cancelPair" :label="L('Membatalkan…', 'Cancelling…')">{{ L('Batal', 'Cancel') }}</BusyButton>
-              </div>
-            </template>
+                </template>
+                <template v-else>
+                  <template v-if="lang === 'en'">On the phone to link, open WhatsApp, then <b>Linked devices</b> and <b>Link a device</b>.</template>
+                  <template v-else>Di HP yang akan ditautkan, buka WhatsApp, lalu <b>Perangkat tertaut</b> dan <b>Tautkan perangkat</b>.</template>
+                </template>
+              </li>
+              <li>
+                <template v-if="lang === 'en'">Choose <b>Link with phone number instead</b>, then enter the code above.</template>
+                <template v-else>Pilih <b>Tautkan dengan nomor telepon saja</b>, lalu masukkan kode di atas.</template>
+              </li>
+            </ol>
           </template>
 
           <template v-else>
-            <template v-if="!active">
-              <BusyButton class="btn primary" :run="() => startPair('qr')" :label="L('Meminta…', 'Requesting…')">
-                <Icon name="qr" size="sm" />{{ L('Tampilkan kode QR', 'Show QR code') }}
-              </BusyButton>
-            </template>
-            <template v-else>
-              <svg
-                v-if="active.qr"
-                class="qr"
-                :viewBox="`-2 -2 ${active.qr.size + 4} ${active.qr.size + 4}`"
-                shape-rendering="crispEdges"
-                role="img"
-                :aria-label="L('Kode QR WhatsApp', 'WhatsApp QR code')"
-              >
-                <path fill="currentColor" :d="active.qr.path" />
-              </svg>
-              <div v-else class="loading sm"><span class="spin-inline" aria-hidden="true"></span>{{ L('Menyiapkan kode QR…', 'Preparing the QR code…') }}</div>
-              <ol class="steps small muted mt12">
-                <li>
-                  <template v-if="lang === 'en'">On your phone, open WhatsApp, then <b>Linked devices</b> and <b>Link a device</b>.</template>
-                  <template v-else>Di HP, buka WhatsApp, lalu <b>Perangkat tertaut</b> dan <b>Tautkan perangkat</b>.</template>
-                </li>
-                <li>{{ L('Pindai kode ini. Kode diganti setiap 20 detik.', 'Scan this code. It changes every 20 seconds.') }}</li>
-              </ol>
-              <div class="note warn mt12">
-                <Icon name="phone" size="sm" />
-                <div>
-                  <template v-if="lang === 'en'">A phone cannot scan a QR code shown on its own screen. On a phone, use the <b>Pairing code</b>.</template>
-                  <template v-else>QR tidak bisa dipindai dari HP yang sedang membuka halaman ini. Di HP, pakai <b>Kode pairing</b>.</template>
-                </div>
+            <svg
+              v-if="active.qr"
+              class="qr"
+              :viewBox="`-2 -2 ${active.qr.size + 4} ${active.qr.size + 4}`"
+              shape-rendering="crispEdges"
+              role="img"
+              :aria-label="L('Kode QR WhatsApp', 'WhatsApp QR code')"
+            >
+              <path fill="currentColor" :d="active.qr.path" />
+            </svg>
+            <div v-else class="loading sm"><span class="spin-inline" aria-hidden="true"></span>{{ L('Menyiapkan kode QR…', 'Preparing the QR code…') }}</div>
+            <ol class="steps small muted mt12">
+              <li>
+                <template v-if="lang === 'en'">On your phone, open WhatsApp, then <b>Linked devices</b> and <b>Link a device</b>.</template>
+                <template v-else>Di HP, buka WhatsApp, lalu <b>Perangkat tertaut</b> dan <b>Tautkan perangkat</b>.</template>
+              </li>
+              <li>{{ L('Pindai kode ini. Kode diganti setiap 20 detik.', 'Scan this code. It changes every 20 seconds.') }}</li>
+            </ol>
+            <div class="note warn mt12">
+              <Icon name="phone" size="sm" />
+              <div>
+                <template v-if="lang === 'en'">A phone cannot scan a QR code shown on its own screen. On a phone, cancel and use the <b>Pairing code</b>.</template>
+                <template v-else>QR tidak bisa dipindai dari HP yang sedang membuka halaman ini. Di HP, batalkan lalu pakai <b>Kode pairing</b>.</template>
               </div>
-              <div class="actions mt12">
-                <BusyButton class="btn sm ghost" :run="cancelPair" :label="L('Membatalkan…', 'Cancelling…')">{{ L('Batal', 'Cancel') }}</BusyButton>
-              </div>
-            </template>
+            </div>
           </template>
 
-          <div v-if="pairing?.error" class="note err mt12"><Icon name="alert" size="sm" /><div>{{ pairing.error }}</div></div>
-        </div>
+          <div v-if="active.error" class="note err mt12" role="alert"><Icon name="alert" size="sm" /><div>{{ active.error }}</div></div>
+
+          <div class="pair-wait mt12">
+            <span class="spin-inline" aria-hidden="true"></span>
+            <span class="grow">
+              {{ L('Menunggu konfirmasi dari WhatsApp…', 'Waiting for WhatsApp to confirm…') }}
+              <span v-if="stopsLeft !== null" class="faint nowrap">
+                {{ L(`Berhenti otomatis dalam ${clock(stopsLeft)}`, `Stops by itself in ${clock(stopsLeft)}`) }}
+              </span>
+            </span>
+            <BusyButton class="btn sm" :run="cancelPair" :label="L('Membatalkan…', 'Cancelling…')">
+              <Icon name="x" size="sm" />{{ L('Batal', 'Cancel') }}
+            </BusyButton>
+          </div>
+        </template>
+
+        <template v-else>
+          <div v-if="ended" class="note err mb16" role="alert">
+            <Icon name="alert" size="sm" />
+            <div><b>{{ L('Penautan berhenti.', 'Linking stopped.') }}</b> {{ ended }}</div>
+          </div>
+          <Seg v-model="mode" :options="modeOptions" :label="L('Cara menautkan', 'How to link')" />
+          <div class="mt16">
+            <form v-if="mode === 'code'" class="field mt0" @submit.prevent>
+              <label class="lab" for="wa-num">{{ L('Nomor WhatsApp yang akan ditautkan', 'WhatsApp number to link') }}</label>
+              <div class="inline">
+                <input id="wa-num" v-model="phone" class="input mono" type="tel" inputmode="numeric" autocomplete="tel" placeholder="628123456789" />
+                <BusyButton type="submit" class="btn primary" :run="() => startPair('code')" :label="L('Meminta…', 'Requesting…')">
+                  {{ L('Minta kode', 'Get code') }}
+                </BusyButton>
+              </div>
+              <div class="help">
+                {{ L('Format internasional tanpa “+”. Nomor ini akan menjadi perangkat tempat Xiao berjalan.', 'International format without “+”. Xiao runs as a linked device of this number.') }}
+              </div>
+            </form>
+            <BusyButton v-else class="btn primary" :run="() => startPair('qr')" :label="L('Meminta…', 'Requesting…')">
+              <Icon name="qr" size="sm" />{{ L('Tampilkan kode QR', 'Show QR code') }}
+            </BusyButton>
+          </div>
+        </template>
+
         <div class="help mt12">
           <Rich
-            :text="L('Penautan berjalan di dalam daemon, jadi layanan tidak perlu dihentikan (berbeda dengan `xiao gateway wa pair`).', 'Linking runs inside the daemon, so the service keeps running (unlike `xiao gateway wa pair`).')"
+            :text="L('Penautan berjalan di dalam daemon, jadi layanan tidak perlu dihentikan (berbeda dengan `xiao gateway wa pair`). Penautan yang belum selesai berhenti sendiri setelah 3 menit.', 'Linking runs inside the daemon, so the service keeps running (unlike `xiao gateway wa pair`). An unfinished linking stops by itself after 3 minutes.')"
           />
         </div>
       </div>

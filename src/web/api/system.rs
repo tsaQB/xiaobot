@@ -105,17 +105,15 @@ async fn settings_rows(state: &WebState) -> Vec<Value> {
             .unwrap_or_default(),
         Effect::Live,
     ));
-    let rust_log = std::env::var("RUST_LOG")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
+    let rust_log = settings::env_value("RUST_LOG");
     rows.push(row(
         "RUST_LOG",
         if rust_log.is_some() {
             ValueSource::Environment
         } else {
-            ValueSource::Default
+            ValueSource::None
         },
-        rust_log.unwrap_or_else(|| "info".to_string()),
+        rust_log.unwrap_or_default(),
         Effect::Readonly,
     ));
     rows.push(row(
@@ -143,7 +141,8 @@ pub(crate) async fn state(State(state): State<Arc<WebState>>) -> Json<Value> {
         "db_bytes": database_size(),
         "attachments_bytes": attachments_size().await,
         "service": service_label(),
-        "rust_log": std::env::var("RUST_LOG").ok().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "info".to_string()),
+        "rust_log": crate::web::logs::active_filter(),
+        "log_level": crate::web::logs::configured_log_level(),
     });
     if let (Some(target), Some(fields)) = (system.as_object_mut(), extra.as_object()) {
         target.extend(fields.clone());
@@ -178,6 +177,9 @@ pub(crate) async fn update_settings(
         if settings::env_value(key).is_some() {
             return Err(ApiError::env_locked(key));
         }
+        if key == "XIAO_LOG_LEVEL" && settings::env_value("RUST_LOG").is_some() {
+            return Err(ApiError::env_locked("RUST_LOG"));
+        }
         changes.push((spec, settings::normalize(key, raw)?));
     }
     let turns_off_code_login = changes
@@ -193,6 +195,9 @@ pub(crate) async fn update_settings(
     for (spec, value) in &changes {
         crate::ai::service::save_app_setting(spec.key, value).map_err(ApiError::internal)?;
         gateway |= spec.effect == Effect::Gateway;
+        if spec.key == "XIAO_LOG_LEVEL" {
+            crate::web::logs::apply_log_level(value);
+        }
     }
     let keys: Vec<&str> = changes.iter().map(|(spec, _)| spec.key).collect();
     tracing::info!("Settings changed from the WebUI: {}", keys.join(", "));
@@ -381,6 +386,6 @@ pub(crate) async fn logs(Query(query): Query<LogsQuery>) -> Json<Value> {
     Json(json!({
         "lines": lines,
         "last": last,
-        "filter": std::env::var("RUST_LOG").ok().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "info".to_string()),
+        "filter": crate::web::logs::active_filter(),
     }))
 }

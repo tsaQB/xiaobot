@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ChatSessionView } from '../api/types'
+import Brandmark from '../components/Brandmark.vue'
 import BusyButton from '../components/BusyButton.vue'
 import ChatComposer from '../components/chat/ChatComposer.vue'
 import ChatMessage from '../components/chat/ChatMessage.vue'
@@ -32,6 +33,25 @@ const composer = ref<InstanceType<typeof ChatComposer> | null>(null)
 
 onMounted(attach)
 onBeforeUnmount(detach)
+
+/* Desktop: the session list column can be folded away; the choice is remembered per browser. */
+const SIDE_KEY = 'xiao-chat-sessions'
+function savedSideOpen(): boolean {
+  try {
+    return localStorage.getItem(SIDE_KEY) !== 'collapsed'
+  } catch {
+    return true
+  }
+}
+const sideOpen = ref(savedSideOpen())
+function toggleSide(): void {
+  sideOpen.value = !sideOpen.value
+  try {
+    localStorage.setItem(SIDE_KEY, sideOpen.value ? 'open' : 'collapsed')
+  } catch {
+    /* storage may be blocked */
+  }
+}
 
 const active = computed<ChatSessionView | null>(() => chat.sessions.find((s) => s.id === chat.activeId) ?? null)
 const u = computed(() => (chat.activeId === null ? null : sessionUi(chat.activeId)))
@@ -144,8 +164,8 @@ function askDelete(): void {
   <h2 class="sr">Chat</h2>
   <LoadState v-if="!chat.loaded" :loading="chat.loading || !chat.error" :error="chat.error" @retry="loadSessions()" />
 
-  <div v-else class="chat">
-    <aside class="chat-side" :aria-label="L('Sesi chat', 'Chat sessions')">
+  <div v-else class="chat" :class="{ 'side-closed': !sideOpen }">
+    <aside id="chat-sessions" class="chat-side" :aria-label="L('Sesi chat', 'Chat sessions')">
       <div class="chat-side-head">
         <h3>{{ L('Sesi', 'Sessions') }}</h3>
         <BusyButton class="btn sm" :run="makeNew" :label="L('Membuat…', 'Creating…')"><Icon name="plus" size="sm" />{{ L('Baru', 'New') }}</BusyButton>
@@ -185,12 +205,33 @@ function askDelete(): void {
 
     <section class="chat-main" :aria-label="active?.name ?? 'Chat'">
       <div class="chat-head">
+        <button
+          type="button"
+          class="iconbtn side-toggle"
+          aria-controls="chat-sessions"
+          :aria-expanded="sideOpen"
+          :title="sideOpen ? L('Sembunyikan daftar sesi', 'Hide the session list') : L('Tampilkan daftar sesi', 'Show the session list')"
+          :aria-label="L('Daftar sesi', 'Session list')"
+          @click="toggleSide"
+        >
+          <Icon name="panel" />
+        </button>
         <div class="grow">
           <h3>{{ active?.name ?? '…' }}</h3>
           <div class="sub">
             {{ nf(count) }} {{ L('pesan', 'messages') }}, model <span class="mono">{{ chat.model ?? L('belum dipilih', 'not chosen') }}</span>
           </div>
         </div>
+        <BusyButton
+          v-if="!sideOpen"
+          class="iconbtn"
+          :run="makeNew"
+          label=""
+          :title="L('Sesi baru', 'New session')"
+          :aria-label="L('Sesi baru', 'New session')"
+        >
+          <Icon name="plus" />
+        </BusyButton>
         <button type="button" class="iconbtn" :title="L('Menu sesi', 'Session menu')" :aria-label="L('Menu sesi', 'Session menu')" @click="menu.show()">
           <Icon name="dots" />
         </button>
@@ -204,7 +245,7 @@ function askDelete(): void {
           @retry="chat.activeId !== null && loadMessages(chat.activeId)"
         />
         <div v-else-if="!messages.length" class="chat-empty">
-          <div class="brandmark" aria-hidden="true">小</div>
+          <Brandmark />
           <b>{{ L('Sesi ini masih kosong', 'This session is empty') }}</b>
           <p>
             <Rich

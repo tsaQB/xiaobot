@@ -57,6 +57,15 @@ pub(crate) async fn overview(State(state): State<Arc<WebState>>) -> Json<Value> 
         .find(|engine| engine.state == "on")
         .map(|engine| engine.name);
     let stats = store::storage_stats_async(owner).await;
+    let activity = store::activity_async(7).await;
+    let search_key = crate::ai::tools::get_brave_key().is_some()
+        || crate::ai::tools::get_tavily_key().is_some()
+        || crate::ai::tools::get_exa_key().is_some();
+    let telegram_configured = crate::web::auth::telegram_configured();
+    let password = crate::web::auth::password_is_set();
+    let complete = !providers.is_empty()
+        && (telegram_configured || linked)
+        && (password || crate::web::auth::telegram_login_available());
     let telegram_queue = store::queue_counts_async(Inbox::Telegram).await;
     let whatsapp_queue = store::queue_counts_async(Inbox::WhatsApp).await;
     let failed = telegram_queue.failed + whatsapp_queue.failed;
@@ -102,8 +111,19 @@ pub(crate) async fn overview(State(state): State<Arc<WebState>>) -> Json<Value> 
 
     Json(json!({
         "system": system_summary(&state),
+        "setup": {
+            "provider": !providers.is_empty(),
+            "telegram": telegram_configured,
+            "telegram_running": telegram_link.is_some(),
+            "password": password,
+            "whatsapp": linked,
+            "search_key": search_key,
+            "complete": complete,
+        },
+        "activity": activity,
         "telegram": {
-            "configured": crate::web::auth::telegram_configured(),
+            "configured": telegram_configured,
+            "running": telegram_link.is_some(),
             "online": online,
             "username": state.bot_username(),
             "owner_id": crate::get_configured_owner_id().map(|id| id.to_string()),
